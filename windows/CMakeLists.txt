@@ -15,4 +15,12 @@ endif()
 
 add_subdirectory(common)
 add_subdirectory(host)
-add_subdirectory(vcam)
+
+# vcam/ is intentionally NOT a CMake target: it's forked from VCamSample
+# (MIT), which builds via its own MSBuild project (PhoneCamVCam.vcxproj +
+# packages.config, for the WIL/CppWinRT NuGet packages CMake doesn't
+# naturally consume). It's process-isolated from phonecam-host, talking only
+# through the SharedFrameRing contract in common/shm, so the two build
+# systems never need to interoperate. Build it via:
+#   msbuild windows\vcam\PhoneCamVCam.vcxproj /p:Configuration=Release /p:Platform=x64
+# See docs/build.md.

@@ -19,6 +19,10 @@ CMakeCache.txt
 cmake_install.cmake
 CTestTestfile.cmake
 *.sln.docstates
+*.vcxproj.user
+windows/packages/
+windows/vcam/x64/
+windows/vcam/packages/
 
 # --- Android / Gradle / Kotlin ---
 android/.gradle/
