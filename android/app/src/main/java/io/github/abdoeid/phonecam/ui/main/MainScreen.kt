@@ -1,55 +1,67 @@
 package io.github.abdoeid.phonecam.ui.main
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
-import io.github.abdoeid.phonecam.data.DefaultDataRepository
-import io.github.abdoeid.phonecam.theme.PhoneCamTheme
 
 @Composable
-fun MainScreen(
-  onItemClick: (NavKey) -> Unit,
-  modifier: Modifier = Modifier,
-  viewModel: MainScreenViewModel = viewModel { MainScreenViewModel(DefaultDataRepository()) },
-) {
+fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, viewModel: MainScreenViewModel = viewModel()) {
   val state by viewModel.uiState.collectAsStateWithLifecycle()
-  when (state) {
-    MainScreenUiState.Loading -> {
-      // Blank
+  val context = LocalContext.current
+  var hasCameraPermission by remember {
+    mutableStateOf(
+      ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    )
+  }
+  val permissionLauncher =
+    rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted -> hasCameraPermission = granted }
+
+  Column(
+    modifier = modifier.fillMaxSize().padding(16.dp),
+    verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
+    horizontalAlignment = Alignment.CenterHorizontally,
+  ) {
+    Text("PhoneCam")
+
+    if (!hasCameraPermission) {
+      Text("Camera permission is required.")
+      Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) { Text("Grant permission") }
+      return@Column
     }
-    is MainScreenUiState.Success -> {
-      MainScreen(data = (state as MainScreenUiState.Success).data, modifier = modifier)
-    }
-    is MainScreenUiState.Error -> {
-      Text("Error loading data: ${(state as MainScreenUiState.Error).throwable.message}")
+
+    when (val s = state) {
+      CaptureUiState.Idle -> Button(onClick = { viewModel.startCapture() }) { Text("Start capture") }
+      is CaptureUiState.Recording -> {
+        Text("Recording...")
+        Text("Frames encoded: ${s.framesEncoded}")
+        Text("Measured fps: ${"%.1f".format(s.measuredFps)}")
+        Text("Output: ${s.outputPath}")
+        Button(onClick = { viewModel.stopCapture() }) { Text("Stop") }
+      }
+      is CaptureUiState.Error -> {
+        Text("Error: ${s.message}")
+        Button(onClick = { viewModel.startCapture() }) { Text("Retry") }
+      }
     }
   }
-}
-
-@Composable
-internal fun MainScreen(data: List<String>, modifier: Modifier = Modifier) {
-  Column(modifier) { data.forEach { Greeting(it) } }
-}
-
-@Composable
-fun Greeting(name: String, modifier: Modifier = Modifier) {
-  Text(text = "Hello $name!", modifier = modifier)
-}
-
-@Preview(showBackground = true)
-@Composable
-fun MainScreenPreview() {
-  PhoneCamTheme { MainScreen(listOf("Android")) }
-}
-
-@Preview(showBackground = true, widthDp = 340)
-@Composable
-fun MainScreenPortraitPreview() {
-  PhoneCamTheme { MainScreen(listOf("Android")) }
 }

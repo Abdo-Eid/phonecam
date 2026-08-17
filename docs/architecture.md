@@ -36,7 +36,7 @@ than an OBS-only plugin.
 
 | Component | Build system | Role |
 |---|---|---|
-| `android/` | Gradle (Kotlin) | The installed phone app: capture, encode, transport, control, foreground service. Not yet started (Phase 2). |
+| `android/` | Gradle (Kotlin) | The installed phone app. `capture/CameraCapture.kt` + `encode/H264Encoder.kt` + `capture/CaptureController.kt` are the Phase 2 Camera2→MediaCodec pipeline (auto exposure/focus/WB only — manual controls deferred, see Phase 2 status below). `transport/`, `control/`, `service/` not yet started (Phase 3+). |
 | `windows/common/` | CMake, static lib | Shared code between host and... conceptually vcam too, but see note below. Currently: `log/` (cross-process logging via stderr + `OutputDebugString`) and `shm/SharedFrameRing.h` (the frame-handoff contract). |
 | `windows/host/` | CMake → `phonecam-host.exe` | `vcam_ctl/` calls `MFCreateVirtualCamera`/`Start`/`Remove`. `bridge/TestPatternProducer` is a Phase-1b dev tool standing in for the real H.264-decode bridge that Phase 3 adds. |
 | `windows/vcam/` | **own MSBuild project** (`PhoneCamVCam.sln`/`.vcxproj`), not CMake | Forked from [VCamSample](https://github.com/smourier/VCamSample) (MIT) — see [`NOTICE.md`](../windows/vcam/NOTICE.md). The `IMFMediaSourceEx` COM media source. `FrameGenerator::Generate()` now reads the latest frame from `SharedFrameRing` (NV12→RGB32, blitted via the existing D2D1 render target) instead of the sample's built-in test pattern — everything else (D3D/CPU dual-path handling, NV12/RGB32 output, sample construction) is untouched. |
@@ -67,8 +67,55 @@ Media Foundation and DirectShow paths — are done, with captured evidence:
   the full chain — host write → shared memory → vcam read → NV12→RGB32 →
   D2D1 → MF sample → Frame Server → DirectShow consumer.
 
-Next: Phase 2 (Android capture) and Phase 3 (USB transport, replacing
-`TestPatternProducer` with the real H.264-decode bridge).
+## Status: Phase 2 complete (Camera2 → MediaCodec H.264, on-device proven)
+
+`capture/CameraCapture.kt` (Camera2, `TEMPLATE_RECORD`, `SessionConfiguration`
+API since minSdk 30 > 28) streams straight into `encode/H264Encoder.kt`'s
+`MediaCodec` input `Surface` — zero-copy, no CPU frame ever exists.
+`capture/CaptureController.kt` wires the two together and owns the output
+file. Auto exposure/focus/white-balance only: manual controls (ISO, exposure
+time, manual WB) are **deferred by request** — no need to run a
+`CameraCapabilityProbe` for `MANUAL_SENSOR` presence until that scope is
+picked back up (`docs/control-protocol.md`'s `SetManualExposure` etc. stay
+defined in the schema, just unused for now).
+
+**A real device finding, not a guess:** the initial encoder config (constrained-
+baseline profile via `KEY_PROFILE`, plus the API-29+ `KEY_MAX_B_FRAMES`/
+`KEY_LATENCY` low-latency knobs) made `MediaCodec.configure()` throw
+`CodecException Error 0x80001001` ("unsupported setting") on this phone's
+Snapdragon 665 vendor encoder — confirmed via on-device logcat, not
+speculation. Likely cause: those newer format keys aren't honored by this
+chip's older HAL, or `KEY_PROFILE` needs a paired `KEY_LEVEL` (a known
+Qualcomm quirk). Fix was to strip to a minimal, maximally-portable config
+(mime/size/color-format/bitrate/framerate/i-frame-interval/CBR-mode only) and
+get that working before reintroducing anything else — the encoder's own
+chosen default turned out to be **High profile**, not Baseline. Reintroducing
+the low-latency knobs one at a time, with on-device verification each time,
+is follow-up work whenever that matters (Phase 3 latency budget).
+
+**Verified end-to-end on the real Redmi Note 8**, not just "it builds":
+`.h264` pulled via `adb pull` and validated with `ffprobe`/`ffmpeg -f null -`
+(full decode pass, zero errors) plus an extracted frame confirming real,
+correctly-exposed camera content (not corrupted/garbage data) at both:
+- **720p**: ~28-30fps sustained (climbs from ~15fps as the fixed camera-open
+  + session-configure startup cost amortizes — a measurement artifact of
+  `elapsed-time-since-start`, not a real throughput ramp).
+- **1080p**: 29.7fps sustained (658 frames) — essentially the 30fps target,
+  matching what 720p converges to. 720p is the current UI default (the more
+  thoroughly measured of the two) but both resolutions are proven to work.
+
+**Device-specific testing note:** this MIUI device blocks `adb shell input
+tap` entirely (`SecurityException: Injecting to another application requires
+INJECT_EVENTS permission`) — not just for system permission dialogs.
+UI-driving automation isn't viable here; verification requires the user's
+physical taps, paired with `android screen capture -a` (annotated
+screenshots) and `android layout` for observation. Also: MIUI's own install
+confirmation (separate from Developer Options → USB debugging) requires the
+screen to be unlocked, and can silently report `INSTALL_FAILED_USER_RESTRICTED`
+if the screen is asleep when `android run`/`adb install` fires.
+
+Next: Phase 3 (USB transport — ADB-forward first — replacing
+`TestPatternProducer` with the real H.264-decode bridge from this pipeline).
 
 ## Elevation: why `phonecam-svc` exists
 
