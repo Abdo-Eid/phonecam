@@ -4,6 +4,8 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.view.Surface
+import io.github.abdoeid.phonecam.transport.WireFraming
+import java.io.IOException
 import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -11,9 +13,8 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Hardware H.264 encoder using a MediaCodec input Surface (Camera2 renders directly into it --
  * zero-copy, no CPU frame ever exists). Output is Annex-B (start-code-prefixed NALUs, including
- * CSD/SPS/PPS), matching docs/wire-protocol.md's video framing so this can feed the wire protocol
- * directly once the USB transport (Phase 3) exists. For now it just writes the raw elementary
- * stream to a file for the Phase 2 "on-device .h264 plays back" proof.
+ * CSD/SPS/PPS), written to [out] as wire-framed CONFIG/FRAME packets per docs/wire-protocol.md
+ * (see [WireFraming]) -- [out] is the connected video socket's OutputStream (Phase 3).
  *
  * Constrained-baseline / CBR / no B-frames / low-latency, per docs/architecture.md Phase 2.
  */
@@ -24,6 +25,11 @@ class H264Encoder(width: Int, height: Int, fps: Int, bitrateBps: Int) {
   private var drainThread: Thread? = null
   private val running = AtomicBoolean(false)
   private val frameCount = AtomicInteger(0)
+  private var seq = 0
+
+  // One instance is used for exactly one start()/stop() cycle (CaptureController always
+  // constructs a fresh H264Encoder per capture session), so a single-shot guard is enough.
+  private val stopRequested = AtomicBoolean(false)
 
   val framesEncoded: Int
     get() = frameCount.get()
@@ -48,17 +54,33 @@ class H264Encoder(width: Int, height: Int, fps: Int, bitrateBps: Int) {
     inputSurface = codec.createInputSurface()
   }
 
-  /** Starts the encoder and a background thread draining encoded Annex-B output into [out]. */
-  fun start(out: OutputStream) {
+  /**
+   * Starts the encoder and a background thread draining wire-framed output into [out]. [onWriteError]
+   * fires once (from the drain thread) if a socket write fails -- e.g. the PC host disconnected --
+   * at which point the drain loop stops draining; the caller owns deciding what happens next
+   * (Phase 3 keeps this simple: stop capture, surface an error, no auto-reconnect -- that's Phase 5).
+   */
+  fun start(out: OutputStream, onWriteError: (IOException) -> Unit) {
     codec.start()
     running.set(true)
     drainThread =
-      Thread({ drainLoop(out) }, "H264Encoder-drain").apply { start() }
+      Thread({ drainLoop(out, onWriteError) }, "H264Encoder-drain").apply { start() }
   }
 
   fun stop() {
+    // Idempotent: onWriteError can synchronously re-enter via
+    // CaptureController.stop() -> encoder.stop() while a concurrent caller
+    // (e.g. the user-triggered stop on the main thread) is still in the
+    // middle of its own call to this same method -- only the first caller
+    // should touch codec.
+    if (!stopRequested.compareAndSet(false, true)) return
     running.set(false)
-    drainThread?.join(1000)
+    // Guard against self-join: onWriteError can be invoked synchronously
+    // from within this very thread, and a thread joining itself blocks for
+    // the full timeout for no reason.
+    if (drainThread !== Thread.currentThread()) {
+      drainThread?.join(1000)
+    }
     drainThread = null
     try {
       codec.stop()
@@ -69,7 +91,7 @@ class H264Encoder(width: Int, height: Int, fps: Int, bitrateBps: Int) {
     inputSurface.release()
   }
 
-  private fun drainLoop(out: OutputStream) {
+  private fun drainLoop(out: OutputStream, onWriteError: (IOException) -> Unit) {
     val bufferInfo = MediaCodec.BufferInfo()
     while (running.get()) {
       val index = codec.dequeueOutputBuffer(bufferInfo, DEQUEUE_TIMEOUT_US)
@@ -81,8 +103,33 @@ class H264Encoder(width: Int, height: Int, fps: Int, bitrateBps: Int) {
         buffer.limit(bufferInfo.offset + bufferInfo.size)
         val bytes = ByteArray(bufferInfo.size)
         buffer.get(bytes)
-        out.write(bytes)
-        if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
+
+        val isConfig = bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
+        val isKeyframe = isConfig || (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0)
+        try {
+          WireFraming.writePacket(
+            out,
+            if (isConfig) WireFraming.TYPE_CONFIG else WireFraming.TYPE_FRAME,
+            isKeyframe,
+            seq++,
+            bufferInfo.presentationTimeUs,
+            bytes,
+            0,
+            bytes.size,
+          )
+        } catch (e: IOException) {
+          running.set(false)
+          // Don't touch codec after this: onWriteError can synchronously
+          // chain into CaptureController.stop() -> encoder.stop(), which
+          // releases codec (the self-join guard there correctly recognizes
+          // we're already on this thread and skips joining, but the codec
+          // release still happens before this call returns) -- calling
+          // releaseOutputBuffer afterward would hit an already-released
+          // codec and throw IllegalStateException.
+          onWriteError(e)
+          return
+        }
+        if (!isConfig) {
           frameCount.incrementAndGet()
         }
       }

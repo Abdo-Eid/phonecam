@@ -51,11 +51,14 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
 
     when (val s = state) {
       CaptureUiState.Idle -> Button(onClick = { viewModel.startCapture() }) { Text("Start capture") }
-      is CaptureUiState.Recording -> {
-        Text("Recording...")
+      CaptureUiState.WaitingForConnection -> {
+        Text("Waiting for PC connection...")
+        Button(onClick = { viewModel.stopCapture() }) { Text("Cancel") }
+      }
+      is CaptureUiState.Streaming -> {
+        Text("Streaming to PC...")
         Text("Frames encoded: ${s.framesEncoded}")
         Text("Measured fps: ${"%.1f".format(s.measuredFps)}")
-        Text("Output: ${s.outputPath}")
         Button(onClick = { viewModel.stopCapture() }) { Text("Stop") }
       }
       is CaptureUiState.Error -> {

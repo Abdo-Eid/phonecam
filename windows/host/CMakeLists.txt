@@ -6,8 +6,10 @@ add_executable(phonecam-host
     bridge/TestPatternProducer.cpp
     decode/MFH264Decoder.h
     decode/MFH264Decoder.cpp
+    transport/AdbTransport.h
+    transport/AdbTransport.cpp
 )
 
 target_include_directories(phonecam-host PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(phonecam-host PRIVATE phonecam_common mfplat mfuuid ole32)
+target_link_libraries(phonecam-host PRIVATE phonecam_common mfplat mfuuid ole32 ws2_32)
 target_compile_features(phonecam-host PRIVATE cxx_std_20)

@@ -9,6 +9,7 @@
 #include "bridge/TestPatternProducer.h"
 #include "decode/MFH264Decoder.h"
 #include "log/Log.h"
+#include "transport/AdbTransport.h"
 #include "vcam_ctl/VCamControl.h"
 
 namespace {
@@ -118,6 +119,46 @@ int RunTestDecode(const std::wstring& inputPath, const std::wstring& outputPath)
     return dumped ? 0 : 1;
 }
 
+// Phase 3B proof: adb-forward + wire framing, entirely decoupled from the
+// decoder. Strips the 20-byte header from each received packet and appends
+// the raw Annex-B payload straight to a .h264 file -- if that file plays
+// back correctly (same ffmpeg check used in Phase 2), the framing is
+// byte-correct end to end, independent of whether MFH264Decoder is right.
+// Runs until the phone side disconnects (e.g. the user presses Stop).
+int RunTestTransport(const std::wstring& outputPath) {
+    phonecam::transport::AdbVideoTransport transport;
+    if (!transport.Connect()) {
+        std::fprintf(stderr, "Failed to connect (is capture running on the phone?)\n");
+        return 1;
+    }
+    std::printf("Connected. Streaming to %ls -- stop capture on the phone to end this test.\n", outputPath.c_str());
+    std::fflush(stdout);
+
+    std::ofstream out(outputPath, std::ios::binary);
+    int configCount = 0, frameCount = 0, keyframeCount = 0;
+    size_t totalBytes = 0;
+
+    transport.RunReceiveLoop([&](const phonecam::transport::VideoPacket& pkt) {
+        out.write(reinterpret_cast<const char*>(pkt.payload), static_cast<std::streamsize>(pkt.payloadSize));
+        totalBytes += pkt.payloadSize;
+        if (pkt.type == phonecam::transport::PacketType::Config) {
+            ++configCount;
+        } else {
+            ++frameCount;
+            if (pkt.keyframe) ++keyframeCount;
+        }
+        if ((configCount + frameCount) % 30 == 0) {
+            std::printf("... %d config, %d frames (%d keyframes), %zu bytes\n", configCount, frameCount,
+                        keyframeCount, totalBytes);
+            std::fflush(stdout);
+        }
+    });
+
+    std::printf("Disconnected. Total: %d config, %d frames (%d keyframes), %zu bytes -> %ls\n", configCount,
+                frameCount, keyframeCount, totalBytes, outputPath.c_str());
+    return 0;
+}
+
 }  // namespace
 
 // Phase 1b checkpoint 2: FrameGenerator's built-in test pattern is now
@@ -145,6 +186,18 @@ int wmain(int argc, wchar_t* argv[]) {
             result = RunTestDecode(argv[2], argv[3]);
         } else {
             std::fprintf(stderr, "usage: phonecam-host --test-decode <input.h264> <output.nv12>\n");
+        }
+        MFShutdown();
+        CoUninitialize();
+        return result;
+    }
+
+    if (argc > 1 && std::wstring(argv[1]) == L"--test-transport") {
+        int result = 1;
+        if (argc > 2) {
+            result = RunTestTransport(argv[2]);
+        } else {
+            std::fprintf(stderr, "usage: phonecam-host --test-transport <output.h264>\n");
         }
         MFShutdown();
         CoUninitialize();

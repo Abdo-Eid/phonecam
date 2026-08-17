@@ -170,10 +170,54 @@ MF behaviors empirically rather than guessing:
 `TestPatternProducer` is still what `main.cpp` runs by default; Phase 3B/C
 wire the real transport and swap it for this decoder.
 
-Next: Phase 3B (USB transport — ADB-forward, wire framing — proven
-independently by reassembling a received stream back into a playable
-`.h264`, before touching the decoder) and Phase 3C (integrate transport +
-decoder + ring, replacing `TestPatternProducer`).
+## Status: Phase 3B complete (live USB transport, proven independently of the decoder)
+
+Android: `transport/VideoSocketServer.kt` (`LocalServerSocket` on
+`phonecam_video`) + `transport/WireFraming.kt` (the 20-byte header) replace
+`CaptureController`'s old `FileOutputStream` sink — nothing is written to
+phone storage anymore. Capture only starts once a PC actually connects
+(`accept()` blocks first); the UI shows "Waiting for PC connection..." until
+then. Windows: `transport/AdbTransport.*` runs `adb forward` and connects as
+a TCP client, per `docs/wire-protocol.md`.
+
+Proven with a standalone `--test-transport <out.h264>` CLI mode (parallel to
+`--test-decode`): strips the 20-byte header from each received packet and
+appends the raw payload straight to a file, deliberately not touching
+`MFH264Decoder` — isolates "is the framing byte-correct" from "does the
+decoder work," matching the same one-variable-at-a-time discipline as Phase
+3A. Verified against the real phone over live USB: 1886 frames / 63
+keyframes / 11,869,439 bytes received in real time, reassembled file decodes
+with **zero ffmpeg errors**, frame count matches exactly (1886), and a
+extracted mid-stream frame is correct, uncorrupted camera content.
+
+**Found and fixed a real reentrancy bug, caught by the user hitting it
+live:** tapping Stop crashed the app (`IllegalStateException` at
+`MediaCodec.releaseOutputBuffer`, confirmed via `adb logcat -d -b crash`).
+Root cause: the main thread's `CaptureController.stop()` closes the video
+socket, which makes the encoder drain thread's in-flight `out.write()` throw
+`IOException`; that write-error handler synchronously re-enters
+`CaptureController.stop() -> H264Encoder.stop()` **from the drain thread
+itself**, racing the main thread's own still-in-progress call to the same
+methods — both paths could reach `codec.release()`/`codec.releaseOutputBuffer()`
+on an already-released codec. Fixed by (1) not touching `codec` at all after
+invoking the write-error callback, since that callback can tear the codec
+down synchronously, and (2) making both `CaptureController.stop()` and
+`H264Encoder.stop()` idempotent via an `AtomicBoolean` CAS guard, so a
+reentrant or concurrent second call is a safe no-op regardless of which
+thread wins the race. This is the same class of bug as the self-join guard
+added earlier (a background error callback able to call back into the
+object that's calling it) — worth remembering as a recurring shape any time
+an error callback can trigger teardown of the object invoking it.
+
+**Known cosmetic follow-up, not fixed:** a deliberate Stop can occasionally
+still show a flash of "Error: ..." instead of settling on Idle, because the
+drain thread's write failure fires the error callback independently of the
+main thread's own state update -- doesn't affect the stream or crash, low
+priority.
+
+Next: Phase 3C (integrate transport + decoder + ring, replacing
+`TestPatternProducer` as the host's default pipeline; exit criterion: live
+phone camera visible in all 4 app types over USB).
 
 ## Elevation: why `phonecam-svc` exists
 
