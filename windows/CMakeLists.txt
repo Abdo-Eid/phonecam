@@ -15,6 +15,7 @@ endif()
 
 add_subdirectory(common)
 add_subdirectory(host)
+add_subdirectory(svc)
 
 # vcam/ is intentionally NOT a CMake target: it's forked from VCamSample
 # (MIT), which builds via its own MSBuild project (PhoneCamVCam.vcxproj +

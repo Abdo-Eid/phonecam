@@ -13,6 +13,8 @@ detail see [`wire-protocol.md`](wire-protocol.md) and
 [USB transport]  MVP: ADB-forward socket   →   Phase 7: AOA (no USB-debugging)
                        ▼
 [phonecam-host.exe]  MF H.264 decode → SharedFrameRing (shared memory)
+                       ▲ created by
+[phonecam-svc.exe]  LocalSystem service, owns ring creation only
                        ▼
 [phonecam-vcam.dll]  MFCreateVirtualCamera media source → seen by ALL apps
                        ▲
@@ -21,7 +23,8 @@ detail see [`wire-protocol.md`](wire-protocol.md) and
 
 The phone captures and hardware-encodes video, streams it over USB, and
 `phonecam-host.exe` decodes it and writes NV12 frames into a cross-process
-shared-memory ring. `phonecam-vcam.dll` — a Media Foundation virtual camera
+shared-memory ring (created ahead of time by `phonecam-svc.exe` — see
+"Elevation" below). `phonecam-vcam.dll` — a Media Foundation virtual camera
 media source registered via `MFCreateVirtualCamera` — reads that ring and
 serves frames to whichever app (or Windows service) has it open. Windows'
 Frame Server bridges the same registered source to both Media Foundation
@@ -37,6 +40,7 @@ than an OBS-only plugin.
 | `windows/common/` | CMake, static lib | Shared code between host and... conceptually vcam too, but see note below. Currently: `log/` (cross-process logging via stderr + `OutputDebugString`) and `shm/SharedFrameRing.h` (the frame-handoff contract). |
 | `windows/host/` | CMake → `phonecam-host.exe` | `vcam_ctl/` calls `MFCreateVirtualCamera`/`Start`/`Remove`. `bridge/TestPatternProducer` is a Phase-1b dev tool standing in for the real H.264-decode bridge that Phase 3 adds. |
 | `windows/vcam/` | **own MSBuild project** (`PhoneCamVCam.sln`/`.vcxproj`), not CMake | Forked from [VCamSample](https://github.com/smourier/VCamSample) (MIT) — see [`NOTICE.md`](../windows/vcam/NOTICE.md). The `IMFMediaSourceEx` COM media source. `FrameGenerator::Generate()` now reads the latest frame from `SharedFrameRing` (NV12→RGB32, blitted via the existing D2D1 render target) instead of the sample's built-in test pattern — everything else (D3D/CPU dual-path handling, NV12/RGB32 output, sample construction) is untouched. |
+| `windows/svc/` | CMake → `phonecam-svc.exe` | A LocalSystem Windows Service whose only job is creating and holding open the `SharedFrameRing` — see "Elevation" below for why this exists as its own tiny component rather than living in `phonecam-host`. Supports `--install`/`--uninstall` (SCM API) and `--console` (runs the same logic as a plain process, for dev iteration without installing a real service). |
 | `third_party/reference/VCamSample` | git submodule | Unmodified upstream, kept for comparison. |
 
 **Why `vcam/` isn't a CMake target:** it needs NuGet-distributed WIL and
@@ -66,7 +70,7 @@ Media Foundation and DirectShow paths — are done, with captured evidence:
 Next: Phase 2 (Android capture) and Phase 3 (USB transport, replacing
 `TestPatternProducer` with the real H.264-decode bridge).
 
-## Open design question this phase surfaced: elevation
+## Elevation: why `phonecam-svc` exists
 
 `SharedFrameRing` must live in the `Global\` kernel-object namespace with an
 SDDL granting access to `LocalService`/`LocalSystem` (not just the current
@@ -82,27 +86,48 @@ user doesn't grant those service SIDs access either.
 `CreateFileMappingW` call with our SDDL returns `ERROR_ACCESS_DENIED` (5) from
 a normal (non-elevated) process, even for an administrator account, because
 UAC token-filtering disables that privilege until elevated; the same call
-succeeds (`SeCreateGlobalPrivilege: Enabled`) once elevated. The *read* side
-(`SharedFrameRing::Open()`, used by `phonecam-vcam.dll` wherever it's loaded)
-needs no special privilege — only the *create* side (`OpenOrCreate()`, called
-by `phonecam-host`) does.
+succeeds (`SeCreateGlobalPrivilege: Enabled`) once elevated.
 
-This means **`phonecam-host` cannot create the ring while running as a normal
-(non-elevated) interactive process.** Options, not yet decided:
+**The key follow-up fact that shapes the design: only *creating* the object
+requires the privilege.** Once it exists, a second, non-elevated process
+attaching to the same name — via `OpenFileMapping`, or `CreateFileMapping`
+with an existing name (which returns `ERROR_ALREADY_EXISTS`, not a failure)
+— succeeds under a plain DACL check, no privilege needed. Confirmed
+empirically: an elevated process created and held the mapping open; a
+concurrent non-elevated process opened it successfully both ways
+(`err=0` and `err=183`).
 
-1. **Run `phonecam-host` elevated always.** Simplest, but a real recurring
-   UX cost (a permanent UAC-elevated background app) that competitors
-   (DroidCam, Iriun, Camo) don't impose on their PC apps.
-2. **Move ring ownership into a Windows Service running as LocalSystem**
-   (which has `SeCreateGlobalPrivilege` inherently), with the interactive
-   parts (tray icon, UI, USB transport if it needs user-session access)
-   as a separate unprivileged process talking to the service. This is a
-   natural fit with the Phase 5 "tray app" plan already, not a new direction
-   — but it is more architecture than a single `.exe`.
-3. ~~Narrow the SDDL to avoid needing the privilege~~ — not viable: the whole
-   reason for the broad grant is the Frame Server's cross-session access,
-   which is exactly what triggers the requirement.
+**Resolved: option 2 (Windows Service), implemented.** `phonecam-svc.exe`
+is a tiny LocalSystem service (`windows/svc/`) whose *only* job is calling
+`SharedFrameRing::OpenOrCreate()` on start and holding it open until stopped
+— it has `SeCreateGlobalPrivilege` inherently, so no manual elevation is
+needed at runtime. Everything else stays exactly where it was and exactly as
+unprivileged as before:
 
-**Decision pending** — raise with the user before Phase 3 locks in the host
-process model, since it affects the installer (Phase 5) and how "always
-running" is achieved.
+- `phonecam-host.exe` (`vcam_ctl` + `TestPatternProducer`, soon the real
+  decode bridge) now calls `SharedFrameRing::Open()` instead of
+  `OpenOrCreate()`, and runs as a normal process — `MFCreateVirtualCamera`
+  itself never needed elevation; only ring *creation* did.
+- `phonecam-vcam.dll` is unchanged; it already only ever called `Open()`.
+
+Verified end-to-end with the service installed (`phonecam-svc.exe --install`,
+one-time, elevated) and running, then `phonecam-host.exe` launched as a
+**plain, non-elevated process** — no UAC prompt at runtime — producing the
+identical live-animated captured frame as the earlier elevated-host proof.
+
+This was chosen over running `phonecam-host` elevated always (the simpler
+but recurring-UX-cost alternative) because it matches the Phase 5 "tray app"
+direction already in the roadmap — the elevated piece is a true
+fire-and-forget background service (install once, `SERVICE_AUTO_START`,
+invisible thereafter), while the process the user actually sees and
+interacts with stays a normal app. `windows/svc/CMakeLists.txt`'s
+`--console` mode (run the same ring-owning logic as a plain process) exists
+purely so this doesn't require an install/start/stop cycle on every code
+change during development.
+
+**Still open for Phase 5:** the installer needs to run `phonecam-svc.exe
+--install` (one elevated step, same shape as the existing vcam DLL
+`regsvr32` registration) and `phonecam-host.exe` needs a startup retry/wait
+for the service rather than failing immediately if it races the service on
+boot — both are robustness polish, not architecture, so deferred to Phase 5
+as planned.

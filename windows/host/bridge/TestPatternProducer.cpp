@@ -11,8 +11,12 @@ namespace phonecam::bridge {
 TestPatternProducer::~TestPatternProducer() { Stop(); }
 
 bool TestPatternProducer::Start(uint32_t width, uint32_t height, uint32_t fps) {
-    if (!ring_.OpenOrCreate()) {
-        phonecam::log::Error("TestPatternProducer: failed to create SharedFrameRing");
+    // phonecam-svc (a LocalSystem service) owns ring *creation* -- it needs
+    // SeCreateGlobalPrivilege, which this normal interactive process doesn't
+    // have (see docs/architecture.md). Attaching to an already-existing
+    // ring via Open() is a plain DACL check and needs no elevation.
+    if (!ring_.Open()) {
+        phonecam::log::Error("TestPatternProducer: failed to open SharedFrameRing (is phonecam-svc running?)");
         return false;
     }
     running_ = true;
