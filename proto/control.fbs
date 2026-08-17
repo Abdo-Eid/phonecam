@@ -1,0 +1,106 @@
+// PhoneCam control channel — commands (PC -> phone) and telemetry (phone -> PC).
+// See docs/control-protocol.md for semantics, Camera2 API mapping, and the
+// synchronization discipline (cmd_id/Ack correlation, clamping, debounce, reconcile).
+
+include "wire.fbs";
+
+namespace phonecam.control;
+
+// ---- PC -> phone commands ----
+
+table Start {}
+table Stop {}
+
+table SetResolution { width: uint16; height: uint16; }
+table SetFps { fps: uint16; }
+table SetBitrate { bitrate_bps: uint32; }
+
+table SetLens { camera_id: string; }          // must match a CapabilityDescriptor.lenses[].camera_id
+table SetZoomRatio { ratio: float32; }
+
+// Normalized [0,1] coordinates within the active frame (0,0 = top-left);
+// region_size is the side length of the AF/AE metering rectangle, also
+// normalized to [0,1] of the shorter frame dimension.
+table TapToFocus { nx: float32; ny: float32; region_size: float32; }
+
+table SetFocusMode { mode: phonecam.wire.AfMode; }
+table SetEv { steps: int32; }                              // units of ev_step from CapabilityDescriptor
+table SetManualExposure { iso: int32; exposure_time_ns: int64; }  // implies AE_MODE_OFF; requires has_manual_sensor
+table SetAutoExposure {}                                    // reverts to AE_MODE_ON
+table SetWhiteBalanceMode { mode: phonecam.wire.AwbMode; }
+table SetManualWhiteBalance { temperature_k: uint16; }
+table SetTorch { on: bool; }
+table SetStabilization { on: bool; }
+table RequestKeyframe {}
+
+// ---- phone -> PC status / telemetry ----
+
+enum AckResult : byte { Ok = 0, Unsupported = 1, OutOfRange = 2, Busy = 3, Error = 4 }
+table Ack { result: AckResult; message: string; }
+
+table CurrentSettings {
+  camera_id: string;
+  width: uint16;
+  height: uint16;
+  fps: uint16;
+  bitrate_bps: uint32;
+  zoom_ratio: float32;
+  focus_mode: phonecam.wire.AfMode;
+  ev_steps: int32;
+  manual_exposure: bool;
+  iso: int32;
+  exposure_time_ns: int64;
+  awb_mode: phonecam.wire.AwbMode;
+  white_balance_temperature_k: uint16;
+  torch_on: bool;
+  stabilization_on: bool;
+}
+
+enum ThermalStatus : byte { Nominal = 0, Light = 1, Moderate = 2, Severe = 3, Critical = 4 }
+
+table Stats {
+  encode_fps: float32;
+  bitrate_kbps: uint32;
+  dropped_frames: uint32;
+  thermal_status: ThermalStatus;
+}
+
+enum AfState : byte { Inactive = 0, Scanning = 1, Locked = 2, Failed = 3 }
+enum AeState : byte { Inactive = 0, Scanning = 1, Converged = 2, Locked = 3, FlashRequired = 4 }
+
+table AfStateChanged { state: AfState; }
+table AeStateChanged { state: AeState; }
+table LensChanged { camera_id: string; }
+table OrientationChanged { degrees: uint16; }        // 0/90/180/270, sensor-relative
+table Error { code: uint16; message: string; }
+
+// ---- envelope ----
+
+union ControlPayload {
+  // PC -> phone
+  Start, Stop,
+  SetResolution, SetFps, SetBitrate,
+  SetLens, SetZoomRatio, TapToFocus, SetFocusMode,
+  SetEv, SetManualExposure, SetAutoExposure,
+  SetWhiteBalanceMode, SetManualWhiteBalance,
+  SetTorch, SetStabilization, RequestKeyframe,
+
+  // phone -> PC
+  phonecam.wire.CapabilityDescriptor,
+  Ack, CurrentSettings, Stats,
+  AfStateChanged, AeStateChanged, LensChanged, OrientationChanged, Error,
+}
+
+// Every control-channel message on the wire is one length-prefixed ControlEnvelope
+// (see docs/wire-protocol.md for the length-prefix framing). cmd_id is assigned by
+// the PC for every command it sends (monotonic, non-zero) and echoed back in the
+// matching Ack, so replies can be correlated even if they arrive out of order.
+// cmd_id = 0 marks an unsolicited phone -> PC message (CapabilityDescriptor, Stats,
+// *StateChanged, LensChanged, OrientationChanged, Error) or a spontaneous
+// CurrentSettings push that is not a direct reply to a single command.
+table ControlEnvelope {
+  cmd_id: uint32;
+  payload: ControlPayload;
+}
+
+root_type ControlEnvelope;

@@ -1,0 +1,50 @@
+# --- Windows / C++ / Visual Studio / CMake ---
+build/
+out/
+x64/
+x86/
+Debug/
+Release/
+*.obj
+*.ilk
+*.pdb
+*.idb
+*.exp
+*.lib
+*.dll
+!third_party/**/*.dll
+.vs/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+*.sln.docstates
+
+# --- Android / Gradle / Kotlin ---
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/captures/
+android/.cxx/
+*.apk
+*.aab
+
+# --- Generated protocol code ---
+proto/generated/
+
+# --- Editors / OS ---
+.idea/
+.vscode/
+*.user
+Thumbs.db
+.DS_Store
+
+# --- Secrets / signing ---
+*.keystore
+*.jks
+!debug.keystore
+*.pfx
+*.snk

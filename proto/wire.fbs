@@ -1,0 +1,63 @@
+// PhoneCam wire protocol — shared types: capability descriptor, camera enums/ranges.
+// Included by control.fbs. See docs/wire-protocol.md for the full spec, including
+// the separate fixed 20-byte binary header used for compressed video/audio FRAME
+// packets (NOT FlatBuffers — kept hand-rolled for near-zero per-frame overhead).
+
+namespace phonecam.wire;
+
+enum Channel : ubyte {
+  Video = 0,
+  Control = 1,
+  Audio = 2,        // Phase 8
+}
+
+enum LensFacing : byte { Back = 0, Front = 1, External = 2 }
+
+enum HardwareLevel : byte { Legacy = 0, Limited = 1, Full = 2, Level3 = 3, External = 4 }
+
+enum AfMode : byte { Off = 0, Auto = 1, Continuous = 2, Macro = 3, EdgeCapture = 4 }
+
+enum AwbMode : byte {
+  Off = 0, Auto = 1, Incandescent = 2, Fluorescent = 3,
+  Daylight = 4, CloudyDaylight = 5, Twilight = 6, Shade = 7,
+}
+
+struct Resolution { width: uint16; height: uint16; max_fps: uint16; }
+
+// Inclusive numeric range. step = 0 means continuous (no fixed increment).
+struct Range32 { min: int32; max: int32; step: int32; }
+struct RangeF  { min: float32; max: float32; step: float32; }
+
+table LensCapabilities {
+  camera_id: string;
+  facing: LensFacing;
+  hardware_level: HardwareLevel;
+  has_manual_sensor: bool;              // Camera2 MANUAL_SENSOR capability present
+  resolutions: [Resolution];
+  zoom_ratio_range: RangeF;
+  iso_range: Range32;                   // meaningless if !has_manual_sensor
+  exposure_time_ns_range: Range32;      // meaningless if !has_manual_sensor
+  ev_compensation_range: Range32;       // in units of ev_step
+  ev_step: float32;
+  af_modes: [AfMode];
+  awb_modes: [AwbMode];
+  has_torch: bool;
+  has_optical_stabilization: bool;
+}
+
+table CodecCapabilities {
+  h264: bool;
+  h265: bool;
+  max_bitrate_bps: uint32;
+}
+
+// Sent once by the phone right after the control channel connects, before any
+// other control message. The PC UI is generated from this: a control is only
+// ever shown if it is backed by a matching capability here (plan risk R9).
+table CapabilityDescriptor {
+  protocol_version: uint16;
+  device_model: string;
+  android_release: string;
+  lenses: [LensCapabilities];
+  codecs: CodecCapabilities;
+}
