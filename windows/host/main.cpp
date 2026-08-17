@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "bridge/LiveVideoBridge.h"
 #include "bridge/TestPatternProducer.h"
 #include "decode/MFH264Decoder.h"
 #include "log/Log.h"
@@ -204,12 +205,27 @@ int wmain(int argc, wchar_t* argv[]) {
         return result;
     }
 
+    // --test-pattern: the old Phase 1b synthetic-frame source, kept as an
+    // opt-in dev tool for exercising the PC side (ring/vcam/Frame Server)
+    // without a phone connected. Real usage is the default path below.
+    const bool useTestPattern = argc > 1 && std::wstring(argv[1]) == L"--test-pattern";
+
     phonecam::bridge::TestPatternProducer producer;
-    if (!producer.Start(1280, 960, 30)) {
-        phonecam::log::Error("TestPatternProducer failed to start");
-        MFShutdown();
-        CoUninitialize();
-        return 1;
+    phonecam::bridge::LiveVideoBridge bridge;
+    if (useTestPattern) {
+        if (!producer.Start(1280, 960, 30)) {
+            phonecam::log::Error("TestPatternProducer failed to start");
+            MFShutdown();
+            CoUninitialize();
+            return 1;
+        }
+    } else {
+        if (!bridge.Start()) {
+            phonecam::log::Error("LiveVideoBridge failed to start");
+            MFShutdown();
+            CoUninitialize();
+            return 1;
+        }
     }
 
     phonecam::vcam_ctl::VCamControl vcam;
@@ -226,7 +242,11 @@ int wmain(int argc, wchar_t* argv[]) {
         vcam.Stop();
     }
 
-    producer.Stop();
+    if (useTestPattern) {
+        producer.Stop();
+    } else {
+        bridge.Stop();
+    }
     MFShutdown();
     CoUninitialize();
     return SUCCEEDED(hr) ? 0 : 1;

@@ -1,6 +1,7 @@
 package io.github.abdoeid.phonecam.ui.main
 
 import android.app.Application
+import android.hardware.camera2.CameraCharacteristics
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.abdoeid.phonecam.capture.CaptureController
@@ -33,13 +34,24 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
   // 720p is the default here because it's the more thoroughly measured of
   // the two Phase 2 exit-criterion datapoints (~28-30fps sustained, vs. only
   // a frame count for the 1080p run) -- see docs/architecture.md.
-  fun startCapture(width: Int = 1280, height: Int = 720, fps: Int = 30, bitrateBps: Int = 4_000_000) {
+  //
+  // lensFacing temporarily defaults to FRONT (see also MainScreen's
+  // auto-start) for a one-off Phase 3C sanity check on real (non-floor)
+  // content -- revert to LENS_FACING_BACK once done. Proper PC-driven lens
+  // switching is real Phase 4 scope; this is just today's quick manual override.
+  fun startCapture(
+    width: Int = 1280,
+    height: Int = 720,
+    fps: Int = 30,
+    bitrateBps: Int = 4_000_000,
+    lensFacing: Int = CameraCharacteristics.LENS_FACING_FRONT,
+  ) {
     _uiState.value = CaptureUiState.WaitingForConnection
-    controller.start(width, height, fps, bitrateBps) { error ->
+    controller.start(width, height, fps, bitrateBps, { error ->
       statsJob?.cancel()
       controller.stop()
       _uiState.value = CaptureUiState.Error(error.message ?: error.toString())
-    }
+    }, lensFacing)
     statsJob =
       viewModelScope.launch {
         while (_uiState.value !is CaptureUiState.Error) {

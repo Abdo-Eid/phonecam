@@ -4,6 +4,8 @@ add_executable(phonecam-host
     vcam_ctl/VCamControl.cpp
     bridge/TestPatternProducer.h
     bridge/TestPatternProducer.cpp
+    bridge/LiveVideoBridge.h
+    bridge/LiveVideoBridge.cpp
     decode/MFH264Decoder.h
     decode/MFH264Decoder.cpp
     transport/AdbTransport.h

@@ -23,8 +23,16 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 	// set 1 here to force RGB32 only
 	auto types = wil::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFMediaType>>(2);
 
-#define NUM_IMAGE_COLS 1280 // 640
-#define NUM_IMAGE_ROWS 960 //480
+	// Must match the phone's actual capture resolution (MainScreenViewModel's
+	// default, currently 720p) -- FrameGenerator sizes its D2D1 bitmap to
+	// whatever's really in the ring, but this declared MF_MT_FRAME_SIZE is
+	// what consumers actually negotiate against, so a mismatch here silently
+	// stretches the real content to fit (e.g. the original 1280x960 -- left
+	// over from Phase 1's TestPatternProducer default -- vertically stretched
+	// live 1280x720 phone frames by 1.33x). Static for now: dynamic
+	// resolution (matching PC-driven SetResolution) is Phase 4 scope.
+#define NUM_IMAGE_COLS 1280
+#define NUM_IMAGE_ROWS 720
 
 	wil::com_ptr_nothrow<IMFMediaType> rgbType;
 	RETURN_IF_FAILED(MFCreateMediaType(&rgbType));

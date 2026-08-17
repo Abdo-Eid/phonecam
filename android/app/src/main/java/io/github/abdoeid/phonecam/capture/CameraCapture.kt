@@ -16,7 +16,7 @@ import android.view.Surface
 import java.util.concurrent.Executor
 
 /**
- * Opens the back camera and streams into [targetSurface] (the H264Encoder's input Surface --
+ * Opens a camera and streams into [targetSurface] (the H264Encoder's input Surface --
  * zero-copy, Camera2 renders straight into what the encoder reads). Auto exposure/focus/white
  * balance only: manual controls (ISO, exposure time, manual WB) are deferred, so there's no need
  * here to probe MANUAL_SENSOR capability -- see docs/architecture.md.
@@ -28,14 +28,19 @@ class CameraCapture(private val context: Context) {
   private var device: CameraDevice? = null
   private var session: CameraCaptureSession? = null
 
-  fun start(targetSurface: Surface, fps: Int, onError: (Throwable) -> Unit) {
+  fun start(
+    targetSurface: Surface,
+    fps: Int,
+    onError: (Throwable) -> Unit,
+    lensFacing: Int = CameraCharacteristics.LENS_FACING_BACK,
+  ) {
     val bgThread = HandlerThread("CameraCapture").apply { start() }
     thread = bgThread
     val bgHandler = Handler(bgThread.looper)
     handler = bgHandler
 
-    val cameraId = pickBackCameraId() ?: run {
-      onError(IllegalStateException("No back-facing camera found"))
+    val cameraId = pickCameraId(lensFacing) ?: run {
+      onError(IllegalStateException("No camera found for lensFacing=$lensFacing"))
       return
     }
 
@@ -106,9 +111,8 @@ class CameraCapture(private val context: Context) {
     handler = null
   }
 
-  private fun pickBackCameraId(): String? =
+  private fun pickCameraId(lensFacing: Int): String? =
     cameraManager.cameraIdList.firstOrNull { id ->
-      cameraManager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) ==
-        CameraCharacteristics.LENS_FACING_BACK
+      cameraManager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == lensFacing
     }
 }

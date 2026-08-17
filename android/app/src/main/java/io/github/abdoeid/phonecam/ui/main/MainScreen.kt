@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -23,6 +24,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
+import kotlinx.coroutines.delay
 
 @Composable
 fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, viewModel: MainScreenViewModel = viewModel()) {
@@ -47,6 +49,24 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
       Text("Camera permission is required.")
       Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) { Text("Grant permission") }
       return@Column
+    }
+
+    // TEMPORARY (dev/testing only, Phase 3C): auto-starts capture whenever
+    // Idle (covers first launch, and after a Stop) and auto-retries after a
+    // short delay on Error (covers a PC-side disconnect mid-test) -- so a
+    // rebuild+install+relaunch cycle, or recovering from a PC-side hiccup,
+    // doesn't need a physical tap on this MIUI device (adb input injection
+    // is blocked here -- see docs/architecture.md). Remove this effect
+    // (back to manual Start/Retry-button-only) before Phase 4/release.
+    LaunchedEffect(state) {
+      when (state) {
+        CaptureUiState.Idle -> viewModel.startCapture()
+        is CaptureUiState.Error -> {
+          delay(1500)
+          viewModel.startCapture()
+        }
+        else -> {}
+      }
     }
 
     when (val s = state) {

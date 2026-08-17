@@ -112,6 +112,12 @@ bool AdbVideoTransport::Connect(uint16_t port) {
 
 void AdbVideoTransport::Disconnect() {
     if (impl_->sock != INVALID_SOCKET) {
+        // shutdown() first: this is the documented-safe way to unblock a
+        // concurrent recv() on this socket from another thread (RunReceiveLoop
+        // typically runs on its own thread). closesocket() alone, called
+        // cross-thread while another thread is blocked in recv() on the same
+        // handle, is not reliable on Winsock the way it is on POSIX sockets.
+        shutdown(impl_->sock, SD_BOTH);
         closesocket(impl_->sock);
         impl_->sock = INVALID_SOCKET;
     }

@@ -1,6 +1,7 @@
 package io.github.abdoeid.phonecam.capture
 
 import android.content.Context
+import android.hardware.camera2.CameraCharacteristics
 import android.os.SystemClock
 import io.github.abdoeid.phonecam.encode.H264Encoder
 import io.github.abdoeid.phonecam.transport.VideoSocketServer
@@ -28,14 +29,42 @@ class CaptureController(private val context: Context) {
   var state: CaptureState = CaptureState.IDLE
     private set
 
-  fun start(width: Int, height: Int, fps: Int, bitrateBps: Int, onError: (Throwable) -> Unit) {
+  fun start(
+    width: Int,
+    height: Int,
+    fps: Int,
+    bitrateBps: Int,
+    onError: (Throwable) -> Unit,
+    lensFacing: Int = CameraCharacteristics.LENS_FACING_BACK,
+  ) {
     stopRequested.set(false)
     state = CaptureState.WAITING_FOR_CONNECTION
-    val server = VideoSocketServer()
-    videoServer = server
 
     acceptThread =
       Thread({
+          // Binding also happens on this thread (not eagerly in start() on
+          // the caller's/main thread): a rapid Cancel-then-Start can ask to
+          // rebind the same abstract socket name before the OS finishes
+          // releasing the just-closed previous session's socket, and
+          // VideoSocketServer.open() already retries that briefly -- doing
+          // it here keeps the UI thread from blocking on those retries too.
+          val server = VideoSocketServer()
+          try {
+            server.open()
+          } catch (e: IOException) {
+            if (state != CaptureState.IDLE) {
+              state = CaptureState.IDLE
+              onError(e)
+            }
+            return@Thread
+          }
+          videoServer = server
+          if (state == CaptureState.IDLE) {
+            // stop() raced us during open() -- bail before accept().
+            server.close()
+            return@Thread
+          }
+
           val out =
             try {
               server.accept()
@@ -68,7 +97,7 @@ class CaptureController(private val context: Context) {
           camera = cam
           startTimeMs = SystemClock.elapsedRealtime()
           state = CaptureState.STREAMING
-          cam.start(enc.inputSurface, fps, onError)
+          cam.start(enc.inputSurface, fps, onError, lensFacing)
         }, "VideoServer-accept")
         .apply { start() }
   }

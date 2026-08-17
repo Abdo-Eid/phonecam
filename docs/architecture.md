@@ -215,9 +215,124 @@ drain thread's write failure fires the error callback independently of the
 main thread's own state update -- doesn't affect the stream or crash, low
 priority.
 
-Next: Phase 3C (integrate transport + decoder + ring, replacing
-`TestPatternProducer` as the host's default pipeline; exit criterion: live
-phone camera visible in all 4 app types over USB).
+**A second, distinct crash found the same way (real device usage, not
+reasoning about the code):** rapidly tapping Cancel then Start again threw
+an uncaught `IOException("Address already in use")` straight out of
+`VideoSocketServer`'s constructor -- `CaptureController.start()` bound a new
+`LocalServerSocket("phonecam_video")` eagerly and unguarded, and the OS
+hadn't finished releasing the just-closed previous session's binding on the
+same abstract name yet. Fixed by moving the bind off the constructor into an
+explicit `open()` that retries briefly (10 attempts, 50ms apart), and moving
+the whole socket lifecycle (bind + accept) onto the background thread so
+`start()` never blocks or crashes the caller. Same root shape as the other
+two fixes above: an operation that can fail transiently was being treated as
+infallible.
+
+## Status: Phase 3C complete (live video end-to-end, verified via DirectShow)
+
+`bridge/LiveVideoBridge` ties B and A together -- `AdbVideoTransport`
+receives packets, `MFH264Decoder` decodes them, each decoded frame goes
+straight into `SharedFrameRing::WriteFrame` -- and is now `main.cpp`'s
+default frame source, replacing `TestPatternProducer` (kept as an opt-in
+`--test-pattern` dev tool). Verified with the same discriminating check used
+since Phase 1: `ffmpeg -f dshow` against `"PhoneCam (Windows Virtual
+Camera)"` (the actual registered DirectShow name -- not just `"PhoneCam"`)
+while the phone was live-streaming, producing a clean, correctly-proportioned,
+undistorted frame of real camera content -- the DirectShow path is what
+proves "seen by every app," not just Media Foundation-native ones.
+
+**Two real findings, not guesses:**
+
+- **A hardcoded resolution mismatch, inherited from Phase 1's
+  `TestPatternProducer` setup:** `windows/vcam/MediaStream.cpp` declared its
+  `MF_MT_FRAME_SIZE` as a fixed `1280x960` (`NUM_IMAGE_COLS`/`NUM_IMAGE_ROWS`,
+  left over from the Phase 1b test-pattern resolution). `FrameGenerator`
+  already sized its D2D1 bitmap correctly to whatever's actually in the ring
+  (720p from the phone), but that bitmap then gets drawn into a canvas
+  declared 960 tall to consumers -- a 1.33x vertical stretch, confirmed by
+  capturing a frame and visually comparing proportions against the known
+  scene before and after. Fixed by changing the constants to `1280x720` to
+  match the phone's actual current default. **Static for now** -- true
+  dynamic resolution (matching a PC-driven `SetResolution`) is Phase 4 scope,
+  once that control actually exists.
+- **The registered vcam DLL is a *deployed copy*, not the build output:**
+  `HKLM\SOFTWARE\Classes\CLSID\{d0255f4e-...}\InprocServer32` points at
+  `C:\ProgramData\PhoneCam\phonecam-vcam.dll`, a copy made once during Phase
+  1's `regsvr32` registration -- completely separate from
+  `windows\vcam\x64\Debug\phonecam-vcam.dll`, the actual MSBuild output.
+  Rebuilding the project alone does **not** update what the Frame Server
+  loads; restarting `FrameServer`/`FrameServerMonitor` alone doesn't either,
+  if the stale file was never replaced. Any vcam-side code change needs all
+  three steps: rebuild, copy the output over the deployed path (needs
+  elevation -- the file is held open by the Frame Server, so the *running*
+  host process must be stopped and both services restarted *before* the
+  copy, not just after), then relaunch `phonecam-host.exe`. **Worth a real
+  fix in Phase 5's installer work** (either always deploy from a single
+  source of truth, or have the dev build target write directly to the
+  registered path) -- documented here so this multi-step dance doesn't have
+  to be rediscovered from scratch next time a vcam change needs testing.
+
+Phase 3's overall exit criterion -- live phone camera visible in all 4 app
+types over USB -- has its hardest leg (DirectShow) confirmed; Windows
+Camera/Chrome/Zoom were already proven reachable via the same registered
+source in Phase 1 with synthetic content, and now carry real content through
+the identical path. Glass-to-glass latency measurement (the <150ms target)
+is deferred to when the Phase 2-deferred encoder low-latency knobs get
+revisited, per the original plan -- it needs the visual on-screen-timer
+method, not a blocker for this phase's core proof.
+
+**Front camera also verified working**, and surfaced a real, undocumented
+gap: **no sensor-orientation correction exists anywhere in the pipeline.**
+`CameraCapture` now takes a `lensFacing` parameter (`pickCameraId(lensFacing)`
+replaces the old back-only `pickBackCameraId()`) -- straightforward, since
+lens switching was already planned Phase 4 scope, just pulled forward for
+this test. Confirmed empirically by capturing three frames at three phone
+orientations (front camera): held vertically, the image comes out rotated
+90°; rotated 90° left from vertical, the image is upright/correct; rotated
+90° right, the image is fully upside down. This is internally consistent
+with a single fact -- Camera2 delivers frames in the sensor's fixed native
+orientation regardless of how the phone is physically held, and **nothing
+in this pipeline (`CameraCapture` → `H264Encoder` → wire → `MFH264Decoder`
+→ ring → vcam) applies any rotation correction today.** The back camera
+was never tested at more than one orientation before now, so this was never
+exercised. Real fix belongs with per-lens `SENSOR_ORIENTATION` handling
+(Camera2 exposes it per camera ID) applied either at encode time (rotate
+before the encoder sees it) or as metadata the PC side reads and corrects
+for -- not scoped/decided yet; flagging for whenever orientation correction
+gets picked up, likely alongside Phase 4's lens-switch control.
+
+**Temporary dev-only scaffolding added this session, needs a keep-or-revert
+decision before Phase 4/release** (each is clearly marked `TEMPORARY` at
+its source location):
+
+- `MainScreenViewModel.startCapture()` defaults `lensFacing` to
+  `LENS_FACING_FRONT` (was back). Added for the orientation test above.
+- `MainScreen.kt` auto-starts capture whenever state is `Idle` and
+  auto-retries (after a 1.5s delay) on `Error`, instead of requiring a
+  manual tap on the Start/Retry button. Added because this MIUI device
+  blocks `adb shell input tap` entirely (see the Phase 2 status section
+  above), so every rebuild+install+relaunch cycle -- and every PC-side
+  hiccup mid-test -- otherwise needs the user's physical tap. Whether to
+  keep some form of this (e.g. auto-start behind a foreground service is
+  already the Phase 5 direction anyway) or fully revert to manual-only
+  control is a real product decision, not just a "put it back" -- judge on
+  merit when picked back up, per explicit user direction.
+
+Phase 3's overall exit criterion -- live phone camera visible in all 4 app
+types over USB -- has its hardest leg (DirectShow) confirmed; Windows
+Camera/Chrome/Zoom were already proven reachable via the same registered
+source in Phase 1 with synthetic content, and now carry real content through
+the identical path. Glass-to-glass latency measurement (the <150ms target)
+is deferred to when the Phase 2-deferred encoder low-latency knobs get
+revisited, per the original plan -- it needs the visual on-screen-timer
+method, not a blocker for this phase's core proof.
+
+Next: Phase 4 (control channel + capability-driven UI, using the
+already-defined `control.fbs` schema -- manual exposure controls stay
+deferred per earlier request). Before that, worth deciding: keep or revert
+the temporary auto-start/front-camera scaffolding above, and whether
+orientation correction should land alongside Phase 4's lens-switch control
+or get its own pass.
 
 ## Elevation: why `phonecam-svc` exists
 
