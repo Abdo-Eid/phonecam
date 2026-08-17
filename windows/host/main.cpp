@@ -2,8 +2,12 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <fstream>
+#include <string>
+#include <vector>
 
 #include "bridge/TestPatternProducer.h"
+#include "decode/MFH264Decoder.h"
 #include "log/Log.h"
 #include "vcam_ctl/VCamControl.h"
 
@@ -25,6 +29,95 @@ BOOL WINAPI ConsoleHandler(DWORD /*ctrlType*/) {
     return TRUE;
 }
 
+// Splits a raw Annex-B buffer into per-NALU spans (each beginning at a
+// 00 00 01 start code, running up to the next one or EOF). Dev/test-only
+// (Phase 3A): real usage gets pre-chunked packets over the wire instead.
+std::vector<std::vector<uint8_t>> SplitAnnexBNalus(const std::vector<uint8_t>& bytes) {
+    std::vector<size_t> starts;
+    for (size_t i = 0; i + 2 < bytes.size(); ++i) {
+        if (bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1) {
+            starts.push_back(i);
+        }
+    }
+    std::vector<std::vector<uint8_t>> nalus;
+    for (size_t k = 0; k < starts.size(); ++k) {
+        const size_t begin = starts[k];
+        const size_t end = (k + 1 < starts.size()) ? starts[k + 1] : bytes.size();
+        nalus.emplace_back(bytes.begin() + begin, bytes.begin() + end);
+    }
+    return nalus;
+}
+
+uint8_t NaluType(const std::vector<uint8_t>& nalu) { return nalu.size() < 4 ? 0xFF : (nalu[3] & 0x1F); }
+
+// Phase 3A offline proof: decode a raw .h264 file (same shape as the
+// scratchpad captures already validated with ffmpeg in Phase 2) with zero
+// phone/transport involvement, and dump one decoded frame's packed NV12 so
+// it can be diffed against the known-good ffmpeg-extracted frame. See
+// docs/architecture.md.
+int RunTestDecode(const std::wstring& inputPath, const std::wstring& outputPath) {
+    std::ifstream file(inputPath, std::ios::binary);
+    if (!file) {
+        std::fwprintf(stderr, L"Cannot open input file: %ls\n", inputPath.c_str());
+        return 1;
+    }
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
+    std::printf("Read %zu bytes\n", bytes.size());
+
+    auto nalus = SplitAnnexBNalus(bytes);
+    std::printf("Split into %zu NALUs\n", nalus.size());
+    if (nalus.empty()) {
+        std::fprintf(stderr, "No NALUs found\n");
+        return 1;
+    }
+
+    phonecam::decode::MFH264Decoder decoder;
+    if (!decoder.Initialize()) {
+        std::fprintf(stderr, "Decoder Initialize() failed\n");
+        return 1;
+    }
+
+    int decodedCount = 0;
+    bool dumped = false;
+    auto onFrame = [&](const phonecam::decode::DecodedFrame& f) {
+        decodedCount++;
+        std::printf("Decoded frame %d: %ux%u pts=%llu\n", decodedCount, f.width, f.height,
+                     static_cast<unsigned long long>(f.timestampUs));
+        if (!dumped && decodedCount == 5) {
+            std::ofstream out(outputPath, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(f.nv12), static_cast<std::streamsize>(f.nv12Size));
+            std::wprintf(L"Dumped frame %d (%ux%u, %zu bytes) to %ls\n", decodedCount, f.width, f.height, f.nv12Size,
+                         outputPath.c_str());
+            dumped = true;
+        }
+    };
+
+    // Group leading SPS/PPS (types 7/8) into one CONFIG-style feed, matching
+    // how they'll arrive as one wire-protocol CONFIG packet in Phase 3C.
+    std::vector<uint8_t> config;
+    size_t idx = 0;
+    while (idx < nalus.size()) {
+        const uint8_t t = NaluType(nalus[idx]);
+        if (t != 7 && t != 8) break;
+        config.insert(config.end(), nalus[idx].begin(), nalus[idx].end());
+        ++idx;
+    }
+    if (!config.empty()) {
+        std::printf("Feeding CONFIG (%zu bytes)\n", config.size());
+        decoder.Feed(config.data(), config.size(), 0, onFrame);
+    }
+
+    uint64_t pts = 0;
+    for (; idx < nalus.size(); ++idx) {
+        decoder.Feed(nalus[idx].data(), nalus[idx].size(), pts, onFrame);
+        pts += 33'333;
+    }
+
+    std::printf("Total decoded frames: %d\n", decodedCount);
+    return dumped ? 0 : 1;
+}
+
 }  // namespace
 
 // Phase 1b checkpoint 2: FrameGenerator's built-in test pattern is now
@@ -32,7 +125,7 @@ BOOL WINAPI ConsoleHandler(DWORD /*ctrlType*/) {
 // This host writes a synthetic animated NV12 pattern into that ring via
 // TestPatternProducer, standing in for the real H.264-decode bridge that
 // Phase 3 adds. See docs/architecture.md.
-int main() {
+int wmain(int argc, wchar_t* argv[]) {
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         phonecam::log::Error("CoInitializeEx failed");
@@ -44,6 +137,18 @@ int main() {
         phonecam::log::Error("MFStartup failed");
         CoUninitialize();
         return 1;
+    }
+
+    if (argc > 1 && std::wstring(argv[1]) == L"--test-decode") {
+        int result = 1;
+        if (argc > 3) {
+            result = RunTestDecode(argv[2], argv[3]);
+        } else {
+            std::fprintf(stderr, "usage: phonecam-host --test-decode <input.h264> <output.nv12>\n");
+        }
+        MFShutdown();
+        CoUninitialize();
+        return result;
     }
 
     phonecam::bridge::TestPatternProducer producer;

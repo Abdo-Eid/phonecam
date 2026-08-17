@@ -114,8 +114,66 @@ confirmation (separate from Developer Options → USB debugging) requires the
 screen to be unlocked, and can silently report `INSTALL_FAILED_USER_RESTRICTED`
 if the screen is asleep when `android run`/`adb install` fires.
 
-Next: Phase 3 (USB transport — ADB-forward first — replacing
-`TestPatternProducer` with the real H.264-decode bridge from this pipeline).
+## Status: Phase 3A complete (MF H.264 decode, proven offline)
+
+`windows/host/decode/MFH264Decoder.*` wraps the built-in Windows Media
+Foundation software H.264 decoder MFT (`CLSID_CMSH264DecoderMFT`, the
+synchronous, non-D3D one) and turns Annex-B NALUs into packed NV12 frames
+ready for `SharedFrameRing::WriteFrame`. Proven **fully offline** — no phone,
+no transport — by feeding it the same 720p and 1080p scratchpad `.h264`
+captures already validated in Phase 2, dumping a decoded frame's raw NV12,
+and eyeballing it via `ffmpeg`-converted PNG against the known-good frame
+(`phonecam-host.exe --test-decode <in.h264> <out.nv12>`, a dev-only CLI mode
+added to `main.cpp`). This sequencing — hardest/newest piece first, entirely
+decoupled from the phone — came out of an advisor consult before writing any
+Phase 3 code, specifically to keep iteration fast (seconds, not a phone
+round-trip) while pinning down several genuinely finicky, recall-resistant
+MF behaviors empirically rather than guessing:
+
+- **`ProcessOutput` returns `MF_E_TRANSFORM_TYPE_NOT_SET`, not only
+  `MF_E_TRANSFORM_STREAM_CHANGE`, before an output type has ever been set.**
+  Only reacting to `STREAM_CHANGE` (the commonly-documented case) left the
+  output type forever unnegotiated, which in turn starved `ProcessInput`
+  (its internal queue never drained, so it started returning
+  `MF_E_NOTACCEPTING` on every subsequent feed) — a silent full-pipeline
+  stall with no frames ever decoded. Fix: treat both HRESULTs identically —
+  (re)negotiate the output type and retry.
+- **`MF_MT_FRAME_SIZE` on the negotiated output type is the padded, macroblock-
+  aligned *coded* size, not the true display size** — confirmed directly:
+  1920x1080 input negotiated as `1920x1088` (1088 = next multiple of 16).
+  Trusting it as-is would have overflowed `SharedFrameRing::kMaxFrameBytes`
+  (sized for 1920x1080) and silently dropped every 1080p frame. Fix: read
+  `MF_MT_MINIMUM_DISPLAY_APERTURE` (a `MFVideoArea` blob) off the same media
+  type and prefer its `Area.cx`/`Area.cy` when present — that's the real
+  crop rectangle. 720p never exposed this (1280x720 is already a multiple of
+  16 in both dimensions), which is exactly why 1080p was worth testing
+  separately rather than assuming one resolution generalizes.
+- **The chroma (UV) plane starts after the *coded* (padded) height's worth of
+  luma rows, not the display height's** — true for both the `IMF2DBuffer`
+  path (queried pitch) and the flat-buffer path (implied pitch == width).
+  Getting this wrong doesn't crash or shear; it reads a few rows of luma
+  padding as chroma, which rendered as a thin green band across the top of
+  every 1080p frame — caught by visually diffing the decoded PNG against the
+  known-good Phase 2 frame, not by any error return. Fixed by tracking the
+  coded height separately from the display height and using it specifically
+  for the UV-plane offset calculation.
+- **`IMF2DBuffer` is not implemented at all by this decoder's client-
+  allocated output buffers** (`MFCreateMemoryBuffer`, the path exercised
+  whenever `MFT_OUTPUT_STREAM_PROVIDES_SAMPLES` isn't set, which is the case
+  here) — confirmed empirically (`E_NOINTERFACE` on every single sample, not
+  intermittent). The code tries the 2D path first and falls back to a flat
+  `Lock()` with an implied packed pitch; today that fallback is the only
+  path actually exercised. The 2D attempt stays in because Phase 6's planned
+  D3D11-backed decode path will need it — this is a real future consumer,
+  not speculative dead code.
+
+`TestPatternProducer` is still what `main.cpp` runs by default; Phase 3B/C
+wire the real transport and swap it for this decoder.
+
+Next: Phase 3B (USB transport — ADB-forward, wire framing — proven
+independently by reassembling a received stream back into a playable
+`.h264`, before touching the decoder) and Phase 3C (integrate transport +
+decoder + ring, replacing `TestPatternProducer`).
 
 ## Elevation: why `phonecam-svc` exists
 
