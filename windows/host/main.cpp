@@ -15,6 +15,7 @@
 #include "decode/MFH264Decoder.h"
 #include "log/Log.h"
 #include "transport/AdbTransport.h"
+#include "tray/TrayIcon.h"
 #include "vcam_ctl/VCamControl.h"
 
 namespace {
@@ -23,15 +24,21 @@ namespace {
 constexpr GUID kVCamSourceClsid = {
     0xd0255f4e, 0x4471, 0x47c4, {0x91, 0xfc, 0x0e, 0x74, 0xdc, 0xc9, 0x33, 0x08}};
 
-HANDLE g_stopEvent;
+// Set once, right before TrayIcon::RunMessageLoop() -- ConsoleHandler runs on a separate
+// OS-created thread (per SetConsoleCtrlHandler's contract), so Ctrl+C and the tray's own Exit
+// menu item both have to be able to reach the same TrayIcon instance and fall through the same
+// shutdown path below, not two separate ones. g_stopEvent is the fallback used only if the tray
+// icon itself fails to create (Shell_NotifyIcon isn't expected to fail on a normal desktop, but
+// isn't guaranteed either) -- exactly one of the two is non-null at a time.
+phonecam::tray::TrayIcon* g_tray = nullptr;
+HANDLE g_stopEvent = nullptr;
 
-// Console control handler rather than std::getchar(): works whether the
-// process is run interactively or headless/backgrounded (no stdin/console
-// attached), which is closer to how phonecam-host actually runs once it's a
-// background process, and doesn't silently no-op on EOF the way getchar()
-// does when stdin isn't a real interactive console.
 BOOL WINAPI ConsoleHandler(DWORD /*ctrlType*/) {
-    SetEvent(g_stopEvent);
+    if (g_tray) {
+        g_tray->Close();
+    } else if (g_stopEvent) {
+        SetEvent(g_stopEvent);
+    }
     return TRUE;
 }
 
@@ -243,6 +250,7 @@ int wmain(int argc, wchar_t* argv[]) {
     phonecam::control::ControlChannel controlChannel;
     phonecam::control::ConsoleControlUi controlUi(controlChannel);
     std::atomic<bool> controlRunning{true};
+    std::atomic<bool> controlConnected{false};  // Phase 5: tray-icon status text reads this
     // Backoff applies after every disconnect, not just an outright Connect()
     // failure -- adb forward's local TCP proxy can accept the PC-side
     // connect() immediately and only then discover nothing is listening on
@@ -254,6 +262,7 @@ int wmain(int argc, wchar_t* argv[]) {
     std::thread controlSuperviseThread([&]() {
         while (controlRunning.load()) {
             if (controlChannel.Connect()) {
+                controlConnected.store(true);
                 // Every (re)connect implies the video side may also just have
                 // reconnected onto a fresh encoder session (new SPS/PPS, no
                 // guaranteed keyframe yet) -- ask for one explicitly rather
@@ -261,6 +270,7 @@ int wmain(int argc, wchar_t* argv[]) {
                 controlChannel.SendRequestKeyframe();
                 controlChannel.RunReceiveLoop(
                     [&](const phonecam::control::ControlMessage& msg) { controlUi.OnMessage(msg); });
+                controlConnected.store(false);
                 controlChannel.Disconnect();
                 if (!controlRunning.load()) break;
                 phonecam::log::Info("Control channel disconnected, reconnecting");
@@ -278,10 +288,35 @@ int wmain(int argc, wchar_t* argv[]) {
         std::printf("PhoneCam virtual camera started. Ctrl+C (or close this window) to stop.\n");
         std::fflush(stdout);
 
-        g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        SetConsoleCtrlHandler(ConsoleHandler, TRUE);
-        WaitForSingleObject(g_stopEvent, INFINITE);
-        CloseHandle(g_stopEvent);
+        // Phase 5: a tray icon so phonecam-host.exe can run backgrounded/minimized instead of
+        // requiring a visible console. Status text is a cheap read of atomics/getters already
+        // updated by the bridge and control-channel supervise loops above -- no polling thread of
+        // its own needed, TrayIcon refreshes on its own timer and on menu-open.
+        phonecam::tray::TrayIcon tray;
+        const bool trayCreated = tray.Create([&]() -> std::string {
+            if (useTestPattern) return "test pattern (dev mode)";
+            const bool video = bridge.IsConnected();
+            const bool control = controlConnected.load();
+            if (video && control) return "streaming (video + control)";
+            if (video) return "streaming (video only)";
+            return "waiting for phone...";
+        });
+        if (trayCreated) {
+            g_tray = &tray;
+            SetConsoleCtrlHandler(ConsoleHandler, TRUE);
+            tray.RunMessageLoop();  // returns on Exit (tray menu) or Ctrl+C (ConsoleHandler)
+            g_tray = nullptr;
+        } else {
+            // Fallback if Shell_NotifyIcon itself failed: same plain event-wait Phase 1-4 used,
+            // so Ctrl+C still cleanly shuts everything down even without a tray icon.
+            phonecam::log::Error("TrayIcon: failed to create, falling back to a plain wait (Ctrl+C still works)");
+            HANDLE stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_stopEvent = stopEvent;
+            SetConsoleCtrlHandler(ConsoleHandler, TRUE);
+            WaitForSingleObject(stopEvent, INFINITE);
+            g_stopEvent = nullptr;
+            CloseHandle(stopEvent);
+        }
 
         vcam.Stop();
     }

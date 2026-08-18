@@ -38,6 +38,8 @@ add_executable(phonecam-host
     control/ControlChannel.cpp
     control/ConsoleControlUi.h
     control/ConsoleControlUi.cpp
+    tray/TrayIcon.h
+    tray/TrayIcon.cpp
 )
 
 add_dependencies(phonecam-host phonecam_proto_gen)
@@ -46,5 +48,5 @@ target_include_directories(phonecam-host PRIVATE
     ${PHONECAM_PROTO_GEN_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/flatbuffers/include
 )
-target_link_libraries(phonecam-host PRIVATE phonecam_common mfplat mfuuid ole32 ws2_32)
+target_link_libraries(phonecam-host PRIVATE phonecam_common mfplat mfuuid ole32 ws2_32 shell32)
 target_compile_features(phonecam-host PRIVATE cxx_std_20)

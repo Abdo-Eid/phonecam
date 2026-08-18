@@ -74,12 +74,14 @@ void LiveVideoBridge::Run() {
         if (!transport_.Connect()) {
             phonecam::log::Error("LiveVideoBridge: connect failed, will retry (is capture running on the phone?)");
         } else {
+            connected_.store(true);
             transport_.RunReceiveLoop([this](const phonecam::transport::VideoPacket& pkt) {
                 decoder_.Feed(pkt.payload, pkt.payloadSize, pkt.timestampUs,
                                [this](const phonecam::decode::DecodedFrame& frame) {
                                    ring_.WriteFrame(frame.width, frame.height, frame.timestampUs, frame.nv12);
                                });
             });
+            connected_.store(false);
             transport_.Disconnect();
             if (!running_.load()) break;
             phonecam::log::Info("LiveVideoBridge: receive loop ended, reconnecting");

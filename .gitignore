@@ -23,6 +23,7 @@ CTestTestfile.cmake
 windows/packages/
 windows/vcam/x64/
 windows/vcam/packages/
+windows/installer/Output/
 
 # --- Android / Gradle / Kotlin ---
 android/.gradle/

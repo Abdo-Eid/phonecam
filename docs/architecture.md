@@ -709,9 +709,109 @@ the app) for a similar interval, then back -- still connected. Both are
 exactly Phase 5's original roadmap exit criterion ("survives unplug/replug
 and screen-off").
 
-**Still open for Phase 5:** the installer; the tray app. The known
-host-side reconnect gap (no PC->phone "wake" command if the phone is
+**Still open for Phase 5 (until now):** the installer; the tray app. The
+known host-side reconnect gap (no PC->phone "wake" command if the phone is
 sitting idle) is now slightly more relevant, since a backgrounded/
 screen-off phone that later gets its capture stopped by something outside
 this app's control would hit exactly that gap -- still not decided on
 purpose.
+
+## Status: Phase 5 complete (tray icon + installer), 2026-08-18
+
+Finished the deferred half of Phase 5.
+
+**Tray icon (`windows/host/tray/TrayIcon.*`):** plain Win32
+`Shell_NotifyIcon` + a hidden `HWND_MESSAGE` window -- no GUI framework,
+matching the project's fork-working-samples stance. Deliberately additive,
+not a replacement: `ConsoleControlUi`'s stdin command loop is untouched,
+still running on its own thread exactly as Phase 4 left it; the tray just
+replaces the old `WaitForSingleObject(stopEvent, INFINITE)` wait in
+`main()`'s shutdown path with `TrayIcon::RunMessageLoop()`. Ctrl+C and the
+tray's own "Exit" menu item both funnel into the same `DestroyWindow`->
+`WM_DESTROY`->`PostQuitMessage` teardown, not two separate paths -- see
+`ConsoleHandler` in `main.cpp`. A plain event-wait fallback is kept for the
+(unexpected but not impossible) case `Shell_NotifyIcon` itself fails to
+create. Status text ("streaming (video + control)" / "waiting for
+phone...") is a cheap read of `LiveVideoBridge::IsConnected()` (new getter)
+and a control-channel-connected atomic already maintained by the existing
+reconnect supervise loops -- no new polling thread. Verified live: the
+user captured a screenshot of the tray flyout showing the icon with a
+live, correct "PhoneCam - waiting for phone..." tooltip.
+
+**Installer (`windows/installer/PhoneCam.iss`, built with Inno Setup --
+newly installed via winget as a Phase 0-style prerequisite, now in
+`docs/build.md`):** wires together pieces that already had working
+implementations rather than reimplementing any of them -- `phonecam-svc.exe
+--install`/`--uninstall` (existing, commit `af36ed3`), `regsvr32`
+register/unregister of the vcam DLL, and file placement. Two things had to
+be fixed first for this to be viable at all:
+
+1. **Debug-CRT distribution.** The existing build was Debug-only, which
+   dynamically links a debug CRT (`ucrtbased.dll`, etc.) that end-user
+   machines don't have and Microsoft doesn't intend for distribution.
+   Fixed by adding a Release config with a *static* CRT
+   (`CMAKE_MSVC_RUNTIME_LIBRARY` = `MultiThreaded` for `phonecam-host`/
+   `phonecam-svc`, matching `PhoneCamVCam.vcxproj`'s Release config which
+   was already static) -- confirmed via `dumpbin /dependents` on all three
+   Release binaries that none of them reference `MSVCP140`/`VCRUNTIME140`/
+   `UCRTBASE`, only OS-shipped DLLs. No VC++ redistributable dependency at
+   all, by construction.
+2. **Bundling adb** (the most likely fresh-machine failure mode, per
+   review -- `RunAdbForward` in both transports invokes bare `adb` via
+   `CreateProcessW`, which fails silently-ish, indistinguishable from an
+   unplugged phone, if adb isn't on PATH). Fixed by vendoring `adb.exe` +
+   its two required DLLs into `third_party/platform-tools/` (plain
+   committed files, not a submodule -- this was always the plan's intent,
+   see the repo-structure section above) and installing them next to
+   `phonecam-host.exe`. **No source change was needed for this to work**:
+   `CreateProcessW`'s documented search order already checks the calling
+   process's own directory *before* PATH when `lpApplicationName` is
+   `nullptr` (which is how `RunAdbForward` calls it) -- confirmed live,
+   the installed `phonecam-host.exe` connected to the phone using its
+   bundled `adb.exe` with no PATH changes.
+
+Also caught while wiring the installer: the vcxproj `PostBuildEvent` added
+earlier this session (the vcam-DLL-deployment fix) used `--` inside an XML
+comment, which is invalid XML and made `PhoneCamVCam.vcxproj` fail to load
+in MSBuild entirely -- this had been silently broken since that commit
+because nobody had rebuilt vcam via MSBuild since. Fixed (single hyphen)
+and confirmed the vcxproj loads and builds again.
+
+**What the installer does, matching `PhoneCam.iss`'s own header comment:**
+installs `phonecam-host.exe`/`phonecam-svc.exe`/bundled adb to
+`{app}` (Program Files), the vcam DLL to `C:\ProgramData\PhoneCam`
+(deliberately the *same* path the dev-build `PostBuildEvent` already
+refreshes -- two different "the registered copy" locations is exactly the
+two-copies bug this project already hit once), runs `phonecam-svc.exe
+--install` and `regsvr32` on install, and the inverse plus a
+`C:\ProgramData\PhoneCam` cleanup on uninstall.
+
+**Verified live on this machine (the user ran the installer/uninstaller;
+I verified via `sc query`, `reg query`, and ffmpeg dshow):** install ->
+service `PhoneCamRingService` running, CLSID registered pointing at the
+ProgramData copy, installed `phonecam-host.exe` connects to the phone
+using its bundled adb and streams -> `ffmpeg -f dshow -i "video=PhoneCam
+(Windows Virtual Camera)"` captures real live content (confirmed with the
+phone's camera deliberately covered then uncovered, to rule out a stale
+frame). Uninstall -> service and CLSID registration both cleanly removed,
+`Program Files\PhoneCam` removed; `ProgramData\PhoneCam`'s DLL briefly
+resisted deletion (Frame Server hadn't released it yet -- the same known
+lock behavior documented in `docs/build.md`, not a new bug) but deleted
+fine moments later on its own, and everything else in that directory
+(including unrelated leftover files from much earlier Phase 1 testing)
+was cleaned up correctly by `[UninstallDelete]`.
+
+**Not verified, and not claimed to be:** "clean install on a fresh Windows
+account" -- Phase 5's actual roadmap exit criterion -- since this machine
+isn't one. Everything above is the strongest evidence obtainable without
+one. Also not de-risked: what happens if `phonecam-host.exe` runs on a
+machine where the phone's USB driver situation differs (this project has
+only ever tested against a machine where `adb devices` already worked).
+
+**Phase 5 is now fully complete**: host-side reconnect robustness,
+Android foreground service, tray icon, and installer are all landed and
+verified live to the extent this machine allows. The known host-side
+"phone sitting idle, no PC->phone wake command" gap remains open, along
+with the pre-existing carryover items (sensor-orientation correction,
+`Stats` telemetry, manual exposure controls) -- none of these were Phase 5
+scope.

@@ -12,6 +12,9 @@
   and `third_party/flatbuffers` (the C++/Java FlatBuffers runtime, vendored because `flatc`'s
   installed version is newer than any published `flatbuffers-java` Maven artifact -- see
   `docs/architecture.md`'s Phase 4 section for why)
+- Inno Setup (winget `JRSoftware.InnoSetup`) -- only needed to build the installer
+  (`windows/installer/PhoneCam.iss`), not for day-to-day dev builds. Installs to
+  `%LocalAppData%\Programs\Inno Setup 6\ISCC.exe`, not on PATH by default.
 
 ## Windows: host + common + svc (CMake)
 
@@ -48,6 +51,28 @@ file is locked). So the remaining steps after a rebuild are just:
    `FrameServer` and `FrameServerMonitor` Windows services (elevated) to release it, then rebuild
    again.
 4. Relaunch `phonecam-host.exe`.
+
+## Windows: installer (Inno Setup)
+
+The installer packages **Release** builds (static CRT, no VC++ redistributable dependency -- see
+`docs/architecture.md`'s Phase 5 section), not the Debug builds the commands above produce:
+
+```
+cmake --build D:\work\phonecam\windows\build --target phonecam-host --config Release
+cmake --build D:\work\phonecam\windows\build --target phonecam-svc --config Release
+& "...\MSBuild.exe" D:\work\phonecam\windows\vcam\PhoneCamVCam.sln /p:Configuration=Release /p:Platform=x64
+& "$env:LocalAppData\Programs\Inno Setup 6\ISCC.exe" D:\work\phonecam\windows\installer\PhoneCam.iss
+```
+
+Output: `windows\installer\Output\PhoneCamSetup.exe`. It bundles `adb.exe` (from
+`third_party/platform-tools/`, vendored -- not resolved from PATH), so `phonecam-host.exe` works
+standalone once installed, no PATH setup needed. Installing/uninstalling both require admin (the
+installer requests elevation itself) since they touch `HKLM`, `ProgramData`, and the Windows
+service.
+
+**Verified on this machine, not on a fresh Windows account** (that's the installer's actual
+roadmap exit criterion, and isn't verifiable here) -- see `docs/architecture.md`'s Phase 5
+section for exactly what was and wasn't checked.
 
 ## Android
 

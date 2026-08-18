@@ -30,6 +30,10 @@ public:
     bool Start();
     void Stop();
 
+    // Cheap, thread-safe status snapshot for the tray icon (Phase 5) -- true only while the phone
+    // connection is actually up, not while the supervise loop is retrying.
+    bool IsConnected() const { return connected_.load(); }
+
 private:
     void Run();
     bool WaitBeforeRetry();
@@ -39,6 +43,7 @@ private:
     phonecam::decode::MFH264Decoder decoder_;
     std::thread thread_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> connected_{false};
 };
 
 }  // namespace phonecam::bridge
