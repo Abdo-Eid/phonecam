@@ -30,21 +30,21 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
 
   private var statsJob: Job? = null
 
-  // TODO(Phase 4): resolution/fps become PC-driven via the control channel.
-  // 720p is the default here because it's the more thoroughly measured of
-  // the two Phase 2 exit-criterion datapoints (~28-30fps sustained, vs. only
-  // a frame count for the 1080p run) -- see docs/architecture.md.
+  // TODO(Phase 6+): resolution/fps become PC-driven SetResolution/SetFps commands once the vcam
+  // supports a non-fixed stream size (docs/architecture.md's Phase 4 section explains why that's
+  // out of scope for now). 720p is the default here because it's the more thoroughly measured of
+  // the two Phase 2 exit-criterion datapoints (~28-30fps sustained, vs. only a frame count for the
+  // 1080p run).
   //
-  // lensFacing temporarily defaults to FRONT (see also MainScreen's
-  // auto-start) for a one-off Phase 3C sanity check on real (non-floor)
-  // content -- revert to LENS_FACING_BACK once done. Proper PC-driven lens
-  // switching is real Phase 4 scope; this is just today's quick manual override.
+  // lensFacing back to BACK: Phase 3C had this on FRONT as a temporary sanity-check override: the
+  // real fix -- PC-driven SetLens over the control channel -- now exists and is verified against
+  // the device (see docs/architecture.md's Phase 4 section), so the override is no longer needed.
   fun startCapture(
     width: Int = 1280,
     height: Int = 720,
     fps: Int = 30,
     bitrateBps: Int = 4_000_000,
-    lensFacing: Int = CameraCharacteristics.LENS_FACING_FRONT,
+    lensFacing: Int = CameraCharacteristics.LENS_FACING_BACK,
   ) {
     _uiState.value = CaptureUiState.WaitingForConnection
     controller.start(width, height, fps, bitrateBps, { error ->

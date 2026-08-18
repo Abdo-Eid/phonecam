@@ -3,6 +3,7 @@ package io.github.abdoeid.phonecam.encode
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Bundle
 import android.view.Surface
 import io.github.abdoeid.phonecam.transport.WireFraming
 import java.io.IOException
@@ -65,6 +66,16 @@ class H264Encoder(width: Int, height: Int, fps: Int, bitrateBps: Int) {
     running.set(true)
     drainThread =
       Thread({ drainLoop(out, onWriteError) }, "H264Encoder-drain").apply { start() }
+  }
+
+  // Both are MediaCodec dynamic parameters -- no session/format renegotiation needed, unlike
+  // SetResolution (out of Phase 4 scope, see docs/architecture.md).
+  fun setBitrate(bitrateBps: Int) {
+    codec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrateBps) })
+  }
+
+  fun requestKeyframe() {
+    codec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
   }
 
   fun stop() {

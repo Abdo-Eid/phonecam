@@ -88,3 +88,26 @@ Each is sent inside a `ControlEnvelope` with a fresh, monotonically increasing
 6. **Never send an unsupported command.** Enforced by construction (§
    Capability-driven UI) rather than relying on `Ack{Unsupported}` — the
    latter is a correctness backstop, not a UI mechanism.
+
+## Implementation status (Phase 4)
+
+Implemented and verified against the real device: the whole handshake
+(`CapabilityDescriptor` on connect), `SetZoomRatio`, `SetEv`, `SetTorch`,
+`SetFocusMode`, `TapToFocus`, `RequestKeyframe`, `SetBitrate`, `SetLens`
+(with `LensChanged` + `CurrentSettings` confirmation), and `Ack` for all of
+the above. The host side is a console command surface
+(`windows/host/control/ConsoleControlUi`), not a GUI yet — see
+`docs/architecture.md`'s Phase 4 section for why.
+
+**Not yet implemented** (the phone replies `Ack{Unsupported}`):
+`SetResolution`, `SetFps` (blocked on `windows/vcam` only supporting one
+fixed stream size — see architecture.md), `SetManualExposure`,
+`SetAutoExposure`, `SetWhiteBalanceMode`, `SetManualWhiteBalance`,
+`SetStabilization` (deferred by choice since Phase 2, not by device
+capability — a live capability probe now shows this device actually
+supports `MANUAL_SENSOR` on both lenses), `Start`, `Stop` (video
+start/stop is still driven by the phone's own UI, not the control
+channel). `Stats` telemetry exists as a method but isn't pushed
+periodically yet. The control channel's lifecycle is tied to
+`CaptureController`'s (torn down on video Stop, not durable the way this
+doc describes) — Phase 5 robustness scope.

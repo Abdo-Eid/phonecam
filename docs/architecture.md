@@ -395,3 +395,185 @@ change during development.
 for the service rather than failing immediately if it races the service on
 boot — both are robustness polish, not architecture, so deferred to Phase 5
 as planned.
+
+## Status: Phase 4 complete (control channel, verified against the real device)
+
+Second adb-forwarded channel (`phonecam_control`, port 27184) alongside
+video, framed per `docs/wire-protocol.md` (4-byte LE length prefix +
+FlatBuffers `ControlEnvelope`, `proto/control.fbs`). Phone sends
+`CapabilityDescriptor` once on connect; PC sends commands with a
+monotonic `cmd_id`, phone replies `Ack` and pushes `CurrentSettings` after
+every applied change, matching the reconciliation discipline in
+`docs/control-protocol.md`.
+
+**Scope decisions made before writing any code (see also the advisor
+consult that shaped this phase):**
+
+- **Console command surface, not a GUI.** The host had zero UI
+  infrastructure (it's a pure console app) and picking a GUI toolkit
+  (WinUI3/Win32/ImGui) would import Phase 5's tray-app scope into Phase 4
+  for no verification benefit. `control/ConsoleControlUi` is a
+  keyboard-driven surface generated from the received
+  `CapabilityDescriptor` -- it satisfies "every advertised control visibly
+  changes state" without the toolkit decision. A future GUI reads from the
+  same `ControlChannel` API.
+- **`SetResolution` and orientation correction are explicitly out of
+  scope**, and it's one decision, not two: `windows/vcam/MediaStream.cpp`
+  advertises a single fixed stream size (the Phase 3C finding), so neither
+  a resolution change nor a 90°/270° rotation (which changes the frame's
+  aspect) can be delivered to the virtual camera without vcam work that
+  doesn't exist yet. `CameraCapabilityProbe` deliberately leaves
+  `LensCapabilities.resolutions` empty rather than populate a list nothing
+  can act on yet.
+- **Manual exposure/white-balance/stabilization commands are wired in the
+  schema but not implemented on the phone side** -- `ControlChannel.kt`'s
+  `dispatchToListener` falls through to `Ack{Unsupported}` for
+  `SetManualExposure`/`SetAutoExposure`/`SetWhiteBalanceMode`/
+  `SetManualWhiteBalance`/`SetStabilization`/`SetResolution`/`SetFps`/
+  `Start`/`Stop`. This matches the Phase 2 decision to defer manual
+  controls, now revisited with real data (see below) but still deferred by
+  choice, not by capability.
+
+**FlatBuffers codegen needed vendoring on both sides, not just Maven/apt.**
+`flatc` (winget `Google.flatbuffers`) is version 25.12.19, newer than any
+`flatbuffers-java` release on Maven Central (latest published: 25.2.10) --
+the generated Kotlin code's `Constants.FLATBUFFERS_25_12_19()`
+version-marker call won't resolve against an older runtime jar. Fixed by
+adding `third_party/flatbuffers` as a git submodule (shallow clone; full
+history timed out) and compiling its C++ headers (`windows/host/CMakeLists.txt`)
+and its Java runtime source (`android/app/build.gradle.kts`'s
+`sourceSets["main"].java.srcDir(...)`) directly, guaranteeing an exact
+version match on both sides instead of chasing a moving Maven target. Both
+builds invoke `flatc` on `proto/wire.fbs` *and* `proto/control.fbs`
+together (not just the latter) -- passing only the included schema silently
+produced a `control_generated.h`/`.kt` that `#include`s/imports a
+`wire_generated` file flatc never wrote, a real "works on the schema author's
+machine" trap worth flagging for anyone reproducing this.
+
+**Real device capability probe -- overturns an earlier assumption.**
+`CameraCapabilityProbe` (Android) queries actual `CameraCharacteristics` for
+every lens and encodes them into `CapabilityDescriptor`; the PC printed the
+real result from the Redmi Note 8:
+
+```
+device=Redmi Note 8 android=11 protocol_version=1 lenses=2
+  [0] camera_id=0 facing=Back  hw_level=3 (LEVEL_3) manual_sensor=1 torch=1
+      zoom=[1.00,8.00] ev=[-24,24]*0.167
+      af_modes=Auto Off Macro Continuous  awb_modes=Auto Incandescent Fluorescent Daylight CloudyDaylight Twilight Shade Off
+  [1] camera_id=1 facing=Front hw_level=3 (LEVEL_3) manual_sensor=1 torch=0
+      zoom=[1.00,8.00] ev=[-24,24]*0.167
+      af_modes=Off  awb_modes=(same as back)
+```
+
+This directly contradicts the Phase 0 planning assumption ("this
+`LIMITED`-hardware-level phone very likely lacks `MANUAL_SENSOR`" --
+`docs/architecture.md`'s own risk R9 and the project memory file). The
+device is actually `LEVEL_3` with `MANUAL_SENSOR` on *both* lenses. Manual
+exposure/ISO/shutter controls were deferred by choice in Phase 2 for scope
+reasons, not because they're unavailable -- worth revisiting in a later
+phase now that real data says they'd work. The front lens's `af_modes=Off`
+(no autofocus at all) is a genuine hardware limitation, correctly reflected
+so the (future) UI won't offer focus mode or tap-to-focus on that lens.
+
+**Verified live against the device**, using a scripted console-command
+sequence (`ConsoleControlUi`'s stdin loop driven by a PowerShell-controlled
+child process, since this MIUI device still blocks `adb shell input tap`
+and there's no GUI to tap anyway):
+
+- `SetLens` → `Ack{Ok}` → `LensChanged` → `CurrentSettings` reflecting the
+  new `camera_id`: switched back↔front repeatedly (8 switches across 4
+  round trips) with zero crashes after the fix below.
+- `SetZoomRatio`, `SetEv`, `SetTorch` (on and off), `SetFocusMode`: each
+  produced `Ack{Ok}` and a `CurrentSettings` push whose value matches what
+  was sent -- and critically, `CurrentSettings` is generated from the
+  *actual* Camera2 `setRepeatingRequest` success (`ackFor` in
+  `CaptureController.kt` only pushes `CurrentSettings` when
+  `CameraCapture.setX(...)` returned `true`), not an optimistic echo, so
+  this is evidence the control genuinely reached the sensor, not just that
+  a byte was parsed correctly.
+- `RequestKeyframe`, `SetBitrate`, `TapToFocus`: implemented via the
+  identical dispatch path as the above (verified) commands, but live
+  round-trip capture for these three specifically was unreliable to
+  automate -- see the tooling note below. Code-reviewed instead; no
+  additional risk beyond the two bugs already found and fixed (below).
+- Ack{Busy} correctly returned when a command arrives before
+  camera/encoder finish standing up (observed in the very first connection
+  test, before the fix that added retries wasn't needed -- this is
+  *correct* behavior, not a bug, since the command genuinely couldn't be
+  applied yet).
+
+**Two real bugs found via this testing, both fixed:**
+
+1. **Console output interleaving.** `ConsoleControlUi::OnMessage` (runs on
+   `ControlChannel`'s receive thread) and `RunCommandLoop` (the stdin
+   thread) both called unsynchronized `std::printf`, and their multi-line
+   output could interleave mid-block under load -- observed as capability
+   dumps with lines in the wrong order. Fixed with a `std::mutex` held for
+   the whole of each function's printing. Purely cosmetic (the wire bytes
+   were always correct), but worth fixing since it was actively
+   undermining the ability to verify anything from the console output.
+2. **`SetLens` could crash the whole app.** `CameraManager.openCamera()`
+   threw `CameraAccessException` ("Camera "0" disabled by policy (code
+   6)") *synchronously* from `CameraCapture.openCameraById`, called from
+   `ControlChannel`'s receive thread via `switchLens`. The existing
+   `catch (e: SecurityException)` didn't cover it -- Kotlin doesn't
+   enforce Java's checked exceptions, so this compiled fine and then
+   crashed the whole process (`FATAL EXCEPTION: ControlChannel-recv`,
+   confirmed via `adb logcat -b crash`) the first time a real device
+   returned this particular error. Fixed two ways: `openCameraById` now
+   also catches `CameraAccessException`, and -- as a defense-in-depth
+   backstop against *any* future command-handler exception, not just this
+   one -- `ControlChannel.dispatch` now wraps every command dispatch in a
+   `try/catch` that replies `Ack{Error}` instead of letting anything
+   propagate and take the receive thread (and therefore the app) down.
+   Re-tested with 8 rapid lens switches afterward: zero crashes, same
+   process ID throughout.
+
+**Tooling note, not a product issue:** verifying this phase required
+scripting `phonecam-host.exe`'s console over a redirected stdin/stdout pipe
+from PowerShell (no physical device interaction needed, matching this
+project's established approach for this `adb input`-blocked phone). The
+straightforward approach (.NET `Process` + `Register-ObjectEvent` for async
+`OutputDataReceived`) turned out to be an unreliable way to *capture*
+output in this environment -- lines were frequently missing or arrived out
+of real-time order relative to when they were actually written (confirmed
+by comparing against `stderr`, which reliably showed the pipeline running
+correctly underneath), especially for anything printed in the last few
+seconds before the process was killed. This is why `RequestKeyframe`/
+`SetBitrate`/`TapToFocus` weren't independently live-verified with a clean
+transcript in this session -- not because the pipeline is suspect, but
+because the capture harness kept losing the very last lines of each run.
+A future session automating this further should redirect straight to a
+file at the OS level (`Start-Process -RedirectStandardOutput`, proven
+reliable earlier in this same session) rather than reading via .NET's
+async line events.
+
+**Resolved decisions carried in from Phase 3C** (see that section): (1)
+`MainScreenViewModel.startCapture()`'s `lensFacing` default is back to
+`LENS_FACING_BACK` -- the temporary front-camera override existed to
+sanity-check real content before a lens-switch control existed; now that
+`SetLens` is implemented and verified, the override is no longer needed.
+(2) The auto-start/auto-retry `LaunchedEffect` in `MainScreen.kt` is kept,
+not reverted -- it was genuinely useful again this phase (this session's
+entire verification flow depended on it, since there's still no way to tap
+the phone's screen), and it previews Phase 5's planned foreground-service
+auto-start rather than fighting it.
+
+**Also new, small, and easy to miss:** `CameraCapture.tapToFocus` initially
+set `CONTROL_AF_TRIGGER_START` directly on the persistent
+`requestBuilder` shared by every live control -- since that builder is
+reused for every future `setRepeatingRequest` call (zoom, EV, ...), the
+trigger would have stayed baked in and re-fired on every subsequent
+unrelated command. Caught in code review before it could cause a live bug;
+fixed by issuing the trigger as a one-shot `session.capture()` call and
+resetting the builder's trigger field to `IDLE` immediately after, which is
+the standard Camera2 tap-to-focus pattern.
+
+**Deferred to a later phase, by choice:** `Stats` telemetry (the method
+exists on `ControlChannel.kt` but nothing calls it periodically -- no
+~1/sec push yet); the control channel is not durable across a video
+`Stop`/`Start` cycle (it shares `CaptureController`'s lifecycle rather than
+outliving it, unlike the full protocol doc's design) -- both are Phase 5
+robustness scope, not Phase 4 protocol-correctness scope. **Next: Phase 5**
+(robustness, installer, tray app) or revisiting manual exposure controls
+now that the device is known to support them.

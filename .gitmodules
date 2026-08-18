@@ -1,3 +1,6 @@
 [submodule "third_party/reference/VCamSample"]
 	path = third_party/reference/VCamSample
 	url = https://github.com/smourier/VCamSample.git
+[submodule "third_party/flatbuffers"]
+	url = https://github.com/google/flatbuffers.git
+	path = third_party/flatbuffers

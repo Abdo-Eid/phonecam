@@ -4,10 +4,13 @@
 #include <cstdio>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "bridge/LiveVideoBridge.h"
 #include "bridge/TestPatternProducer.h"
+#include "control/ConsoleControlUi.h"
+#include "control/ControlChannel.h"
 #include "decode/MFH264Decoder.h"
 #include "log/Log.h"
 #include "transport/AdbTransport.h"
@@ -228,6 +231,26 @@ int wmain(int argc, wchar_t* argv[]) {
         }
     }
 
+    // Phase 4: control channel (proto/control.fbs) on a second adb-forwarded
+    // port, alongside the video channel started above. A connect failure
+    // here isn't fatal -- e.g. the phone app predates control-channel
+    // support -- so the video pipeline still runs standalone (matches how
+    // Phase 3 already tolerates the phone side lagging the host).
+    phonecam::control::ControlChannel controlChannel;
+    phonecam::control::ConsoleControlUi controlUi(controlChannel);
+    std::thread controlReceiveThread;
+    std::thread controlUiThread;
+    const bool controlConnected = controlChannel.Connect();
+    if (controlConnected) {
+        controlReceiveThread = std::thread([&]() {
+            controlChannel.RunReceiveLoop(
+                [&](const phonecam::control::ControlMessage& msg) { controlUi.OnMessage(msg); });
+        });
+        controlUiThread = std::thread([&]() { controlUi.RunCommandLoop(); });
+    } else {
+        phonecam::log::Error("Control channel connect failed -- continuing without controls");
+    }
+
     phonecam::vcam_ctl::VCamControl vcam;
     hr = vcam.Start(L"PhoneCam", kVCamSourceClsid);
     if (SUCCEEDED(hr)) {
@@ -240,6 +263,15 @@ int wmain(int argc, wchar_t* argv[]) {
         CloseHandle(g_stopEvent);
 
         vcam.Stop();
+    }
+
+    if (controlConnected) {
+        controlChannel.Disconnect();
+        if (controlReceiveThread.joinable()) controlReceiveThread.join();
+        // controlUiThread is blocked in std::getline(std::cin, ...), which
+        // nothing here can interrupt -- detach it and let process exit
+        // reclaim it, rather than hanging shutdown on an unblockable join.
+        if (controlUiThread.joinable()) controlUiThread.detach();
     }
 
     if (useTestPattern) {

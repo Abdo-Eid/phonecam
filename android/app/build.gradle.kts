@@ -82,3 +82,41 @@ dependencies {
   implementation(libs.androidx.navigation3.runtime)
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
 }
+
+// --- FlatBuffers control-protocol codegen ---
+// flatc (winget Google.flatbuffers, must be on PATH) generates Kotlin bindings
+// straight from the shared proto/*.fbs schemas -- see docs/build.md and the
+// mirrored CMake codegen in windows/host/CMakeLists.txt.
+//
+// The generated code targets the classic com.google.flatbuffers Java runtime
+// (Table/Struct/FlatBufferBuilder/Constants), which isn't published to Maven
+// for flatc's exact version (25.12.19, newer than any released
+// flatbuffers-java artifact -- Constants.FLATBUFFERS_25_12_19() wouldn't
+// resolve against an older one, and the generated code embeds that exact
+// symbol name). Compiling it straight from the vendored
+// third_party/flatbuffers submodule guarantees an exact version match
+// instead, the same reasoning as vendoring the C++ runtime headers in
+// windows/host/CMakeLists.txt.
+val protoDir = rootProject.projectDir.resolve("../proto")
+val flatbuffersGenDir = layout.buildDirectory.dir("generated/source/flatbuffers")
+val flatbuffersJavaRuntimeDir = rootProject.projectDir.resolve("../third_party/flatbuffers/java/src/main/java")
+
+val generateFlatBuffers by tasks.registering(Exec::class) {
+  val outDir = flatbuffersGenDir.get().asFile
+  doFirst { outDir.mkdirs() }
+  inputs.files(protoDir.resolve("wire.fbs"), protoDir.resolve("control.fbs"))
+  outputs.dir(outDir)
+  commandLine(
+    "flatc", "--kotlin", "-o", outDir.absolutePath,
+    protoDir.resolve("wire.fbs").absolutePath, protoDir.resolve("control.fbs").absolutePath,
+  )
+}
+
+android {
+  sourceSets["main"].kotlin.srcDir(flatbuffersGenDir.get().asFile)
+  sourceSets["main"].java.srcDir(flatbuffersJavaRuntimeDir)
+}
+
+tasks.matching { it.name.contains("Kotlin") && it.name.startsWith("compile") }.configureEach {
+  dependsOn(generateFlatBuffers)
+}

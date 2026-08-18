@@ -51,13 +51,12 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
       return@Column
     }
 
-    // TEMPORARY (dev/testing only, Phase 3C): auto-starts capture whenever
-    // Idle (covers first launch, and after a Stop) and auto-retries after a
-    // short delay on Error (covers a PC-side disconnect mid-test) -- so a
-    // rebuild+install+relaunch cycle, or recovering from a PC-side hiccup,
-    // doesn't need a physical tap on this MIUI device (adb input injection
-    // is blocked here -- see docs/architecture.md). Remove this effect
-    // (back to manual Start/Retry-button-only) before Phase 4/release.
+    // Auto-starts capture whenever Idle (covers first launch, and after a Stop) and auto-retries
+    // after a short delay on Error (covers a PC-side disconnect mid-test). Added in Phase 3C as
+    // dev/testing scaffolding (this MIUI device blocks adb input injection entirely, so a manual
+    // tap was needed for every rebuild cycle); kept past Phase 4 on merit rather than reverted
+    // mechanically -- Phase 5's planned foreground-service auto-start is the same behavior made
+    // permanent, so this is a reasonable stand-in until that lands. See docs/architecture.md.
     LaunchedEffect(state) {
       when (state) {
         CaptureUiState.Idle -> viewModel.startCapture()
