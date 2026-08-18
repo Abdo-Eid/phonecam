@@ -4,8 +4,10 @@
 
 #include "control/ControlTransport.h"
 
+#include <atomic>
 #include <cstring>
 #include <format>
+#include <mutex>
 #include <vector>
 
 #include "log/Log.h"
@@ -54,24 +56,36 @@ bool ReadExact(SOCKET s, uint8_t* buffer, size_t size) {
 
 struct ControlTransport::Impl {
     SOCKET sock = INVALID_SOCKET;
-    bool wsaInitialized = false;
+    bool wsaOk = false;
+    // Same race and same fix as AdbVideoTransport::Impl (see its comments):
+    // Phase 5's reconnect loop calls Connect() from a worker thread while
+    // Stop()/dtor can call Disconnect() from another thread at any time.
+    std::mutex mutex;
+    std::atomic<bool> cancelled{false};
 };
 
-ControlTransport::ControlTransport() : impl_(std::make_unique<Impl>()) {}
-
-ControlTransport::~ControlTransport() { Disconnect(); }
-
-bool ControlTransport::Connect(uint16_t port) {
-    if (!RunAdbForward(port)) {
-        return false;
-    }
-
+ControlTransport::ControlTransport() : impl_(std::make_unique<Impl>()) {
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         phonecam::log::Error("ControlTransport: WSAStartup failed");
+        return;
+    }
+    impl_->wsaOk = true;
+}
+
+ControlTransport::~ControlTransport() {
+    Disconnect();
+    if (impl_->wsaOk) {
+        WSACleanup();
+    }
+}
+
+bool ControlTransport::Connect(uint16_t port) {
+    impl_->cancelled.store(false);
+    if (!RunAdbForward(port)) {
         return false;
     }
-    impl_->wsaInitialized = true;
+    if (impl_->cancelled.load()) return false;
 
     const SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) {
@@ -85,7 +99,7 @@ bool ControlTransport::Connect(uint16_t port) {
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     bool connected = false;
-    for (int attempt = 0; attempt < 20; ++attempt) {
+    for (int attempt = 0; attempt < 20 && !impl_->cancelled.load(); ++attempt) {
         if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
             connected = true;
             break;
@@ -93,17 +107,23 @@ bool ControlTransport::Connect(uint16_t port) {
         Sleep(250);
     }
     if (!connected) {
-        phonecam::log::Error("ControlTransport: connect() failed after retries");
         closesocket(s);
         return false;
     }
 
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->cancelled.load()) {
+        closesocket(s);
+        return false;
+    }
     impl_->sock = s;
     phonecam::log::Info("ControlTransport: connected");
     return true;
 }
 
 void ControlTransport::Disconnect() {
+    impl_->cancelled.store(true);
+    std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->sock != INVALID_SOCKET) {
         // shutdown() before closesocket(): the documented-safe way to unblock
         // a concurrent recv() on this socket from RunReceiveLoop's thread
@@ -112,10 +132,6 @@ void ControlTransport::Disconnect() {
         shutdown(impl_->sock, SD_BOTH);
         closesocket(impl_->sock);
         impl_->sock = INVALID_SOCKET;
-    }
-    if (impl_->wsaInitialized) {
-        WSACleanup();
-        impl_->wsaInitialized = false;
     }
 }
 

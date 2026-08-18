@@ -105,6 +105,17 @@
     <ClCompile>
       <AdditionalIncludeDirectories>..\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
+    <!-- The registered DLL (HKLM CLSID InprocServer32) points at this
+         ProgramData copy, not $(TargetPath) -- docs/build.md's deployment
+         dance. Refresh it on every build so a rebuild takes effect without a
+         separate manual copy step; best-effort ("|| exit 0") since the file
+         is locked while phonecam-host.exe or the Frame Server has it loaded,
+         which is expected and shouldn't fail the build. -->
+    <PostBuildEvent>
+      <Command>if not exist "C:\ProgramData\PhoneCam" mkdir "C:\ProgramData\PhoneCam"
+copy /Y "$(TargetPath)" "C:\ProgramData\PhoneCam\phonecam-vcam.dll" || exit 0</Command>
+      <Message>Refreshing registered vcam DLL copy in ProgramData (best-effort)</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>

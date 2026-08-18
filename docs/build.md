@@ -37,17 +37,17 @@ naturally consume, so it builds via its own MSBuild project:
 **Deploying a vcam change:** the registered DLL
 (`HKLM\SOFTWARE\Classes\CLSID\{d0255f4e-4471-47c4-91fc-0e74dcc93308}\InprocServer32`) points at
 `C:\ProgramData\PhoneCam\phonecam-vcam.dll`, a separate deployed copy -- **not** the MSBuild
-output. Rebuilding alone does nothing until that copy is refreshed too:
+output. `PhoneCamVCam.vcxproj` now has a `PostBuildEvent` (Phase 5) that copies `$(TargetPath)`
+over that ProgramData copy automatically on every build, best-effort (it silently no-ops if the
+file is locked). So the remaining steps after a rebuild are just:
 
-1. Rebuild via the MSBuild command above.
+1. Rebuild via the MSBuild command above (the ProgramData copy refreshes automatically, unless
+   locked -- see step 2-3 below).
 2. Stop any running `phonecam-host.exe`.
-3. Restart both the `FrameServer` and `FrameServerMonitor` Windows services (elevated).
-4. Copy the rebuilt DLL over `C:\ProgramData\PhoneCam\phonecam-vcam.dll` (locked until step 2-3
-   release it).
-5. Relaunch `phonecam-host.exe`.
-
-This whole dance is a known Phase 5 cleanup item (either always deploy from one source of truth,
-or have the dev build target write directly to the registered path).
+3. If the PostBuildEvent's copy was skipped because the DLL was locked, restart both the
+   `FrameServer` and `FrameServerMonitor` Windows services (elevated) to release it, then rebuild
+   again.
+4. Relaunch `phonecam-host.exe`.
 
 ## Android
 

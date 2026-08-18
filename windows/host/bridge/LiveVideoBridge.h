@@ -20,17 +20,19 @@ class LiveVideoBridge {
 public:
     ~LiveVideoBridge();
 
-    // Opens the SharedFrameRing (phonecam-svc must already be running),
-    // initializes the decoder, and connects to the phone -- which requires
-    // capture to already be running there (the phone's LocalServerSocket
-    // only accepts once the user has started capture). Fails fast rather
-    // than retrying/waiting; that ordering + retry robustness is Phase 5
-    // scope, same as the rest of the reconnect story in docs/wire-protocol.md.
+    // Opens the SharedFrameRing (phonecam-svc must already be running) and
+    // initializes the decoder -- both are treated as fatal setup failures
+    // (something structurally wrong, not "phone not ready yet"), so Start()
+    // still fails fast for those. The phone-side connection itself is not
+    // required to succeed here: a background thread owns connect-or-retry,
+    // so Start() returns as soon as the ring/decoder are ready, before the
+    // phone has necessarily started capture (Phase 5: reconnect robustness).
     bool Start();
     void Stop();
 
 private:
     void Run();
+    bool WaitBeforeRetry();
 
     phonecam::shm::SharedFrameRing ring_;
     phonecam::transport::AdbVideoTransport transport_;

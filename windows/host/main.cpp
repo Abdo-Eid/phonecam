@@ -1,6 +1,7 @@
 #include <mfapi.h>
 #include <windows.h>
 
+#include <atomic>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -232,24 +233,44 @@ int wmain(int argc, wchar_t* argv[]) {
     }
 
     // Phase 4: control channel (proto/control.fbs) on a second adb-forwarded
-    // port, alongside the video channel started above. A connect failure
-    // here isn't fatal -- e.g. the phone app predates control-channel
-    // support -- so the video pipeline still runs standalone (matches how
-    // Phase 3 already tolerates the phone side lagging the host).
+    // port, alongside the video channel started above. Phase 5: this now
+    // supervises its own reconnect, mirroring LiveVideoBridge::Run() -- a USB
+    // replug or adb-server restart kills both channels' TCP connections
+    // together, so control needs the same connect-retry loop video got. A
+    // connect failure is still non-fatal to the video pipeline (e.g. an older
+    // phone app build predates control-channel support): the console UI just
+    // keeps retrying quietly in the background.
     phonecam::control::ControlChannel controlChannel;
     phonecam::control::ConsoleControlUi controlUi(controlChannel);
-    std::thread controlReceiveThread;
-    std::thread controlUiThread;
-    const bool controlConnected = controlChannel.Connect();
-    if (controlConnected) {
-        controlReceiveThread = std::thread([&]() {
-            controlChannel.RunReceiveLoop(
-                [&](const phonecam::control::ControlMessage& msg) { controlUi.OnMessage(msg); });
-        });
-        controlUiThread = std::thread([&]() { controlUi.RunCommandLoop(); });
-    } else {
-        phonecam::log::Error("Control channel connect failed -- continuing without controls");
-    }
+    std::atomic<bool> controlRunning{true};
+    // Backoff applies after every disconnect, not just an outright Connect()
+    // failure -- adb forward's local TCP proxy can accept the PC-side
+    // connect() immediately and only then discover nothing is listening on
+    // the phone's abstract socket, so "connected" followed by an instant
+    // disconnect is a real case (confirmed live via LiveVideoBridge hitting
+    // exactly this), not just Connect() returning false outright. Without
+    // backing off there too, this busy-loops: no sleep, `adb forward` (a
+    // whole new adb.exe process per attempt) launched many times a second.
+    std::thread controlSuperviseThread([&]() {
+        while (controlRunning.load()) {
+            if (controlChannel.Connect()) {
+                // Every (re)connect implies the video side may also just have
+                // reconnected onto a fresh encoder session (new SPS/PPS, no
+                // guaranteed keyframe yet) -- ask for one explicitly rather
+                // than waiting for the phone's own keyframe interval.
+                controlChannel.SendRequestKeyframe();
+                controlChannel.RunReceiveLoop(
+                    [&](const phonecam::control::ControlMessage& msg) { controlUi.OnMessage(msg); });
+                controlChannel.Disconnect();
+                if (!controlRunning.load()) break;
+                phonecam::log::Info("Control channel disconnected, reconnecting");
+            }
+            for (int waitedMs = 0; waitedMs < 2000 && controlRunning.load(); waitedMs += 200) {
+                Sleep(200);
+            }
+        }
+    });
+    std::thread controlUiThread([&]() { controlUi.RunCommandLoop(); });
 
     phonecam::vcam_ctl::VCamControl vcam;
     hr = vcam.Start(L"PhoneCam", kVCamSourceClsid);
@@ -265,14 +286,13 @@ int wmain(int argc, wchar_t* argv[]) {
         vcam.Stop();
     }
 
-    if (controlConnected) {
-        controlChannel.Disconnect();
-        if (controlReceiveThread.joinable()) controlReceiveThread.join();
-        // controlUiThread is blocked in std::getline(std::cin, ...), which
-        // nothing here can interrupt -- detach it and let process exit
-        // reclaim it, rather than hanging shutdown on an unblockable join.
-        if (controlUiThread.joinable()) controlUiThread.detach();
-    }
+    controlRunning.store(false);
+    controlChannel.Disconnect();  // unblocks a pending connect retry or the receive loop's blocking recv()
+    if (controlSuperviseThread.joinable()) controlSuperviseThread.join();
+    // controlUiThread is blocked in std::getline(std::cin, ...), which
+    // nothing here can interrupt -- detach it and let process exit reclaim
+    // it, rather than hanging shutdown on an unblockable join.
+    if (controlUiThread.joinable()) controlUiThread.detach();
 
     if (useTestPattern) {
         producer.Stop();

@@ -574,6 +574,89 @@ exists on `ControlChannel.kt` but nothing calls it periodically -- no
 ~1/sec push yet); the control channel is not durable across a video
 `Stop`/`Start` cycle (it shares `CaptureController`'s lifecycle rather than
 outliving it, unlike the full protocol doc's design) -- both are Phase 5
-robustness scope, not Phase 4 protocol-correctness scope. **Next: Phase 5**
-(robustness, installer, tray app) or revisiting manual exposure controls
-now that the device is known to support them.
+robustness scope, not Phase 4 protocol-correctness scope.
+
+## Status: Phase 5 in progress (host reconnect robustness), 2026-08-18
+
+Scoped down from the full Phase 5 roadmap item (robustness + installer +
+tray app) to the one piece with a real, testable exit condition this
+session: **`phonecam-host.exe` surviving USB unplug/replug and phone-side
+backgrounding without a restart.** The installer and tray app are
+deliberately deferred -- an installer's own exit criterion ("clean install
+on a fresh Windows account") isn't verifiable without one, and a tray app
+reopens the GUI-framework decision that was correctly kept out of Phase 4's
+console UI.
+
+**What changed:** `LiveVideoBridge::Start()` no longer requires the phone
+connection to succeed synchronously -- it now only fails on truly
+structural setup problems (`SharedFrameRing::Open()`, decoder
+`Initialize()`); the phone connection itself is owned by a new supervising
+loop in `LiveVideoBridge::Run()` that connects-or-retries indefinitely, so
+the virtual camera starts and exists (serving stale/black frames) even
+before the phone is ready, instead of the whole process exiting if it
+raced the phone on startup. The control channel got the same treatment,
+as a supervising loop added directly in `main.cpp` (mirroring
+`LiveVideoBridge::Run()`) rather than changing `ControlChannel`'s own
+API -- and every (re)connect now sends `RequestKeyframe`, since a fresh
+phone-side encoder session has no guaranteed keyframe yet, matching
+`docs/control-protocol.md`'s stated reconnect behavior.
+
+**A real concurrency bug found via live testing, not by inspection:** the
+reconnect loop's first version had no backoff after a connect that
+succeeded but then immediately dropped -- confirmed live that `adb
+forward`'s local TCP proxy accepts the PC-side `connect()` right away and
+only discovers moments later that nothing is listening on the phone's
+abstract socket, so "connected" immediately followed by "receive loop
+ended" is a common real case, not just Connect() failing outright. Without
+a backoff on that path too, this busy-looped: `RunAdbForward` spawns a
+whole new `adb.exe` process per attempt, and the log showed multiple
+connect/disconnect cycles per second before this was caught and fixed
+(backoff now applies uniformly after any disconnect, not only an outright
+Connect() failure).
+
+**A second bug, caught before it shipped rather than live:** the reconnect
+loop makes `AdbVideoTransport`/`ControlTransport::Connect()` and
+`Disconnect()` reachable concurrently from two different threads for the
+first time -- previously `Connect()` only ever ran once, synchronously,
+before any worker thread existed. The original per-call `WSAStartup()`/
+`WSACleanup()` pairing was unsafe under that: a `Disconnect()` arriving
+mid-`Connect()` could `WSACleanup()` out from under a connect attempt still
+using Winsock, or a `Connect()` finishing just after `Disconnect()` could
+publish a live socket nobody would ever tear down, hanging `Stop()`'s
+`join()`. Fixed by moving `WSAStartup`/`WSACleanup` to the transport's
+constructor/destructor (called once, no cross-thread pairing needed) and
+adding a mutex-guarded socket handle plus a `cancelled` flag that
+`Connect()` checks at each blocking step, so a concurrent `Disconnect()`
+always wins and no socket is ever published or leaked after shutdown was
+requested.
+
+**Verified live** (both scenarios, by the user, not simulated): (1)
+started `phonecam-host.exe` with the phone app not yet streaming --
+confirmed retrying quietly at the fixed backoff interval, then connecting
+automatically the moment the phone app was opened, with capabilities/
+lens/settings all re-synced, no host restart. (2) unplugged the USB cable
+mid-stream -- phone showed "Waiting for PC connection..." -- host logged
+`adb forward exited with code 1` and retried at the same backoff interval
+(no busy-loop) -- replugging reconnected automatically with no host
+restart.
+
+**Also fixed, cheaply, while in the area:** the vcam DLL
+deployment-path gotcha noted in Phase 3C -- `PhoneCamVCam.vcxproj` now has
+a `PostBuildEvent` that copies the built DLL over the registered
+`C:\ProgramData\PhoneCam\phonecam-vcam.dll` copy automatically (best-effort;
+silently no-ops if the file is locked by a running host/Frame Server, same
+as before). `docs/build.md` updated to match -- the manual "copy the
+rebuilt DLL" step is gone; only the "restart FrameServer services if
+locked" step remains, and only when needed.
+
+**Still open for Phase 5:** foreground service + wake lock on the Android
+side (currently a plain Activity -- backgrounding/screen-off survival is
+untested and likely doesn't work yet, since nothing prevents the OS from
+suspending capture); the installer; the tray app. Also still open, unclear
+if it's a real gap: if the phone app is ever sitting in its own Idle
+screen (nobody bound to the video socket) when the host tries to
+reconnect, the host will retry forever with no way to ask the phone to
+start capture again -- there's no PC->phone "wake" command yet. Not hit in
+this session's testing (the Error-path auto-retry from Phase 4's stability
+fix kept the phone side coming back on its own), but worth deciding on
+purpose rather than discovering it live.
