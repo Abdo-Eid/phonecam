@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.usb.UsbAccessory
+import android.hardware.usb.UsbManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -15,6 +17,8 @@ import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import io.github.abdoeid.phonecam.MainActivity
 import io.github.abdoeid.phonecam.R
+import io.github.abdoeid.phonecam.transport.AoaTransport
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 
 // A camera-type foreground service (android:foregroundServiceType="camera" in the manifest) is
@@ -28,6 +32,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 class CaptureService : Service() {
   private lateinit var controller: CaptureController
   private var wakeLock: PowerManager.WakeLock? = null
+
+  // Owned here, not by MainActivity (see its class doc's Phase 7 note): ACTION_START_AOA gives
+  // this the same foreground-service/wake-lock/error-handling treatment ACTION_START already gets,
+  // instead of a separate ad-hoc lifecycle tied to the Activity. Non-null only while an
+  // AOA-triggered session is live; closed in stopCaptureInternal()/onDestroy() alongside the
+  // controller.
+  private var aoaTransport: AoaTransport? = null
 
   val state: CaptureState
     get() = controller.state
@@ -72,6 +83,11 @@ class CaptureService : Service() {
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     when (intent?.action) {
       ACTION_START -> {
+        // Same "ignore a redundant dispatch while already live" guard as ACTION_START_AOA below --
+        // without it, MainScreen's auto-start effect (which fires from a UI still showing stale
+        // Idle state) can send this while an AOA-triggered session is already running, since the
+        // two paths are otherwise unaware of each other.
+        if (controller.state != CaptureState.IDLE) return START_NOT_STICKY
         val width = intent.getIntExtra(EXTRA_WIDTH, 1280)
         val height = intent.getIntExtra(EXTRA_HEIGHT, 720)
         val fps = intent.getIntExtra(EXTRA_FPS, 30)
@@ -82,6 +98,43 @@ class CaptureService : Service() {
         startForegroundInternal()
         acquireWakeLock()
         controller.start(width, height, fps, bitrateBps, ::onCaptureError, lensFacing)
+      }
+      ACTION_START_AOA -> {
+        // Ignore a redundant accessory-attach dispatch (e.g. MainActivity re-firing from its
+        // accessoryList fallback on a plain re-launch) while a session is already live -- matches
+        // the old TEMPORARY wiring's `if (aoaTransport.isOpen) return` guard, moved here now that
+        // this owns the transport.
+        if (controller.state != CaptureState.IDLE) return START_NOT_STICKY
+        val accessory =
+          if (Build.VERSION.SDK_INT >= 33) {
+            intent?.getParcelableExtra(EXTRA_ACCESSORY, UsbAccessory::class.java)
+          } else {
+            @Suppress("DEPRECATION") intent?.getParcelableExtra(EXTRA_ACCESSORY)
+          }
+        if (accessory == null) return START_NOT_STICKY
+        stopRequested.set(false)
+        lastError = null
+        startForegroundInternal()
+        acquireWakeLock()
+        val transport = AoaTransport()
+        val usbManager = getSystemService(UsbManager::class.java)
+        if (!transport.open(usbManager, accessory)) {
+          lastError = IOException("Failed to open USB accessory")
+          stopCaptureInternal()
+          return START_NOT_STICKY
+        }
+        aoaTransport = transport
+        // 1920x1080 to match the vcam's declared stream size (windows/vcam/MediaStream.cpp,
+        // Phase 6) -- same reasoning as MainScreenViewModel's Start-button defaults: a mismatch
+        // here silently stretches the image on the PC side.
+        controller.start(
+          width = 1920,
+          height = 1080,
+          fps = 30,
+          bitrateBps = 6_000_000,
+          onError = ::onCaptureError,
+          videoSink = transport.videoOutput,
+        )
       }
       ACTION_STOP -> {
         stopRequested.set(true)
@@ -99,6 +152,8 @@ class CaptureService : Service() {
 
   private fun stopCaptureInternal() {
     controller.stop()
+    aoaTransport?.close()
+    aoaTransport = null
     releaseWakeLock()
     stopForeground(STOP_FOREGROUND_REMOVE)
     stopSelf()
@@ -152,18 +207,22 @@ class CaptureService : Service() {
 
   override fun onDestroy() {
     controller.stop()
+    aoaTransport?.close()
+    aoaTransport = null
     releaseWakeLock()
     super.onDestroy()
   }
 
   companion object {
     const val ACTION_START = "io.github.abdoeid.phonecam.action.START"
+    const val ACTION_START_AOA = "io.github.abdoeid.phonecam.action.START_AOA"
     const val ACTION_STOP = "io.github.abdoeid.phonecam.action.STOP"
     const val EXTRA_WIDTH = "width"
     const val EXTRA_HEIGHT = "height"
     const val EXTRA_FPS = "fps"
     const val EXTRA_BITRATE = "bitrateBps"
     const val EXTRA_LENS_FACING = "lensFacing"
+    const val EXTRA_ACCESSORY = "accessory"
     private const val CHANNEL_ID = "phonecam_capture"
     private const val NOTIFICATION_ID = 1
   }

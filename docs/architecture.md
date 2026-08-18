@@ -1313,3 +1313,65 @@ explicitly deferred items -- the Start-button integration in particular
 needs a product decision (auto-detect vs. explicit toggle vs.
 AOA-preferred-with-adb-fallback) that hasn't been made yet, not just more
 implementation.
+
+## Status: Phase 7 real Android-side integration (auto-detect), verified live end-to-end, 2026-08-19
+
+Decision (asked of the user directly, not inferred): **auto-detect** --
+an accessory attach starts capture on its own, no Start-button tap
+needed, closest to what `MainActivity`'s TEMPORARY wiring already did.
+This session replaced that TEMPORARY wiring with the real thing, routed
+through the same `CaptureService` the normal adb/Start-button path
+already uses, rather than a separate ad-hoc path:
+
+- **`CaptureService` gained `ACTION_START_AOA`** (extra: a `UsbAccessory`
+  Parcelable), alongside the existing `ACTION_START`/`ACTION_STOP`. It
+  opens an `AoaTransport` itself (previously `MainActivity` owned this)
+  and calls `CaptureController.start(videoSink = transport.videoOutput)`
+  -- meaning an AOA session now gets the exact same foreground-service
+  type, wake lock, and `onCaptureError`/`lastError` handling the adb path
+  already has, instead of none of that. Resolution changed from the
+  TEMPORARY wiring's hardcoded 1280x720 to 1920x1080/30fps/6Mbps, matching
+  `MainScreenViewModel`'s own Start-button defaults and, more importantly,
+  the vcam's declared 1080p stream size (`windows/vcam/MediaStream.cpp`)
+  -- the TEMPORARY wiring's 720p would have silently stretched on the PC
+  side, the same bug class Phase 3C already fixed once before.
+- **Both start actions now guard against a redundant dispatch while
+  already streaming** (`if (controller.state != CaptureState.IDLE)
+  return`) -- not just AOA's own re-launch-while-attached case (the old
+  TEMPORARY wiring's `aoaTransport.isOpen` check, moved here), but also
+  the adb path's own auto-start effect (below), which can now race an
+  AOA-triggered session it has no other way of knowing about.
+- **`MainActivity`** no longer owns any transport or controller -- 
+  `handleAccessoryIntent` now just resolves the `UsbAccessory` (unchanged
+  logic) and forwards an `ACTION_START_AOA` intent to `CaptureService`.
+- **`MainScreenViewModel`'s poll loop now runs continuously from `init{}`**
+  instead of only being started inside `startCapture()`. This was a real
+  gap, not a style preference: `MainScreen`'s own auto-start effect calls
+  `startCapture()` once whenever it sees `Idle`, and previously that was
+  the *only* thing that ever started polling -- so a session that
+  `MainActivity` triggered via `ACTION_START_AOA` (never touching
+  `startCapture()`) would stream successfully while the UI kept showing
+  stale "STANDBY / tap start to begin transmitting" forever. Polling now
+  reflects `CaptureService`'s real state regardless of which path started
+  it.
+
+**Verified live, this session, with zero manual taps on the phone**:
+`phonecam-host.exe --aoa` (adb killed first, as always) sent the
+handshake; the phone auto-launched the app via `accessory_filter.xml`'s
+intent match (the "always allow" AOA dialog checkbox from earlier this
+phase meant no dialog reappeared either); `MainActivity` forwarded
+straight to `CaptureService`; the log showed `AoaVideoTransport:
+connected` followed by `MFH264Decoder: output negotiated 1920x1080`
+(confirming the new resolution, not the old TEMPORARY 720p); and the
+phone's own screen, checked directly, showed the real "ON AIR" status
+with a live FPS/RES/TIME readout -- confirming the `MainScreenViewModel`
+polling fix, not just the capture pipeline. A second DirectShow capture
+(same method as the transport-only proof above) through the *real*
+non-TEMPORARY path showed the same live scene at full native 1920x1080,
+sharper than the earlier 720p-then-upscaled-by-nothing capture since
+there's no resolution mismatch anymore.
+
+**Still deliberately deferred**, unchanged from above: control channel
+over AOA, and installer driver auto-install (`libwdi` against the parent
+composite device's hardware ID, per the corrected shipping note earlier
+in this document).

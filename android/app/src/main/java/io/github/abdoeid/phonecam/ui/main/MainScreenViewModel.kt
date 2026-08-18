@@ -35,6 +35,14 @@ sealed interface CaptureUiState {
 // Activity instance; ACTION_START/ACTION_STOP intents (not direct method calls on the bound
 // service) own the actual start/stop, since that's the pattern startForegroundService() requires
 // -- the service must reach startForeground() from within its own onStartCommand.
+//
+// Phase 7: the poll loop now runs continuously from init{} rather than being started/cancelled
+// alongside startCapture()/stopCapture() -- CaptureService can also be started by MainActivity's
+// AOA accessory-attach handling (ACTION_START_AOA), entirely independent of this ViewModel and
+// its Start button, so uiState needs to reflect the service's real state regardless of what
+// triggered it. Previously, an AOA-triggered session would stream successfully while this
+// ViewModel kept reporting stale Idle indefinitely, since nothing had ever called startCapture()
+// to kick off polling.
 class MainScreenViewModel(application: Application) : AndroidViewModel(application) {
   private val _uiState = MutableStateFlow<CaptureUiState>(CaptureUiState.Idle)
   val uiState: StateFlow<CaptureUiState> = _uiState.asStateFlow()
@@ -57,6 +65,29 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
   init {
     val context = getApplication<Application>()
     isBound = context.bindService(Intent(context, CaptureService::class.java), connection, Context.BIND_AUTO_CREATE)
+    statsJob =
+      viewModelScope.launch {
+        while (true) {
+          val service = boundService
+          if (service == null) {
+            // Bind hasn't completed yet -- init{} kicked it off, but onServiceConnected is async.
+            delay(100)
+            continue
+          }
+          val error = service.lastError
+          if (error != null) {
+            _uiState.value = CaptureUiState.Error(error.message ?: error.toString())
+          } else {
+            _uiState.value =
+              when (service.state) {
+                CaptureState.IDLE -> CaptureUiState.Idle
+                CaptureState.WAITING_FOR_CONNECTION -> CaptureUiState.WaitingForConnection
+                CaptureState.STREAMING -> CaptureUiState.Streaming(service.elapsedSeconds, service.measuredFps)
+              }
+          }
+          delay(500)
+        }
+      }
   }
 
   // TODO(Phase 7+): resolution/fps become PC-driven SetResolution/SetFps commands once the vcam
@@ -84,36 +115,9 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
         putExtra(CaptureService.EXTRA_LENS_FACING, lensFacing)
       }
     ContextCompat.startForegroundService(context, intent)
-
-    statsJob?.cancel()
-    statsJob =
-      viewModelScope.launch {
-        while (true) {
-          val service = boundService
-          if (service == null) {
-            // Bind hasn't completed yet -- init{} kicked it off, but onServiceConnected is async.
-            delay(100)
-            continue
-          }
-          val error = service.lastError
-          if (error != null) {
-            _uiState.value = CaptureUiState.Error(error.message ?: error.toString())
-            break
-          }
-          _uiState.value =
-            when (service.state) {
-              CaptureState.IDLE -> CaptureUiState.Idle
-              CaptureState.WAITING_FOR_CONNECTION -> CaptureUiState.WaitingForConnection
-              CaptureState.STREAMING -> CaptureUiState.Streaming(service.elapsedSeconds, service.measuredFps)
-            }
-          delay(500)
-        }
-      }
   }
 
   fun stopCapture() {
-    statsJob?.cancel()
-    statsJob = null
     val context = getApplication<Application>()
     context.startService(Intent(context, CaptureService::class.java).setAction(CaptureService.ACTION_STOP))
     _uiState.value = CaptureUiState.Idle
