@@ -4,6 +4,7 @@
 #include <shellapi.h>
 
 #include "log/Log.h"
+#include "resources/resource.h"
 
 namespace phonecam::tray {
 
@@ -132,7 +133,13 @@ bool TrayIcon::Create(std::function<std::string()> statusProvider) {
         return false;
     }
 
-    impl_->icon = LoadIconW(nullptr, IDI_APPLICATION);
+    // Falls back to the generic app icon if the embedded resource is somehow missing (e.g. a
+    // build that skipped resources/phonecam.rc) -- a tray icon showing SOMETHING beats a failed
+    // Create() over one showing the wrong glyph.
+    impl_->icon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APPICON));
+    if (!impl_->icon) {
+        impl_->icon = LoadIconW(nullptr, IDI_APPLICATION);
+    }
 
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);

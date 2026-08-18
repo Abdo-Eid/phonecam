@@ -1,5 +1,7 @@
 # PhoneCam
 
+![PhoneCam](assets/logo_full.png)
+
 Turn an Android phone into a fast, high-quality **USB webcam** on Windows — recognized as a real camera device by every app (Zoom, Teams, Chrome, Windows Camera, OBS), not just an OBS plugin.
 
 USB only. No root. Free, open-source, no watermark.

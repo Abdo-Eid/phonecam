@@ -669,7 +669,7 @@ Activity-owned controller dies with the Activity, and Android is free to
 freeze or kill a backgrounded process (Doze/App Standby) with no foreground
 service holding it open. `MainScreenViewModel` now just sends
 `ACTION_START`/`ACTION_STOP` intents to the service and polls its bound
-state (`state`, `framesEncoded`, `measuredFps`, `lastError`) the same way
+state (`state`, `elapsedSeconds`, `measuredFps`, `lastError`) the same way
 it used to poll `CaptureController` directly -- `CaptureController` itself
 is unchanged. The service acquires a `PARTIAL_WAKE_LOCK` (capped at 12h,
 not indefinite) alongside `startForeground()` so the CPU keeps running with

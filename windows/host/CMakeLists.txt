@@ -40,6 +40,7 @@ add_executable(phonecam-host
     control/ConsoleControlUi.cpp
     tray/TrayIcon.h
     tray/TrayIcon.cpp
+    resources/phonecam.rc
 )
 
 add_dependencies(phonecam-host phonecam_proto_gen)

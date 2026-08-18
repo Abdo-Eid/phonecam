@@ -40,6 +40,10 @@ DefaultDirName={autopf}\PhoneCam
 DefaultGroupName=PhoneCam
 DisableProgramGroupPage=yes
 LicenseFile=..\..\LICENSE
+; Same .ico phonecam-host.exe/phonecam-svc.exe embed via their own resources/phonecam.rc (see
+; windows/common/resources) -- the installer .exe itself doesn't link that resource, so it needs
+; its own reference to the file.
+SetupIconFile=..\common\resources\phonecam.ico
 OutputDir=Output
 OutputBaseFilename=PhoneCamSetup
 Compression=lzma

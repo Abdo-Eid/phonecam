@@ -1,5 +1,6 @@
 add_executable(phonecam-svc
     main.cpp
+    resources/phonecam.rc
 )
 
 target_link_libraries(phonecam-svc PRIVATE phonecam_common advapi32)
