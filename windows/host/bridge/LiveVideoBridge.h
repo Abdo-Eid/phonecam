@@ -8,16 +8,23 @@
 // upstream and downstream of WriteFrame() is unchanged.
 
 #include <atomic>
+#include <memory>
 #include <thread>
 
 #include "decode/MFH264Decoder.h"
 #include "shm/SharedFrameRing.h"
 #include "transport/AdbTransport.h"
+#include "transport/VideoTransport.h"
 
 namespace phonecam::bridge {
 
 class LiveVideoBridge {
 public:
+    // Defaults to the adb-forward transport (Phase 3-5's proven path) --
+    // pass an AoaVideoTransport (transport/AoaTransport.h) to run the same
+    // decode/ring/vcam pipeline over AOA instead. See main.cpp's --aoa flag.
+    explicit LiveVideoBridge(std::unique_ptr<phonecam::transport::VideoTransport> transport =
+                                  std::make_unique<phonecam::transport::AdbVideoTransport>());
     ~LiveVideoBridge();
 
     // Opens the SharedFrameRing (phonecam-svc must already be running) and
@@ -39,7 +46,7 @@ private:
     bool WaitBeforeRetry();
 
     phonecam::shm::SharedFrameRing ring_;
-    phonecam::transport::AdbVideoTransport transport_;
+    std::unique_ptr<phonecam::transport::VideoTransport> transport_;
     phonecam::decode::MFH264Decoder decoder_;
     std::thread thread_;
     std::atomic<bool> running_{false};

@@ -20,6 +20,7 @@ namespace {
 
 constexpr uint8_t kMagic = 0x9C;
 constexpr size_t kHeaderSize = 20;
+constexpr uint16_t kPort = 27183;
 
 bool RunAdbForward(uint16_t port) {
     std::wstring cmd = std::format(L"adb forward tcp:{} localabstract:phonecam_video", port);
@@ -98,9 +99,9 @@ AdbVideoTransport::~AdbVideoTransport() {
     }
 }
 
-bool AdbVideoTransport::Connect(uint16_t port) {
+bool AdbVideoTransport::Connect() {
     impl_->cancelled.store(false);
-    if (!RunAdbForward(port)) {
+    if (!RunAdbForward(kPort)) {
         return false;
     }
     if (impl_->cancelled.load()) return false;
@@ -113,7 +114,7 @@ bool AdbVideoTransport::Connect(uint16_t port) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
+    addr.sin_port = htons(kPort);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     // adb forward can return before the phone-side LocalServerSocket is

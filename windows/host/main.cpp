@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdio>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -15,6 +16,7 @@
 #include "decode/MFH264Decoder.h"
 #include "log/Log.h"
 #include "transport/AdbTransport.h"
+#include "transport/AoaTransport.h"
 #include "tray/TrayIcon.h"
 #include "vcam_ctl/VCamControl.h"
 
@@ -220,9 +222,22 @@ int wmain(int argc, wchar_t* argv[]) {
     // opt-in dev tool for exercising the PC side (ring/vcam/Frame Server)
     // without a phone connected. Real usage is the default path below.
     const bool useTestPattern = argc > 1 && std::wstring(argv[1]) == L"--test-pattern";
+    // --aoa: Phase 7's alternative video transport (transport/AoaTransport.h),
+    // in place of the default adb-forward one -- video channel only, control
+    // still runs over adb regardless of this flag (see AoaVideoTransport's
+    // class doc comment for why). Added alongside the proven adb path, not
+    // in place of it: AOA's reconnect behavior after a dropped session is
+    // less understood (see docs/architecture.md's Phase 7 notes on there
+    // being no clean software-only way back into accessory mode without a
+    // physical replug).
+    const bool useAoa = argc > 1 && std::wstring(argv[1]) == L"--aoa";
 
     phonecam::bridge::TestPatternProducer producer;
-    phonecam::bridge::LiveVideoBridge bridge;
+    phonecam::bridge::LiveVideoBridge bridge(
+        useAoa ? std::unique_ptr<phonecam::transport::VideoTransport>(
+                     std::make_unique<phonecam::transport::AoaVideoTransport>())
+               : std::unique_ptr<phonecam::transport::VideoTransport>(
+                     std::make_unique<phonecam::transport::AdbVideoTransport>()));
     if (useTestPattern) {
         if (!producer.Start(1280, 960, 30)) {
             phonecam::log::Error("TestPatternProducer failed to start");
@@ -297,8 +312,9 @@ int wmain(int argc, wchar_t* argv[]) {
             if (useTestPattern) return "test pattern (dev mode)";
             const bool video = bridge.IsConnected();
             const bool control = controlConnected.load();
-            if (video && control) return "streaming (video + control)";
-            if (video) return "streaming (video only)";
+            const char* videoLabel = useAoa ? "video via AOA" : "video";
+            if (video && control) return std::string("streaming (") + videoLabel + " + control)";
+            if (video) return std::string("streaming (") + videoLabel + " only)";
             return "waiting for phone...";
         });
         if (trayCreated) {

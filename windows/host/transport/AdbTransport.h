@@ -12,43 +12,27 @@
 // depending on include order at every call site.
 
 #include <cstdint>
-#include <functional>
 #include <memory>
+
+#include "transport/VideoTransport.h"
 
 namespace phonecam::transport {
 
-enum class PacketType : uint8_t { Config = 0, Frame = 1 };
-
-// payload is only valid for the duration of the VideoPacketCallback call.
-struct VideoPacket {
-    PacketType type;
-    bool keyframe;
-    uint32_t seq;
-    uint64_t timestampUs;
-    const uint8_t* payload;
-    size_t payloadSize;
-};
-
-using VideoPacketCallback = std::function<void(const VideoPacket&)>;
-
-class AdbVideoTransport {
+class AdbVideoTransport : public VideoTransport {
 public:
     AdbVideoTransport();
-    ~AdbVideoTransport();
+    ~AdbVideoTransport() override;
 
     AdbVideoTransport(const AdbVideoTransport&) = delete;
     AdbVideoTransport& operator=(const AdbVideoTransport&) = delete;
 
-    // Runs `adb forward tcp:<port> localabstract:phonecam_video` (adb
-    // located via PATH -- Phase 5 bundles a copy in third_party/platform-tools)
-    // and connects as a TCP client to 127.0.0.1:<port>, retrying briefly since
+    // Runs `adb forward tcp:27183 localabstract:phonecam_video` (adb located
+    // via PATH -- Phase 5 bundles a copy in third_party/platform-tools) and
+    // connects as a TCP client to 127.0.0.1:27183, retrying briefly since
     // forward can return before the phone-side listener actually accepts.
-    bool Connect(uint16_t port = 27183);
-    void Disconnect();
-
-    // Blocks parsing and dispatching packets until the connection closes
-    // (e.g. the phone stops capture) or a framing error occurs.
-    void RunReceiveLoop(const VideoPacketCallback& onPacket);
+    bool Connect() override;
+    void Disconnect() override;
+    void RunReceiveLoop(const VideoPacketCallback& onPacket) override;
 
 private:
     struct Impl;

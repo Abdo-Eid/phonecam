@@ -989,12 +989,19 @@ sub-interfaces at all) and `adb logcat`:
 
 **Product-shipping note, decided but not yet implemented:** end users
 must never be asked to run Zadig themselves. The real fix belongs in the
-Windows installer -- silently installing a signed WinUSB driver binding
-for this device's accessory VID/PID via `libwdi` (the library Zadig
-itself wraps) during setup, the same one-UAC-prompt shape the installer
-already has for `phonecam-svc.exe --install`/vcam `regsvr32`. Deferred to
-Phase 7's robustness pass, once the checkpoint proves the pipe itself
-works.
+Windows installer -- silently installing a `libwdi`-driven driver binding
+during setup, the same one-UAC-prompt shape the installer already has
+for `phonecam-svc.exe --install`/vcam `regsvr32`. **Correction (see item
+5 above): the binding that actually matters is libusbK on the *parent*
+composite device (`USB\VID_18D1&PID_2D01\<serial>`), not WinUSB on
+either sub-interface** -- an earlier version of this note said WinUSB,
+which was written before the real root cause (item 5) was found and
+would have had the installer target the wrong device node. The installer
+must call `libwdi` against the parent device's hardware ID, not either
+child interface. Deferred to its own follow-up phase, out of scope for
+finishing the real `AoaTransport` -- it also needs code signing and an
+install-time verification story (does it work on a machine that has
+never seen this phone?) that hasn't been designed yet.
 
 **`adb` conflicts with `libusb` over USB, but not over Wi-Fi.** `adb`
 holding the phone's ADB interface open (as soon as its server sees the
@@ -1192,12 +1199,6 @@ back to normal mode.** This matters a lot for iteration speed, since
 testing any Android code change requires reinstalling the APK. Confirmed
 this session:
 
-**Dev-workflow finding: once a phone is in AOA accessory mode, `adb`
-cannot reach it over USB at all, and there is no clean software-only way
-back to normal mode.** This matters a lot for iteration speed, since
-testing any Android code change requires reinstalling the APK. Confirmed
-this session:
-
 - Normal USB `adb` genuinely cannot connect while the device is
   enumerated in accessory mode (`adb devices` sits at "- waiting for
   device -" indefinitely) -- not a timing issue, retried well past any
@@ -1223,3 +1224,92 @@ this session:
   found earlier this phase. If wireless adb isn't reachable, a replug is
   the only path back to a state where new code can be installed and
   run.
+
+## Status: Phase 7 real `AoaTransport` (Windows host side), verified live end-to-end, 2026-08-19
+
+Built the host-side counterpart to `AoaTransport.kt`: `windows/host/transport/AoaTransport.h`/`.cpp`
+(class `AoaVideoTransport`), a direct port of `aoa_probe`'s already-debugged
+`OpenAccessoryInterface()`/`RunHandshake()`/`RunTestVideo()` logic into
+production shape. Video channel only, per an advisor review before writing
+any code -- control still runs over adb (`control/ControlTransport.h`); AOA's
+control-tagged frames are recognized (skipped, not dispatched) so the demuxer
+doesn't mis-resync on them, but nothing consumes them yet.
+
+**Design:**
+
+- **Common interface, not a subclass relationship:** extracted `VideoPacket`/
+  `PacketType`/`VideoPacketCallback` out of `AdbTransport.h` into a new
+  `transport/VideoTransport.h`, and both `AdbVideoTransport` and the new
+  `AoaVideoTransport` implement its `Connect()`/`Disconnect()`/
+  `RunReceiveLoop()` interface. `AdbVideoTransport::Connect()` lost its
+  `port` parameter (nothing called it with a non-default value) so its
+  signature matches the interface exactly. `LiveVideoBridge` now holds a
+  `std::unique_ptr<VideoTransport>` (default-constructed to
+  `AdbVideoTransport` for every existing call site) instead of owning a
+  concrete `AdbVideoTransport` -- its `Run()` supervise/reconnect loop
+  (connect, stream until disconnect, back off, retry) needed **no other
+  change** to work with AOA: it already treats "connect failed" and
+  "receive loop ended" identically and retries after a backoff, which is
+  exactly the right behavior for a transport with no clean reconnect --
+  repeated failed `Connect()` calls (logged, backed off) until the user
+  physically replugs is correct, not a bug to route around.
+- **`AoaVideoTransport::Connect()`** first tries to open an
+  already-re-enumerated accessory device (`OpenAccessoryInterface`, ported
+  verbatim from `aoa_probe`); if that fails, it looks for the phone in
+  normal mode and runs the AOA handshake (`RunHandshake`, also ported
+  verbatim) to switch it into accessory mode, then retries the open. This
+  means `phonecam-host --aoa` triggers the mode switch itself -- the user
+  doesn't need `aoa_probe --handshake` as a separate step for normal
+  operation (that tool remains useful for isolated diagnosis).
+- **Reader demuxer** is the same buffer-accumulator parser as
+  `RunTestVideo`, ported as the class's `RunReceiveLoop`: never a read
+  sized to one message, keys on the Channel tag before trusting header
+  fields, drops-and-resyncs on an unrecognized tag. Dispatches
+  `Channel.Video` frames as `VideoPacket`s (matching `AdbVideoTransport`'s
+  existing shape, so `LiveVideoBridge` needed no changes downstream of the
+  transport interface); skips `Channel.Control` frames without parsing
+  their contents.
+- **Shutdown-safety note, not present in the adb transport:** libusb
+  documents closing a device handle while a synchronous transfer is
+  in-flight on another thread as unsafe (unlike a Winsock socket, where
+  `shutdown()` safely unblocks a concurrent `recv()`). `RunReceiveLoop`
+  holds its transport's mutex for the duration of each individual
+  `libusb_bulk_transfer` call (bounded to a 200ms timeout), not the whole
+  loop -- so `Disconnect()`, possibly called from another thread, blocks
+  for at most ~200ms acquiring that lock before it's safe to close, rather
+  than racing a close against an in-flight transfer.
+- **CLI wiring:** `phonecam-host --aoa` selects `AoaVideoTransport` in
+  place of the default `AdbVideoTransport`, added alongside the existing
+  flag set (`--test-decode`, `--test-transport`, `--test-pattern`) in
+  `main.cpp`, not replacing the default. `windows/host/CMakeLists.txt`
+  gained the same `third_party/libusb` include/lib/DLL-copy wiring
+  `aoa_probe`'s `CMakeLists.txt` already had.
+
+**Verified live**, same session, phone in File Transfer mode (the
+established reliable AOA trigger): `adb kill-server` (required, same
+adb-vs-libusb conflict as always), then `phonecam-host.exe --aoa` --
+logged `AoaVideoTransport: connected` followed by
+`MFH264Decoder: output negotiated 1280x720`, i.e. the handshake, the
+re-enumeration wait, the interface claim, and real decoded frames all
+worked with zero manual intervention beyond the one adb-kill step. (The
+concurrent `ControlTransport: adb forward exited with code 1` errors are
+expected and harmless -- the control channel still needs `adb`, which was
+deliberately killed for the video test; this is the documented
+non-fatal-to-video behavior.) Then, the actual discriminating check
+(Phase 3C's own standard, not just a dumped file): `ffmpeg -f dshow -i
+video="PhoneCam (Windows Virtual Camera)"` captured 90 real frames
+through the *entire* pipeline -- `AoaVideoTransport` -> `MFH264Decoder` ->
+`SharedFrameRing` -> `MFCreateVirtualCamera` -> DirectShow -- and a
+decoded frame showed real, correctly-exposed live camera content (a dim
+indoor scene), not corrupted or blank data. This is the same proof shape
+Phase 3C used for the adb transport, now repeated for AOA.
+
+**Deliberately not done in this pass, per the advisor's scope guardrail**
+(don't restructure more than necessary to prove the video path): control
+channel over AOA, removing `MainActivity`'s TEMPORARY test wiring in favor
+of real Start-button/user-selectable-transport integration, and installer
+driver auto-install. See the top-level plan for these as separate,
+explicitly deferred items -- the Start-button integration in particular
+needs a product decision (auto-detect vs. explicit toggle vs.
+AOA-preferred-with-adb-fallback) that hasn't been made yet, not just more
+implementation.

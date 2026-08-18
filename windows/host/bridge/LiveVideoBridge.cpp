@@ -11,6 +11,9 @@ constexpr std::chrono::milliseconds kReconnectPollInterval{200};
 constexpr std::chrono::milliseconds kReconnectBackoff{2000};
 }  // namespace
 
+LiveVideoBridge::LiveVideoBridge(std::unique_ptr<phonecam::transport::VideoTransport> transport)
+    : transport_(std::move(transport)) {}
+
 LiveVideoBridge::~LiveVideoBridge() { Stop(); }
 
 bool LiveVideoBridge::Start() {
@@ -30,7 +33,7 @@ bool LiveVideoBridge::Start() {
 
 void LiveVideoBridge::Stop() {
     running_.store(false);
-    transport_.Disconnect();  // unblocks a pending connect retry or the receive loop's blocking recv()
+    transport_->Disconnect();  // unblocks a pending connect retry or the receive loop's blocking recv()
     if (thread_.joinable()) {
         thread_.join();
     }
@@ -71,18 +74,18 @@ bool LiveVideoBridge::WaitBeforeRetry() {
 // capture" again -- there's no PC->phone wake command for that yet.
 void LiveVideoBridge::Run() {
     while (running_.load()) {
-        if (!transport_.Connect()) {
+        if (!transport_->Connect()) {
             phonecam::log::Error("LiveVideoBridge: connect failed, will retry (is capture running on the phone?)");
         } else {
             connected_.store(true);
-            transport_.RunReceiveLoop([this](const phonecam::transport::VideoPacket& pkt) {
+            transport_->RunReceiveLoop([this](const phonecam::transport::VideoPacket& pkt) {
                 decoder_.Feed(pkt.payload, pkt.payloadSize, pkt.timestampUs,
                                [this](const phonecam::decode::DecodedFrame& frame) {
                                    ring_.WriteFrame(frame.width, frame.height, frame.timestampUs, frame.nv12);
                                });
             });
             connected_.store(false);
-            transport_.Disconnect();
+            transport_->Disconnect();
             if (!running_.load()) break;
             phonecam::log::Info("LiveVideoBridge: receive loop ended, reconnecting");
         }
