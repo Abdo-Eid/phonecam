@@ -2,6 +2,7 @@ package io.github.abdoeid.phonecam.ui.main
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -37,6 +38,17 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
   }
   val permissionLauncher =
     rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted -> hasCameraPermission = granted }
+
+  // Phase 5: CaptureService's ongoing notification needs this on API 33+ to actually be visible
+  // (the foreground service itself still runs without it -- this is UX polish, not a gate).
+  // Requested proactively rather than tied to the camera-permission flow since it's unrelated to
+  // whether capture can start at all.
+  val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+  LaunchedEffect(Unit) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+  }
 
   Column(
     modifier = modifier.fillMaxSize().padding(16.dp),

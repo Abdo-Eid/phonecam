@@ -1,10 +1,16 @@
 package io.github.abdoeid.phonecam.ui.main
 
 import android.app.Application
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.hardware.camera2.CameraCharacteristics
+import android.os.IBinder
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import io.github.abdoeid.phonecam.capture.CaptureController
+import io.github.abdoeid.phonecam.capture.CaptureService
 import io.github.abdoeid.phonecam.capture.CaptureState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -23,22 +29,41 @@ sealed interface CaptureUiState {
   data class Error(val message: String) : CaptureUiState
 }
 
+// Phase 5: capture itself now lives in CaptureService (see its class doc), not here -- this
+// ViewModel only sends start/stop intents and polls the bound service's state. Binding (not
+// starting) in init{} so state can be read even if the service was already running from a prior
+// Activity instance; ACTION_START/ACTION_STOP intents (not direct method calls on the bound
+// service) own the actual start/stop, since that's the pattern startForegroundService() requires
+// -- the service must reach startForeground() from within its own onStartCommand.
 class MainScreenViewModel(application: Application) : AndroidViewModel(application) {
-  private val controller = CaptureController(application)
   private val _uiState = MutableStateFlow<CaptureUiState>(CaptureUiState.Idle)
   val uiState: StateFlow<CaptureUiState> = _uiState.asStateFlow()
 
+  private var boundService: CaptureService? = null
+  private var isBound = false
   private var statsJob: Job? = null
+
+  private val connection =
+    object : ServiceConnection {
+      override fun onServiceConnected(name: ComponentName?, binder: IBinder) {
+        boundService = (binder as CaptureService.LocalBinder).getService()
+      }
+
+      override fun onServiceDisconnected(name: ComponentName?) {
+        boundService = null
+      }
+    }
+
+  init {
+    val context = getApplication<Application>()
+    isBound = context.bindService(Intent(context, CaptureService::class.java), connection, Context.BIND_AUTO_CREATE)
+  }
 
   // TODO(Phase 6+): resolution/fps become PC-driven SetResolution/SetFps commands once the vcam
   // supports a non-fixed stream size (docs/architecture.md's Phase 4 section explains why that's
   // out of scope for now). 720p is the default here because it's the more thoroughly measured of
   // the two Phase 2 exit-criterion datapoints (~28-30fps sustained, vs. only a frame count for the
   // 1080p run).
-  //
-  // lensFacing back to BACK: Phase 3C had this on FRONT as a temporary sanity-check override: the
-  // real fix -- PC-driven SetLens over the control channel -- now exists and is verified against
-  // the device (see docs/architecture.md's Phase 4 section), so the override is no longer needed.
   fun startCapture(
     width: Int = 1280,
     height: Int = 720,
@@ -47,19 +72,38 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     lensFacing: Int = CameraCharacteristics.LENS_FACING_BACK,
   ) {
     _uiState.value = CaptureUiState.WaitingForConnection
-    controller.start(width, height, fps, bitrateBps, { error ->
-      statsJob?.cancel()
-      controller.stop()
-      _uiState.value = CaptureUiState.Error(error.message ?: error.toString())
-    }, lensFacing)
+    val context = getApplication<Application>()
+    val intent =
+      Intent(context, CaptureService::class.java).apply {
+        action = CaptureService.ACTION_START
+        putExtra(CaptureService.EXTRA_WIDTH, width)
+        putExtra(CaptureService.EXTRA_HEIGHT, height)
+        putExtra(CaptureService.EXTRA_FPS, fps)
+        putExtra(CaptureService.EXTRA_BITRATE, bitrateBps)
+        putExtra(CaptureService.EXTRA_LENS_FACING, lensFacing)
+      }
+    ContextCompat.startForegroundService(context, intent)
+
+    statsJob?.cancel()
     statsJob =
       viewModelScope.launch {
-        while (_uiState.value !is CaptureUiState.Error) {
+        while (true) {
+          val service = boundService
+          if (service == null) {
+            // Bind hasn't completed yet -- init{} kicked it off, but onServiceConnected is async.
+            delay(100)
+            continue
+          }
+          val error = service.lastError
+          if (error != null) {
+            _uiState.value = CaptureUiState.Error(error.message ?: error.toString())
+            break
+          }
           _uiState.value =
-            when (controller.state) {
+            when (service.state) {
               CaptureState.IDLE -> CaptureUiState.Idle
               CaptureState.WAITING_FOR_CONNECTION -> CaptureUiState.WaitingForConnection
-              CaptureState.STREAMING -> CaptureUiState.Streaming(controller.framesEncoded, controller.measuredFps)
+              CaptureState.STREAMING -> CaptureUiState.Streaming(service.framesEncoded, service.measuredFps)
             }
           delay(500)
         }
@@ -69,12 +113,20 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
   fun stopCapture() {
     statsJob?.cancel()
     statsJob = null
-    controller.stop()
+    val context = getApplication<Application>()
+    context.startService(Intent(context, CaptureService::class.java).setAction(CaptureService.ACTION_STOP))
     _uiState.value = CaptureUiState.Idle
   }
 
   override fun onCleared() {
     super.onCleared()
-    controller.stop()
+    statsJob?.cancel()
+    // Deliberately not stopping capture here -- CaptureService outliving this ViewModel (e.g. the
+    // Activity being destroyed while backgrounded) is the entire point of Phase 5's foreground
+    // service. Only unbind; the service keeps running until an explicit ACTION_STOP.
+    if (isBound) {
+      getApplication<Application>().unbindService(connection)
+      isBound = false
+    }
   }
 }

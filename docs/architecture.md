@@ -649,14 +649,69 @@ as before). `docs/build.md` updated to match -- the manual "copy the
 rebuilt DLL" step is gone; only the "restart FrameServer services if
 locked" step remains, and only when needed.
 
-**Still open for Phase 5:** foreground service + wake lock on the Android
-side (currently a plain Activity -- backgrounding/screen-off survival is
-untested and likely doesn't work yet, since nothing prevents the OS from
-suspending capture); the installer; the tray app. Also still open, unclear
-if it's a real gap: if the phone app is ever sitting in its own Idle
-screen (nobody bound to the video socket) when the host tries to
+**Still open for Phase 5:** the installer; the tray app. Also still open,
+unclear if it's a real gap: if the phone app is ever sitting in its own
+Idle screen (nobody bound to the video socket) when the host tries to
 reconnect, the host will retry forever with no way to ask the phone to
 start capture again -- there's no PC->phone "wake" command yet. Not hit in
 this session's testing (the Error-path auto-retry from Phase 4's stability
 fix kept the phone side coming back on its own), but worth deciding on
 purpose rather than discovering it live.
+
+## Status: Phase 5 continued (Android foreground service), 2026-08-18
+
+Added the second piece of host-independent reconnect robustness: a camera-
+type foreground service (`CaptureService`, `android:foregroundServiceType=
+"camera"`) that now owns `CaptureController` instead of
+`MainScreenViewModel` owning it directly. This is what makes
+backgrounding/screen-off survival possible at all -- a plain
+Activity-owned controller dies with the Activity, and Android is free to
+freeze or kill a backgrounded process (Doze/App Standby) with no foreground
+service holding it open. `MainScreenViewModel` now just sends
+`ACTION_START`/`ACTION_STOP` intents to the service and polls its bound
+state (`state`, `framesEncoded`, `measuredFps`, `lastError`) the same way
+it used to poll `CaptureController` directly -- `CaptureController` itself
+is unchanged. The service acquires a `PARTIAL_WAKE_LOCK` (capped at 12h,
+not indefinite) alongside `startForeground()` so the CPU keeps running with
+the screen off, and posts a low-importance ongoing notification (tapping it
+reopens `MainActivity`); `POST_NOTIFICATIONS` is requested proactively on
+API 33+ so that notification is actually visible, though the service runs
+regardless of whether it's granted.
+
+**A real bug found via live testing, not simulated -- the user tapped
+Stop/Cancel themselves and reported "socket closed":**
+`CaptureController.stop()` closes the video socket before it stops the
+encoder (documented in its own comments, from Phase 3B), so the encoder's
+drain thread hitting a write failure is an expected, routine part of any
+stop -- not just a mid-stream error. The old `MainScreenViewModel` was
+accidentally safe from this: `stopCapture()` called `controller.stop()`
+*synchronously* and then unconditionally overwrote the UI state to `Idle`
+afterward, so a same-thread write-order guarantee always made Idle win
+over any reentrant error write. Routing stop through `CaptureService`
+broke that guarantee -- `ACTION_STOP` is handled asynchronously (the next
+message on the service's main-thread queue), so the ViewModel's `Idle`
+write now happens *before* the actual `controller.stop()` teardown (and
+its potential reentrant `onError` call) has even run, and a subsequent
+poll (or a fresh poll from an immediate restart) could pick up the stale
+`lastError` and surface a spurious "Error: Socket closed" -- which then
+fed MainScreen's existing Error-path auto-retry, visible in logcat as
+repeated unexplained camera/encoder re-setup cycles after a single Cancel
+tap. Fixed with a `stopRequested` flag in `CaptureService` (mirroring
+`CaptureController`'s own stop-idempotency guard, but one layer up):
+`onCaptureError` now ignores any error that arrives while a stop was
+already requested, so expected teardown noise is distinguished from a
+genuine mid-stream failure, which still surfaces normally.
+
+**Verified live by the user, not simulated, after that fix:** Stop then
+Start capture again -- clean, no spurious error. Screen off for ~20-30s
+mid-stream, then back on -- still connected. Home button (backgrounding
+the app) for a similar interval, then back -- still connected. Both are
+exactly Phase 5's original roadmap exit criterion ("survives unplug/replug
+and screen-off").
+
+**Still open for Phase 5:** the installer; the tray app. The known
+host-side reconnect gap (no PC->phone "wake" command if the phone is
+sitting idle) is now slightly more relevant, since a backgrounded/
+screen-off phone that later gets its capture stopped by something outside
+this app's control would hit exactly that gap -- still not decided on
+purpose.
