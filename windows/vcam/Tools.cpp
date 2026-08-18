@@ -263,24 +263,44 @@ const LSTATUS RegWriteValue(HKEY key, PCWSTR name, DWORD value)
 	return RegSetValueEx(key, name, 0, REG_DWORD, reinterpret_cast<BYTE const*>(&value), sizeof(value));
 }
 
-static inline void RGB24ToYUY2(int r, int g, int b, BYTE* y, BYTE* u, BYTE* v)
+// BT.601 (SD) vs BT.709 (HD) integer coefficients, studio/limited range (16-235 luma,
+// 16-240 chroma), ×256 fixed point -- Phase 6 fix. This project only ever streams 720p/1080p
+// (never SD), so useBt709 is effectively always true in practice, but the branch is kept for
+// correctness rather than hardcoding one matrix, matching the broadcast convention of BT.709
+// for >=720 lines and BT.601 below that. Previously this always used BT.601 regardless of
+// content, which is the documented "washed out" color bug (docs/architecture.md's Phase 6
+// section) -- BT.601 coefficients applied to BT.709-native HD content shift reds/blues
+// noticeably. Both coefficient sets independently verified: their Y-row terms equal
+// (219/255)*Kr,Kg,Kb*256 for each standard's Kr/Kg/Kb, confirming the derivation.
+static inline void RGB24ToYUY2(int r, int g, int b, BYTE* y, BYTE* u, BYTE* v, bool useBt709)
 {
-	*y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-	*u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-	*v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+	if (useBt709)
+	{
+		*y = ((47 * r + 157 * g + 16 * b + 128) >> 8) + 16;
+		*u = ((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128;
+		*v = ((112 * r - 102 * g - 10 * b + 128) >> 8) + 128;
+	}
+	else
+	{
+		*y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+		*u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+		*v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+	}
 }
 
-static inline void RGB24ToY(int r, int g, int b, BYTE* y)
+static inline void RGB24ToY(int r, int g, int b, BYTE* y, bool useBt709)
 {
-	*y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+	*y = useBt709
+		? ((47 * r + 157 * g + 16 * b + 128) >> 8) + 16
+		: ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
 }
 
-static inline void RGB32ToNV12(BYTE rgb1[8], BYTE rgb2[8], BYTE* y1, BYTE* y2, BYTE* uv)
+static inline void RGB32ToNV12(BYTE rgb1[8], BYTE rgb2[8], BYTE* y1, BYTE* y2, BYTE* uv, bool useBt709)
 {
-	RGB24ToYUY2(rgb1[2], rgb1[1], rgb1[0], y1, uv, uv + 1);
-	RGB24ToY(rgb1[6], rgb1[5], rgb1[4], y1 + 1);
-	RGB24ToYUY2(rgb2[2], rgb2[1], rgb2[0], y2, uv, uv + 1);
-	RGB24ToY(rgb2[6], rgb2[5], rgb2[4], y2 + 1);
+	RGB24ToYUY2(rgb1[2], rgb1[1], rgb1[0], y1, uv, uv + 1, useBt709);
+	RGB24ToY(rgb1[6], rgb1[5], rgb1[4], y1 + 1, useBt709);
+	RGB24ToYUY2(rgb2[2], rgb2[1], rgb2[0], y2, uv, uv + 1, useBt709);
+	RGB24ToY(rgb2[6], rgb2[5], rgb2[4], y2 + 1, useBt709);
 };
 
 HRESULT RGB32ToNV12(BYTE* input, ULONG inputSize, LONG inputStride, UINT width, UINT height, BYTE* output, ULONG ouputSize, LONG outputStride)
@@ -290,6 +310,7 @@ HRESULT RGB32ToNV12(BYTE* input, ULONG inputSize, LONG inputStride, UINT width, 
 	RETURN_HR_IF(E_UNEXPECTED, width * 4 * height > inputSize);
 	RETURN_HR_IF(E_UNEXPECTED, width * 1.5 * height > ouputSize);
 
+	const bool useBt709 = height >= 720;
 	for (DWORD h = 0; h < height - 1; h += 2)
 	{
 		auto rgb1 = h * inputStride + input;
@@ -299,7 +320,7 @@ HRESULT RGB32ToNV12(BYTE* input, ULONG inputSize, LONG inputStride, UINT width, 
 		auto uv = (h / 2 + height) * outputStride + output;
 		for (DWORD w = 0; w < width; w += 2)
 		{
-			RGB32ToNV12(rgb1, rgb2pRGB2, y1, y2, uv);
+			RGB32ToNV12(rgb1, rgb2pRGB2, y1, y2, uv, useBt709);
 			rgb1 += 8;
 			rgb2pRGB2 += 8;
 			y1 += 2;
@@ -315,19 +336,28 @@ static inline BYTE ClampToByte(int value)
 	return (BYTE)(value < 0 ? 0 : (value > 255 ? 255 : value));
 }
 
-// Inverse of RGB32ToNV12 above (same BT.601 studio-range coefficients).
-// Per-pixel rather than the 2x2-block-optimized style of the forward
-// conversion: this is Phase 1b proof-of-concept code, not the perf-tuned
-// path -- see docs/architecture.md Phase 6.
-static inline void NV12ToRGB32(BYTE y, BYTE u, BYTE v, BYTE* bgra)
+// Inverse of RGB32ToNV12 above -- same BT.601/BT.709 selection (Phase 6 fix, see that
+// function's comment). Per-pixel rather than the 2x2-block-optimized style of the forward
+// conversion: this is Phase 1b proof-of-concept code, not the perf-tuned path -- see
+// docs/architecture.md's Phase 6 section.
+static inline void NV12ToRGB32(BYTE y, BYTE u, BYTE v, BYTE* bgra, bool useBt709)
 {
 	int c = (int)y - 16;
 	int d = (int)u - 128;
 	int e = (int)v - 128;
-	bgra[0] = ClampToByte((298 * c + 516 * d + 128) >> 8);         // B
-	bgra[1] = ClampToByte((298 * c - 100 * d - 208 * e + 128) >> 8); // G
-	bgra[2] = ClampToByte((298 * c + 409 * e + 128) >> 8);         // R
-	bgra[3] = 255;                                                  // A
+	if (useBt709)
+	{
+		bgra[0] = ClampToByte((298 * c + 541 * d + 128) >> 8);          // B
+		bgra[1] = ClampToByte((298 * c - 55 * d - 136 * e + 128) >> 8); // G
+		bgra[2] = ClampToByte((298 * c + 459 * e + 128) >> 8);          // R
+	}
+	else
+	{
+		bgra[0] = ClampToByte((298 * c + 516 * d + 128) >> 8);          // B
+		bgra[1] = ClampToByte((298 * c - 100 * d - 208 * e + 128) >> 8); // G
+		bgra[2] = ClampToByte((298 * c + 409 * e + 128) >> 8);          // R
+	}
+	bgra[3] = 255;                                                       // A
 }
 
 HRESULT NV12ToRGB32(BYTE* input, ULONG inputSize, LONG inputStride, UINT width, UINT height, BYTE* output, ULONG outputSize, LONG outputStride)
@@ -337,6 +367,7 @@ HRESULT NV12ToRGB32(BYTE* input, ULONG inputSize, LONG inputStride, UINT width, 
 	RETURN_HR_IF(E_UNEXPECTED, (ULONG)(width * 1.5 * height) > inputSize);
 	RETURN_HR_IF(E_UNEXPECTED, (ULONG)(width * 4 * height) > outputSize);
 
+	const bool useBt709 = height >= 720;
 	const BYTE* yPlane = input;
 	const BYTE* uvPlane = input + (size_t)height * inputStride;
 
@@ -350,7 +381,7 @@ HRESULT NV12ToRGB32(BYTE* input, ULONG inputSize, LONG inputStride, UINT width, 
 			BYTE y = yRow[w];
 			BYTE u = uvRow[(w / 2) * 2];
 			BYTE v = uvRow[(w / 2) * 2 + 1];
-			NV12ToRGB32(y, u, v, outRow + (size_t)w * 4);
+			NV12ToRGB32(y, u, v, outRow + (size_t)w * 4, useBt709);
 		}
 	}
 	return S_OK;

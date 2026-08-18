@@ -22,6 +22,7 @@ import phonecam.control.SetFocusMode
 import phonecam.control.SetLens
 import phonecam.control.SetTorch
 import phonecam.control.SetZoomRatio
+import phonecam.control.Stats
 import phonecam.control.TapToFocus
 
 /**
@@ -127,6 +128,18 @@ class ControlChannel(private val context: Context, private val listener: Control
         focusMode, evSteps, false, 0, 0L, 0, 0u, torchOn, false,
       )
     val envelope = ControlEnvelope.createControlEnvelope(builder, 0u, ControlPayload.CurrentSettings, payloadOffset)
+    ControlEnvelope.finishControlEnvelopeBuffer(builder, envelope)
+    sendBytes(builder)
+  }
+
+  // Phase 6: periodic telemetry, previously defined in the protocol (proto/control.fbs) but
+  // never sent -- CaptureController calls this roughly once a second while streaming (see its
+  // statsJob), feeding the adaptive-bitrate policy there and the host console's "Stats" line.
+  fun sendStats(encodeFps: Float, bitrateKbps: Int, droppedFrames: Int, thermalStatus: Byte) {
+    val builder = FlatBufferBuilder(64)
+    val payloadOffset =
+      Stats.createStats(builder, encodeFps, bitrateKbps.toUInt(), droppedFrames.toUInt(), thermalStatus)
+    val envelope = ControlEnvelope.createControlEnvelope(builder, 0u, ControlPayload.Stats, payloadOffset)
     ControlEnvelope.finishControlEnvelopeBuffer(builder, envelope)
     sendBytes(builder)
   }

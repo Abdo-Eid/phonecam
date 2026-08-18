@@ -3,6 +3,7 @@ package io.github.abdoeid.phonecam.capture
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraMetadata
+import android.os.PowerManager
 import android.os.SystemClock
 import io.github.abdoeid.phonecam.control.ControlChannel
 import io.github.abdoeid.phonecam.control.ControlCommandListener
@@ -10,10 +11,17 @@ import io.github.abdoeid.phonecam.encode.H264Encoder
 import io.github.abdoeid.phonecam.transport.VideoSocketServer
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.max
+import kotlin.math.min
 import phonecam.control.AckResult
+import phonecam.control.ThermalStatus
 import phonecam.wire.AfMode
 
 enum class CaptureState { IDLE, WAITING_FOR_CONNECTION, STREAMING }
+
+// Adaptive bitrate never drops below this floor -- degrading further than ~1Mbps produces
+// visibly unusable quality regardless of thermal/dropped-frame pressure.
+private const val MIN_ADAPTIVE_BITRATE_BPS = 1_000_000
 
 /**
  * Wires CameraCapture's output straight into H264Encoder's input Surface, which streams
@@ -59,6 +67,16 @@ class CaptureController(private val context: Context) {
   private var lastFocusMode: Byte = AfMode.Continuous
   private var lastTorch = false
 
+  // Ceiling the adaptive-bitrate loop (below) won't exceed -- the last explicitly requested
+  // value, whether from start()'s caller or a PC SetBitrate command. Distinct from
+  // [lastBitrateBps], which tracks whatever's actually applied right now (possibly reduced by
+  // adaptation); a PC-issued SetBitrate updates both, so it always wins over adaptation rather
+  // than being silently overwritten by the next stats tick.
+  @Volatile
+  private var targetBitrateBps = 0
+
+  private var statsThread: Thread? = null
+
   // Dispatches PC -> phone commands (docs/control-protocol.md) onto whichever camera/encoder
   // instance is live right now. Runs on ControlChannel's own receive thread; camera/encoder is
   // null until the video accept-thread finishes standing them up, and briefly null again mid
@@ -91,6 +109,7 @@ class CaptureController(private val context: Context) {
         val enc = encoder ?: return AckResult.Busy
         enc.setBitrate(bitrateBps)
         lastBitrateBps = bitrateBps
+        targetBitrateBps = bitrateBps // an explicit PC request re-anchors the adaptive ceiling too
         pushCurrentSettings()
         return AckResult.Ok
       }
@@ -136,6 +155,7 @@ class CaptureController(private val context: Context) {
     lastEv = 0
     lastFocusMode = AfMode.Continuous
     lastTorch = false
+    targetBitrateBps = bitrateBps
 
     acceptThread =
       Thread({
@@ -202,6 +222,7 @@ class CaptureController(private val context: Context) {
           camera = cam
           startTimeMs = SystemClock.elapsedRealtime()
           state = CaptureState.STREAMING
+          statsThread = Thread({ runStatsLoop(enc, fps, myCancelToken::get) }, "StatsLoop").apply { start() }
           cam.start(enc.inputSurface, fps, onError, lensFacing)
         }, "VideoServer-accept")
         .apply { start() }
@@ -269,6 +290,59 @@ class CaptureController(private val context: Context) {
     encoder?.stop()
     encoder = null
     startTimeMs = 0
+    // Not joined -- unlike acceptThread/controlThread it holds no OS resource that must be
+    // released before stop() returns, only a sleep loop that checks cancelToken every ~1s.
+    statsThread = null
+  }
+
+  // Phase 6: periodic telemetry (proto/control.fbs's Stats, previously defined but never sent)
+  // plus a simple adaptive-bitrate policy driven by the same tick. "Dropped frames" is an
+  // estimate -- MediaCodec's surface-input path doesn't expose a real drop counter -- computed as
+  // expected frames at the target fps minus frames actually encoded in the interval, which is
+  // exactly what "dropped" means from the pipeline's perspective regardless of which stage lost
+  // them (camera, surface, or encoder).
+  private fun runStatsLoop(enc: H264Encoder, targetFps: Int, isCancelled: () -> Boolean) {
+    val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+    var appliedBitrateBps = targetBitrateBps
+    var lastFrameCount = framesEncoded
+    var lastTickMs = SystemClock.elapsedRealtime()
+
+    while (!isCancelled()) {
+      Thread.sleep(1000)
+      if (isCancelled()) break
+
+      val nowMs = SystemClock.elapsedRealtime()
+      val intervalSec = (nowMs - lastTickMs) / 1000.0
+      val frames = framesEncoded
+      val encodedThisTick = frames - lastFrameCount
+      val expectedThisTick = (intervalSec * targetFps).toInt()
+      val dropped = max(0, expectedThisTick - encodedThisTick)
+      lastFrameCount = frames
+      lastTickMs = nowMs
+
+      val thermalStatus = mapThermalStatus(powerManager.currentThermalStatus)
+      val ceiling = targetBitrateBps // re-read: onSetBitrate may have moved it since the last tick
+
+      val newBitrate =
+        when {
+          thermalStatus >= ThermalStatus.Severe ->
+            max(MIN_ADAPTIVE_BITRATE_BPS, (appliedBitrateBps * 0.5).toInt())
+          thermalStatus == ThermalStatus.Moderate ->
+            max(MIN_ADAPTIVE_BITRATE_BPS, (appliedBitrateBps * 0.75).toInt())
+          thermalStatus <= ThermalStatus.Light && appliedBitrateBps < ceiling ->
+            min(ceiling, (appliedBitrateBps * 1.2).toInt().coerceAtLeast(appliedBitrateBps + 1))
+          else -> appliedBitrateBps
+        }.coerceAtMost(ceiling)
+
+      if (newBitrate != appliedBitrateBps) {
+        appliedBitrateBps = newBitrate
+        enc.setBitrate(appliedBitrateBps)
+        lastBitrateBps = appliedBitrateBps
+        pushCurrentSettings()
+      }
+
+      controlChannel?.sendStats(measuredFps.toFloat(), appliedBitrateBps / 1000, dropped, thermalStatus)
+    }
   }
 
   val framesEncoded: Int
@@ -292,4 +366,16 @@ private fun afModeToCamera2(mode: Byte): Int? =
     AfMode.Macro -> CameraMetadata.CONTROL_AF_MODE_MACRO
     AfMode.EdgeCapture -> CameraMetadata.CONTROL_AF_MODE_EDOF
     else -> null
+  }
+
+// PowerManager's 7 thermal levels collapse onto proto/control.fbs's 5-level ThermalStatus enum --
+// CRITICAL/EMERGENCY/SHUTDOWN all clamp to our top level (Critical), since by that point the
+// distinction doesn't change what the PC side or the adaptive-bitrate policy should do about it.
+private fun mapThermalStatus(status: Int): Byte =
+  when (status) {
+    PowerManager.THERMAL_STATUS_NONE -> ThermalStatus.Nominal
+    PowerManager.THERMAL_STATUS_LIGHT -> ThermalStatus.Light
+    PowerManager.THERMAL_STATUS_MODERATE -> ThermalStatus.Moderate
+    PowerManager.THERMAL_STATUS_SEVERE -> ThermalStatus.Severe
+    else -> ThermalStatus.Critical
   }

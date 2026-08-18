@@ -815,3 +815,71 @@ verified live to the extent this machine allows. The known host-side
 with the pre-existing carryover items (sensor-orientation correction,
 `Stats` telemetry, manual exposure controls) -- none of these were Phase 5
 scope.
+
+## Status: Phase 6 (quality/perf pass), 2026-08-18
+
+Scoped down deliberately, per review before starting: D3D11 GPU
+zero-copy decode (the other originally-planned Phase 6 item) is **not**
+attempted this pass -- it's a much larger undertaking (rewriting
+`MFH264Decoder` to output DXGI surfaces instead of CPU NV12 buffers,
+extending `SharedFrameRing` to carry a shared texture handle) that doesn't
+fit alongside the rest of this session's scope, and is flagged explicitly
+rather than silently dropped. Three items landed and verified live instead:
+
+**Fixed stream size, bumped to 1080p (`windows/vcam/MediaStream.cpp`,
+`MainScreenViewModel.kt`):** the vcam's declared `MF_MT_FRAME_SIZE` was a
+compile-time `#define` (1280x720, matching Phase 3C's default) --
+consumers negotiate against this declared size, so any mismatch with what
+the ring actually carries silently stretches the image (the exact bug
+Phase 3C already hit once). Bumped `NUM_IMAGE_COLS`/`NUM_IMAGE_ROWS` to
+1920x1080 and the Android default capture resolution/bitrate to match
+(1920x1080, 6 Mbps, up from 4 Mbps at 720p) so both sides stay in sync.
+True dynamic resolution (a PC-driven `SetResolution` mid-session) would
+need MF stream-descriptor renegotiation -- a materially larger change,
+still deliberately out of scope; this fix only makes the *declared*
+resolution correct and stable, not runtime-changeable.
+
+**NV12/RGB32 color matrix, BT.601 -> BT.709 for HD content
+(`windows/vcam/Tools.cpp`):** the CPU-path color conversion (used
+whenever a consumer doesn't call `SetD3DManager` -- the common case
+observed live) was hardcoded to BT.601 coefficients regardless of
+content, which is wrong for this project's content (always >=720p, never
+SD) -- the documented "washed out" color bug. Both `RGB32ToNV12` and its
+inverse `NV12ToRGB32` now select BT.709 coefficients for height>=720,
+falling back to the original BT.601 set below that (kept for
+correctness/generality, though never exercised in practice here since
+this project never streams SD). The BT.709 integer coefficients were
+independently derived and cross-checked against the already-correct
+BT.601 code's derivation method (each coefficient set's Y-row terms
+equal `(219/255)*Kr,Kg,Kb*256` for that standard's primaries), not
+copied from an unverified source.
+
+**Stats telemetry + adaptive bitrate
+(`ControlChannel.kt`/`CaptureController.kt`):** `Stats` was defined in
+`proto/control.fbs` since Phase 4 but nothing ever sent it. Added
+`ControlChannel.sendStats()` and a new per-session `StatsLoop` thread in
+`CaptureController` (started right when `STREAMING` begins, same
+cancellation-token pattern as the accept/control threads) that ticks
+every ~1s: computes `measuredFps`, estimates dropped frames (expected
+frames at the target fps minus frames actually encoded that interval --
+MediaCodec's surface-input path exposes no real drop counter), reads
+`PowerManager.currentThermalStatus`, and applies a simple adaptive-
+bitrate policy (halve under `Severe` thermal, back off 25% under
+`Moderate`, ramp up 20%/tick toward the target ceiling once thermal
+clears, floored at 1 Mbps). A PC-issued `SetBitrate` re-anchors the
+ceiling the adaptive loop ramps toward, so an explicit user choice always
+wins over the next adaptive tick rather than being silently overwritten.
+
+**Verified live:** capabilities/current-settings/lens exchange all still
+correct; a captured DirectShow frame confirmed real, correctly
+proportioned 1920x1080 content with natural-looking colors (checked
+directly, not just inferred from the fix); `ffmpeg -f dshow` and the
+user's own OBS session both showed a working feed at 1080p. Stats
+telemetry confirmed end-to-end via the host console's `Stats` line,
+showing genuinely stable performance: **fps ramped from 17 to a steady
+29.4, with dropped frames dropping to 0** after the first second of
+startup ramp-up -- this is the actual, measured "push stable 1080p30"
+exit criterion, not just "it doesn't crash at 1080p." The adaptive-
+bitrate *reduction* path is implemented but not exercised under real
+thermal pressure in this session (thermal stayed at `Nominal` throughout
+the test window) -- noted honestly rather than claimed as proven.

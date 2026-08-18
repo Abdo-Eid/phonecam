@@ -24,15 +24,18 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 	auto types = wil::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFMediaType>>(2);
 
 	// Must match the phone's actual capture resolution (MainScreenViewModel's
-	// default, currently 720p) -- FrameGenerator sizes its D2D1 bitmap to
-	// whatever's really in the ring, but this declared MF_MT_FRAME_SIZE is
-	// what consumers actually negotiate against, so a mismatch here silently
-	// stretches the real content to fit (e.g. the original 1280x960 -- left
-	// over from Phase 1's TestPatternProducer default -- vertically stretched
-	// live 1280x720 phone frames by 1.33x). Static for now: dynamic
-	// resolution (matching PC-driven SetResolution) is Phase 4 scope.
-#define NUM_IMAGE_COLS 1280
-#define NUM_IMAGE_ROWS 720
+	// default -- see docs/architecture.md's Phase 6 section) -- FrameGenerator
+	// sizes its D2D1 bitmap to whatever's really in the ring, but this
+	// declared MF_MT_FRAME_SIZE is what consumers actually negotiate against,
+	// so a mismatch here silently stretches the real content to fit (e.g. the
+	// original 1280x960 -- left over from Phase 1's TestPatternProducer
+	// default -- vertically stretched live 1280x720 phone frames by 1.33x).
+	// Bumped to 1080p in Phase 6 ("push stable 1080p30" exit criterion) --
+	// still static: true dynamic resolution (matching a future PC-driven
+	// SetResolution) would need MF stream-descriptor renegotiation, a much
+	// larger change deliberately out of Phase 6's quality/perf scope.
+#define NUM_IMAGE_COLS 1920
+#define NUM_IMAGE_ROWS 1080
 
 	wil::com_ptr_nothrow<IMFMediaType> rgbType;
 	RETURN_IF_FAILED(MFCreateMediaType(&rgbType));

@@ -59,16 +59,17 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     isBound = context.bindService(Intent(context, CaptureService::class.java), connection, Context.BIND_AUTO_CREATE)
   }
 
-  // TODO(Phase 6+): resolution/fps become PC-driven SetResolution/SetFps commands once the vcam
+  // TODO(Phase 7+): resolution/fps become PC-driven SetResolution/SetFps commands once the vcam
   // supports a non-fixed stream size (docs/architecture.md's Phase 4 section explains why that's
-  // out of scope for now). 720p is the default here because it's the more thoroughly measured of
-  // the two Phase 2 exit-criterion datapoints (~28-30fps sustained, vs. only a frame count for the
-  // 1080p run).
+  // out of scope for now). 1080p is the default here as of Phase 6 ("push stable 1080p30" exit
+  // criterion) -- matches windows/vcam/MediaStream.cpp's now-1080p declared stream size; a
+  // mismatch here would silently stretch the image again, the same bug Phase 3C already fixed
+  // once for 720p.
   fun startCapture(
-    width: Int = 1280,
-    height: Int = 720,
+    width: Int = 1920,
+    height: Int = 1080,
     fps: Int = 30,
-    bitrateBps: Int = 4_000_000,
+    bitrateBps: Int = 6_000_000,
     lensFacing: Int = CameraCharacteristics.LENS_FACING_BACK,
   ) {
     _uiState.value = CaptureUiState.WaitingForConnection
