@@ -12,6 +12,7 @@ Release/
 *.exp
 *.lib
 *.dll
+!third_party/**/*.lib
 !third_party/**/*.dll
 .vs/
 CMakeFiles/

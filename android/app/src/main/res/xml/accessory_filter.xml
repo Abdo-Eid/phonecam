@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Matches the AOA identification strings the host sends via ACCESSORY_SEND_STRING during the
+     handshake: these must mirror windows/common/aoa/AoaIdentity.h EXACTLY (manufacturer, model,
+     version). Android's accessory auto-launch intent is matched against these three attributes;
+     a mismatch fails silently (the USB_ACCESSORY_ATTACHED intent just never fires, no error
+     anywhere), so if the host's AoaIdentity.h ever changes, this file has to change with it. -->
+<resources>
+    <usb-accessory
+        manufacturer="PhoneCam"
+        model="PhoneCam USB Webcam"
+        version="0.7.0" />
+</resources>

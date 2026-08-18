@@ -883,3 +883,210 @@ exit criterion, not just "it doesn't crash at 1080p." The adaptive-
 bitrate *reduction* path is implemented but not exercised under real
 thermal pressure in this session (thermal stayed at `Nominal` throughout
 the test window) -- noted honestly rather than claimed as proven.
+
+## Status: Phase 7 in progress (AOA transport), 2026-08-18/19
+
+Goal: replace the adb-forward transport with a direct USB accessory
+connection (Android's AOA framework + `libusb` on the host), so the
+product no longer requires Developer Options -> USB debugging. Scoped
+down to a single checkpoint before touching the real transport: prove a
+host-readable bulk pipe exists at all, via a throwaway diagnostic tool
+(`windows/tools/aoa_probe/`, explicitly not shipping product) and a
+minimal Android side (`transport/AoaAccessoryTransport.kt`, a 500ms
+heartbeat write over `openAccessory()`'s pipe -- a heartbeat rather than
+a one-shot write specifically so host-side read failures can't be
+timing-race artifacts, see the class's own doc comment).
+
+**Android side: fully proven, not in question.** `accessory_filter.xml` +
+`MainActivity`'s `USB_ACCESSORY_ATTACHED` intent-filter auto-launch the
+app the moment the host sends `ACCESSORY_START`; `openAccessory()`
+succeeds and the heartbeat runs continuously. Confirmed live, repeatedly,
+across many replug/restart cycles.
+
+**Windows side: the read never succeeded, and the reason turned out to be
+driver binding, not code.** The investigation ruled out several
+hypotheses in order, each with real evidence, before landing on the
+actual cause:
+
+1. **Not a timing/race issue.** Converting the one-shot checkpoint write
+   to a repeating heartbeat didn't help -- reads failed identically for
+   60+ continuous seconds while logcat confirmed the heartbeat was
+   running the whole time.
+2. **Not a wrong-interface-number bug in `aoa_probe` itself.** Iterating
+   every interface's class/subclass/protocol triple (rather than
+   assuming interface 0) confirmed interface 0 genuinely is the AOA
+   accessory interface (`0xFF/0xFF/0x00`) on this device -- this
+   hypothesis was ruled out, not the bug.
+3. **A real, separate `libusb`-on-Windows quirk exists but turned out not
+   to be the root cause here:** `set_composite_interface` (libusb's
+   Windows backend) logs a warning when it can't parse an interface
+   number out of a composite child device's hardware-ID suffix -- and
+   both of this phone's accessory-mode sub-interfaces use non-standard
+   suffixes (`&ADB` and `&MS_COMP_MTP&Redmi_Note_8` instead of the
+   expected `&MI_XX` pattern), triggering that warning for both. Real,
+   but a red herring for the actual failure -- see below.
+4. **A real, but ultimately irrelevant, sub-interface driver mismatch.**
+   `pnputil /enum-devices` during a live failure showed *neither*
+   accessory-mode sub-interface bound to WinUSB: the accessory interface
+   (`...&MS_COMP_MTP&Redmi_Note_8`) was bound to `wpdmtp.inf` (Windows'
+   MTP/Portable-Devices driver stack), and the ADB interface
+   (`...&ADB`) was bound to `oem51.inf` (`AndroidUsbDeviceClass`,
+   Windows' inbox generic Android driver). This looked like the
+   smoking gun (and matches a public report,
+   [libwdi#332](https://github.com/pbatard/libwdi/issues/332), showing
+   the identical `MS_COMP_MTP`/`WUDFWpdMtp` pattern on a different
+   Android phone) -- but turned out not to be what actually gated the
+   read. See the real cause below.
+5. **The actual cause: the *parent* composite device, not either
+   sub-interface, is what needed a libusb-usable driver.** A `Redmi
+   Note 8` entry at the top level (`USB\VID_18D1&PID_2D01\<serial>`,
+   above both sub-interfaces) had a libusbK binding from an earlier
+   session's Zadig action, confirmed live in Zadig's device list
+   (`Driver: libusbK (v3.1.0.0)`, USB ID `18D1:2D01`). Once that
+   existed, a fresh `aoa_probe --handshake` run succeeded immediately --
+   `libusb`'s Windows backend opened and read through *that* binding,
+   with the sub-interfaces' own (mismatched) driver assignments never
+   entering into it. In hindsight this also explains item 3 above: the
+   `set_composite_interface` interface-numbering confusion was real but
+   moot, since the actual open/read path never went through per-interface
+   WinUSB handles at all in the working case.
+
+**Resolved, not just diagnosed:** confirmed live -- `aoa_probe
+--handshake` received the phone's heartbeat cleanly
+(`Received 21 bytes: PHONECAM-AOA-PIPE-OK.`) with no Zadig changes in
+that session; the existing libusbK-on-parent-device binding was
+sufficient. **Do not "fix" the sub-interface driver mismatch (item 4)
+going forward** -- it looks wrong in Zadig/`pnputil` but is not on the
+path that matters, and changing it risks disturbing the binding that
+actually works.
+
+**A secondary, real finding: USB "No data transfer" mode does not
+reliably support the AOA mode switch on this phone.** Tested at the
+user's request, to see whether AOA could avoid MTP entirely. Findings,
+via `pnputil` (PID changes to `0x4EE7`, non-composite, no `&MI_XX`
+sub-interfaces at all) and `adb logcat`:
+
+- The device *did* switch into accessory mode (`PID_2D01`) once while in
+  this mode, but only after several seconds -- well past `aoa_probe`'s
+  original 3s wait, which is why the first attempt looked like a
+  no-op and had to be re-diagnosed.
+- Every later `ACCESSORY_START` sent while in this mode was acknowledged
+  by `libusb` at the USB-transfer level, but `adb logcat`'s
+  `UsbDeviceManager` never logged the corresponding `Setting USB config
+  to accessory,adb` line that a real switch produces (contrast: File
+  Transfer mode reliably logs exactly that line). The USB stack still
+  visibly cycles (disconnect/reconnect `uevent`s) but always settles
+  back on plain `adb`.
+- The phone crashed once during this testing (required a manual restart)
+  -- correlated with, but not proven caused by, an `ACCESSORY_START`
+  sent in this mode. Not investigated further; noted as a real, if
+  unconfirmed, data point against relying on this mode.
+- **Conclusion: File Transfer mode is the reliable trigger for the AOA
+  switch on this device** and is what the checkpoint testing uses. Worth
+  retesting "No data transfer" on other devices/Android versions before
+  assuming this generalizes, but not worth more investigation on this
+  one now that a working path exists.
+
+**Product-shipping note, decided but not yet implemented:** end users
+must never be asked to run Zadig themselves. The real fix belongs in the
+Windows installer -- silently installing a signed WinUSB driver binding
+for this device's accessory VID/PID via `libwdi` (the library Zadig
+itself wraps) during setup, the same one-UAC-prompt shape the installer
+already has for `phonecam-svc.exe --install`/vcam `regsvr32`. Deferred to
+Phase 7's robustness pass, once the checkpoint proves the pipe itself
+works.
+
+**`adb` conflicts with `libusb` over USB, but not over Wi-Fi.** `adb`
+holding the phone's ADB interface open (as soon as its server sees the
+device) causes libusb's control-transfer handshake to fail with
+`LIBUSB_ERROR_ACCESS` -- `adb kill-server` before every `aoa_probe`
+handshake attempt is required, not optional. **Wireless debugging (`adb
+connect <ip>:<port>`, port discovered via `adb mdns services`) has no
+such conflict** -- it's a plain TCP connection, unrelated to the USB
+interface libusb needs -- and turned out to be essential for this
+project's own verification workflow (see below), not just a convenience.
+
+## Status: Phase 7 checkpoint extended (bidirectional + multi-packet, proven), 2026-08-19
+
+Per an advisor review before writing any real transport code: the
+original checkpoint (`AoaAccessoryTransport`'s heartbeat, read
+successfully by `aoa_probe`) proves only a one-directional, 21-byte,
+single-USB-packet pipe. The real transport needs three things that
+checkpoint says nothing about: writing host->phone, payloads larger
+than one bulk transfer, and sustained throughput. Extended `aoa_probe`
+(still throwaway, still not shipping product) with two OUT-direction
+tests -- a small text marker and a 128KB length-prefixed payload -- sent
+over the same accessory pipe right after the existing read checkpoint,
+using a 1-byte tag + self-delimiting body framing that rehearses (but
+is not) the real `wire-protocol.md` Channel-tag design.
+
+**Verifying the phone-side result required working around a dead end:
+`adb logcat` is unusable while this app holds the accessory open.**
+Confirmed thoroughly, not assumed: zero app-generated log lines appear
+for any tag, or for the app's entire PID, while it sits backgrounded
+holding the AOA pipe open -- MIUI appears to silently drop this app's
+own `Log.*` output in that state, even though the process is
+demonstrably alive (visible via other apps' system-generated log lines
+referencing it, e.g. `RenderInspector`). Fix: instead of relying on
+`adb logcat`, the phone-side reader now writes a short `ACK:...` line
+back over the same pipe after verifying each test, and `aoa_probe`
+reads for it after sending -- closing the verification loop over USB
+alone, with no dependency on logcat. Wireless `adb` (see above) remained
+useful for the orthogonal problem of installing/relaunching the app
+between code iterations without needing a physical replug each time.
+
+**A real, load-bearing bug found and fixed via this testing: the
+accessory pipe requires reads sized to the incoming transfer, not
+small/single-byte reads.** The first version of the phone-side reader
+did 1-byte-at-a-time `stream.read()` calls to find framing boundaries
+(a tag byte, then a byte-by-byte scan for `'\n'`). Confirmed live this
+stalls the whole pipe, not just that one read: the host received an
+immediate ACK for the tag byte of a 24-byte marker frame, then nothing
+further, and the host's *next*, entirely separate write (the 128KB
+frame) then timed out completely (`LIBUSB_ERROR_TIMEOUT`, 0 bytes
+written in 10s) trying to write to the OUT endpoint at all. Explanation:
+the accessory pipe is backed by a raw USB transfer queue, not a
+buffered stream -- a `read()` smaller than a queued transfer only
+consumes part of it, and the remainder is not retained for the next
+`read()` to pick up. The 1-byte read draining a 24-byte transfer
+permanently lost the other 23 bytes, desyncing the parser (stuck
+waiting for a `'\n'` that had already gone by) and leaving the
+endpoint's queue undrained, which is what stalled the next write. Fixed
+by rewriting the reader to always read into a generously-sized buffer
+(16KB) and parse complete frames out of an in-memory accumulator,
+carrying over only genuinely incomplete trailing bytes -- a resumable
+state-machine parser over accumulated bytes, per the advisor's original
+recommendation, not "read tag, then blocking-read N bytes."
+
+**A second, secondary finding, not yet root-caused: repeatedly
+reopening the same accessory session (many `adb install -r` + relaunch
+cycles without an intervening physical replug) eventually left the
+128KB write timing out even with the reader fix in place**, while a
+fresh session (physical unplug/replug) immediately worked cleanly. Not
+investigated further -- noted as "don't loop many app-reinstall cycles
+against one long-lived accessory session during development; replug
+between rounds if things start timing out for no visible reason."
+
+**Verified live, clean run, both tests passing correctly (`aoa_probe
+--handshake` on a freshly replugged device):**
+```
+Received 21 bytes: PHONECAM-AOA-PIPE-OK.
+OUT text-marker test: wrote 24/24 bytes, status=LIBUSB_SUCCESS
+OUT length-prefixed test: wrote 131077/131077 bytes, status=LIBUSB_SUCCESS
+  <- ACK:text:len=22.
+  <- ACK:bin:len=131072:ok=1.
+```
+`ok=1` confirms the phone reassembled and byte-verified the full 128KB
+payload against its expected deterministic pattern -- not just "some
+bytes arrived." This closes out all three gaps the advisor flagged:
+bulk OUT works, multi-packet payloads far larger than
+`wMaxPacketSize=512` reassemble correctly, and (implicitly, from timing
+across these runs -- 34-141ms for 128KB) throughput is well above what
+6Mbps 1080p video needs. **The real `AoaTransport` (host) /
+`AoaAccessoryTransport` integration into the actual capture pipeline is
+next**, per the advisor's explicit scope guardrail: build it *alongside*
+the existing adb transport, selected by a CLI flag matching the
+`--test-pattern`/`--test-transport` precedent, not as a replacement --
+the adb path is still the only end-to-end-proven production pipeline,
+and this AOA path's session/reopen fragility (previous finding) isn't
+understood well enough yet to make it the sole transport.

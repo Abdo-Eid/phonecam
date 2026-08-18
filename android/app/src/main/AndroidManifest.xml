@@ -5,6 +5,13 @@
     <uses-feature android:name="android.hardware.camera" android:required="true" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
+    <!-- Phase 7: AOA transport. required="false": USB debugging (adb) still fully works without
+         accessory support, so this can't be a hard requirement; the app just won't auto-launch
+         on plug-in on a device that lacks it (accessory mode is standard since Android 3.1,
+         essentially universal by API 30's minSdk, but the manifest declaration is still correct
+         to make optional rather than assumed). -->
+    <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
+
     <!-- Phase 5: CaptureService keeps capture running while the app is backgrounded or the
          screen is off, which a plain Activity-owned controller can't survive. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -22,11 +29,21 @@
         android:theme="@style/Theme.PhoneCam">
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Phase 7: auto-launch on USB accessory attach (the whole point of AOA over adb:
+                 no Developer Options toggle needed). singleTop above means an already-running
+                 instance gets onNewIntent() instead of a second Activity instance. -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED"
+                android:resource="@xml/accessory_filter" />
         </activity>
         <service
             android:name=".capture.CaptureService"

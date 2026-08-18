@@ -1,0 +1,15 @@
+libusb 1.0.30, vendored as prebuilt Windows x64 binaries (VS2022/MS64/dll variant) from
+https://github.com/libusb/libusb/releases/tag/v1.0.30
+
+Used for the AOA (Android Open Accessory) USB transport (Phase 7) -- control-transfer handshake
+plus bulk-endpoint I/O against the phone once it's in accessory mode.
+
+Why the DLL variant, not the "static" one: libusb's own Windows README states the static .lib
+requires the caller to build with /MD (dynamic CRT); this project's Release builds use /MT
+(static CRT, see windows/CMakeLists.txt) to avoid a VC++ redistributable dependency for the
+installer. A DLL import lib has no such constraint -- calls cross a DLL boundary via libusb.h's
+plain C API, so the caller's CRT choice is irrelevant. libusb-1.0.dll ships alongside
+phonecam-host.exe the same way adb.exe does (see platform-tools/NOTICE.txt).
+
+License: GNU LGPL 2.1 (COPYING.LGPL-2.1 in this directory). Used here as an unmodified prebuilt
+dynamic library, consistent with LGPL's dynamic-linking allowance.
