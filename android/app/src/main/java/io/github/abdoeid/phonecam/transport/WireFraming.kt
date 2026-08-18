@@ -11,6 +11,11 @@ import java.nio.ByteOrder
  *
  * ByteBuffer defaults to BIG_ENDIAN on the JVM -- the explicit order() below is required, not
  * decorative, or the x86 PC receiver misreads seq/pts/payload_len.
+ *
+ * [writePacket] makes exactly one [OutputStream.write] call for the whole header+payload, not two
+ * -- required for [AoaTransport]'s channel-tagging wrapper, which tags per write() call: two
+ * writes per packet would have inserted a stray second tag mid-packet on that path. Harmless
+ * (and marginally cheaper: one syscall instead of two) for the plain socket path too.
  */
 object WireFraming {
   const val TYPE_CONFIG: Byte = 0
@@ -30,8 +35,8 @@ object WireFraming {
     payloadOffset: Int,
     payloadLength: Int,
   ) {
-    val header =
-      ByteBuffer.allocate(HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN).apply {
+    val packet =
+      ByteBuffer.allocate(HEADER_SIZE + payloadLength).order(ByteOrder.LITTLE_ENDIAN).apply {
         put(MAGIC)
         put(type)
         put(if (keyframe) FLAG_KEYFRAME else 0)
@@ -39,8 +44,8 @@ object WireFraming {
         putInt(seq)
         putLong(ptsUs)
         putInt(payloadLength)
+        put(payload, payloadOffset, payloadLength)
       }
-    out.write(header.array())
-    out.write(payload, payloadOffset, payloadLength)
+    out.write(packet.array())
   }
 }

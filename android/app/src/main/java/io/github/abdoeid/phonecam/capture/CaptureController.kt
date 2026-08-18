@@ -10,6 +10,7 @@ import io.github.abdoeid.phonecam.control.ControlCommandListener
 import io.github.abdoeid.phonecam.encode.H264Encoder
 import io.github.abdoeid.phonecam.transport.VideoSocketServer
 import java.io.IOException
+import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.min
@@ -135,6 +136,13 @@ class CaptureController(private val context: Context) {
     )
   }
 
+  /**
+   * [videoSink], when non-null, replaces [VideoSocketServer] entirely as the video packet
+   * destination -- used for the Phase 7 AOA transport (see [io.github.abdoeid.phonecam.transport
+   * .AoaTransport]'s `videoOutput`), whose accessory connection is already open by the time
+   * [start] is called, so there is no accept()-and-wait-for-a-PC-to-connect step to do. When
+   * null (the default, Phase 3 ADB path), behavior is unchanged.
+   */
   fun start(
     width: Int,
     height: Int,
@@ -142,6 +150,7 @@ class CaptureController(private val context: Context) {
     bitrateBps: Int,
     onError: (Throwable) -> Unit,
     lensFacing: Int = CameraCharacteristics.LENS_FACING_BACK,
+    videoSink: OutputStream? = null,
   ) {
     stopRequested.set(false)
     val myCancelToken = AtomicBoolean(false)
@@ -169,42 +178,48 @@ class CaptureController(private val context: Context) {
           // Every bail-out check below reads myCancelToken (this cycle's own token), never the
           // shared `state` field -- state gets overwritten by the very next start() call, so it
           // can't reliably tell this thread "you were cancelled" if a new cycle already began.
-          val server = VideoSocketServer()
-          try {
-            server.open(isCancelled = myCancelToken::get)
-          } catch (e: IOException) {
-            if (!myCancelToken.get()) {
-              state = CaptureState.IDLE
-              onError(e)
-            }
-            return@Thread
-          }
-          videoServer = server
-          if (myCancelToken.get()) {
-            // stop() raced us during open() -- bail before accept().
-            server.close()
-            return@Thread
-          }
-
-          val out =
+          val out: OutputStream
+          if (videoSink != null) {
+            // AOA path: the accessory pipe is already open, nothing to bind/accept.
+            out = videoSink
+          } else {
+            val server = VideoSocketServer()
             try {
-              server.accept(isCancelled = myCancelToken::get)
+              server.open(isCancelled = myCancelToken::get)
             } catch (e: IOException) {
-              // cancelled means stop() closed the socket deliberately -- not a real error.
               if (!myCancelToken.get()) {
                 state = CaptureState.IDLE
                 onError(e)
               }
               return@Thread
             }
-          if (myCancelToken.get()) {
-            // stop() raced us right as the PC connected -- bail without starting anything.
-            try {
-              out.close()
-            } catch (_: IOException) {
-              // already torn down
+            videoServer = server
+            if (myCancelToken.get()) {
+              // stop() raced us during open() -- bail before accept().
+              server.close()
+              return@Thread
             }
-            return@Thread
+
+            out =
+              try {
+                server.accept(isCancelled = myCancelToken::get)
+              } catch (e: IOException) {
+                // cancelled means stop() closed the socket deliberately -- not a real error.
+                if (!myCancelToken.get()) {
+                  state = CaptureState.IDLE
+                  onError(e)
+                }
+                return@Thread
+              }
+            if (myCancelToken.get()) {
+              // stop() raced us right as the PC connected -- bail without starting anything.
+              try {
+                out.close()
+              } catch (_: IOException) {
+                // already torn down
+              }
+              return@Thread
+            }
           }
 
           val enc = H264Encoder(width, height, fps, bitrateBps)

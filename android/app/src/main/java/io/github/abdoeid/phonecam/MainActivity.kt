@@ -13,15 +13,21 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import io.github.abdoeid.phonecam.capture.CaptureController
 import io.github.abdoeid.phonecam.theme.PhoneCamTheme
-import io.github.abdoeid.phonecam.transport.AoaAccessoryTransport
+import io.github.abdoeid.phonecam.transport.AoaTransport
 
 private const val TAG = "PhoneCamAoa"
 
 class MainActivity : ComponentActivity() {
-  // Phase 7 checkpoint only (see AoaAccessoryTransport's doc comment) -- not yet used by the real
-  // capture pipeline, which still runs over the Phase 3 adb transport.
-  private val aoaTransport = AoaAccessoryTransport()
+  // TEMPORARY test wiring for the Phase 7 "real AoaTransport carries real H.264" proof (see
+  // docs/architecture.md's Phase 7 section) -- starts a hardcoded test capture session straight
+  // over the accessory pipe the moment it attaches, bypassing the normal Start-button/
+  // CaptureService/adb-socket flow entirely. Not the final product path: the real integration
+  // wires AoaTransport in as an alternative to VideoSocketServer behind that same UI flow, once
+  // this proves the framing end-to-end (see CaptureController.start's videoSink parameter).
+  private val aoaTransport = AoaTransport()
+  private var aoaCaptureController: CaptureController? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -63,12 +69,26 @@ class MainActivity : ComponentActivity() {
     if (accessory == null) return
     if (aoaTransport.isOpen) return  // already holding this (or another) accessory open
 
-    val ok = aoaTransport.openAndSendCheckpoint(usbManager, accessory)
-    Log.i(TAG, "AOA checkpoint heartbeat: ${if (ok) "started" else "FAILED"} (accessory=${accessory.model})")
+    val ok = aoaTransport.open(usbManager, accessory)
+    Log.i(TAG, "AOA transport: ${if (ok) "opened" else "FAILED"} (accessory=${accessory.model})")
+    if (!ok) return
+
+    // TEMPORARY: hardcoded test parameters, see class doc comment.
+    val controller = CaptureController(applicationContext)
+    aoaCaptureController = controller
+    controller.start(
+      width = 1280,
+      height = 720,
+      fps = 30,
+      bitrateBps = 4_000_000,
+      onError = { e -> Log.e(TAG, "AOA test capture error", e) },
+      videoSink = aoaTransport.videoOutput,
+    )
   }
 
   override fun onDestroy() {
     super.onDestroy()
+    aoaCaptureController?.stop()
     aoaTransport.close()
   }
 }

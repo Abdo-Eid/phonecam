@@ -1090,3 +1090,136 @@ the existing adb transport, selected by a CLI flag matching the
 the adb path is still the only end-to-end-proven production pipeline,
 and this AOA path's session/reopen fragility (previous finding) isn't
 understood well enough yet to make it the sole transport.
+
+## Status: Phase 7 real `AoaTransport` (Android side + host test harness), in progress
+
+Per a second advisor consult before writing the Windows-side class: build
+Android's real multiplexed transport and prove it with the existing
+`aoa_probe` as the receiver *first*, since the Windows reader has nothing
+genuine to decode until Android actually emits Channel-tagged video --
+building both sides blind and debugging them together was exactly the
+pattern that cost the most time earlier in this phase.
+
+**Landed:**
+
+- `WireFraming.writePacket` now makes exactly one `OutputStream.write()`
+  call for header+payload combined (was two). Required for
+  channel-tagging: a wrapper that tags each `write()` call would
+  otherwise insert a stray second tag mid-packet. Behavior-preserving
+  for the existing adb-socket path (one syscall instead of two, if
+  anything cheaper).
+- `transport/AoaTransport.kt` (Android) -- the real thing, distinct from
+  the Phase-7-checkpoint-only `AoaAccessoryTransport`. `videoOutput` is
+  an `OutputStream` that tags every `write()` call as `Channel.Video`;
+  `writeControlMessage()` tags as `Channel.Control`. The reader parses a
+  1-byte-tag + self-delimiting-body accumulator (same resumable-
+  state-machine shape proven in the checkpoint's OUT-direction tests),
+  grown/compacted via `System.arraycopy` rather than reallocating a
+  fresh array per `read()` call -- an advisor-flagged concern: sustained
+  video (~30 packets/sec) would otherwise put real GC pressure on the
+  hot path that a one-shot 128KB test never exercised.
+- `CaptureController.start()` gained an optional `videoSink: OutputStream?`
+  parameter. Non-null skips `VideoSocketServer.open()`/`accept()`
+  entirely and hands that stream straight to `H264Encoder`; null (the
+  default) is byte-for-byte the existing Phase 3 behavior. This is the
+  entire integration seam -- confirmed, not assumed, that `H264Encoder
+  .start(out: OutputStream, ...)` doesn't care what kind of stream it
+  gets.
+- `MainActivity` has **TEMPORARY** test wiring (clearly marked, matching
+  this project's established practice for scaffolding that isn't the
+  final product path -- see Phase 3C's front-camera-default precedent):
+  on accessory attach, it opens the real `AoaTransport` and immediately
+  starts a hardcoded 720p30 `CaptureController` session over it,
+  bypassing the normal Start-button/`CaptureService`/adb-socket flow
+  entirely. The real integration (AOA as a user-selectable alternative
+  behind that normal flow) is later work, once this proves the framing.
+- `aoa_probe --test-video <output.h264>` -- the Phase-3B-equivalent
+  proof, over AOA instead of adb: reads the accessory pipe, keys on the
+  Channel tag first and only then trusts `WireFraming`'s header fields
+  (an advisor-flagged correctness point -- never resync by scanning for
+  the header's own magic byte, which could false-lock onto payload
+  data), strips tag+header, and appends the raw Annex-B payload to a
+  file. Same discriminating check as Phase 3B: if the file decodes
+  cleanly with zero `ffmpeg` errors and the frame count matches, the
+  framing is byte-correct end to end.
+
+**Verified live, twice, real camera content, zero corruption:**
+```
+Done. Total: 1 config, 924 frames (31 keyframes), 1824143 payload bytes.
+Done. Total: 1 config, 925 frames (31 keyframes), 10384207 payload bytes.
+```
+Both 30s runs at the 720p30 test-wiring default: `ffmpeg -i out.h264 -f
+null -` reports zero decode errors on both, frame count matches exactly
+(924/925), correct `1280x720` resolution recovered from the stream's own
+SPS. Extracted frames show real (if dark-scene) sensor content with
+visible compression noise, not flat/corrupted data. ~30.8fps sustained
+matches the 30fps target. This is the full Phase-3B-equivalent proof,
+now over AOA instead of adb.
+
+**A real bug found and fixed getting here, not a design flaw:** the
+first version of `AoaTransport.writeControlMessage`/the private tagging
+helper it shared with `videoOutput` prepended a `[tag][4-byte length]`
+header to *every* channel uniformly -- but video bodies
+([WireFraming]'s packets) already carry their own embedded
+`payload_len` and don't want an external one. The extra 4 bytes
+silently shifted every field after the first packet, and the very first
+live run showed exactly that signature: 1 CONFIG parsed correctly (its
+fields happened to still land right), 0 FRAMEs ever recognized. Fixed
+by only tagging (no length prefix) on the video path, keeping the
+length prefix on the control path where it's actually needed (raw
+FlatBuffers bytes aren't self-delimiting on their own).
+
+**A second fix, advisor-flagged before it caused a real symptom:**
+`AoaTransport`'s internal write helper silently swallowed every
+`IOException`, meaning a broken accessory pipe would never surface to
+`H264Encoder`'s existing `onWriteError` callback -- the encoder would
+keep "streaming" into a dead connection indefinitely instead of tearing
+down through the same path the adb transport already relies on. Fixed
+by letting the exception propagate; confirmed `H264Encoder.drainLoop`
+already catches `IOException` around its write and invokes
+`onWriteError`, so this reuses an existing, proven path rather than
+adding a new one. Both fixes landed before the two clean runs above, in
+the same session -- not yet isolated which one (if either) actually
+explains the earlier "many reinstall cycles -> writes start timing out"
+finding, since it hasn't recurred since, but per the advisor's explicit
+guidance this is treated as resolved-by-elimination rather than
+requiring new recovery machinery (explicitly advised against: USB
+reset, watchdogs, re-handshake-on-stall) unless it resurfaces.
+
+**Dev-workflow finding: once a phone is in AOA accessory mode, `adb`
+cannot reach it over USB at all, and there is no clean software-only way
+back to normal mode.** This matters a lot for iteration speed, since
+testing any Android code change requires reinstalling the APK. Confirmed
+this session:
+
+**Dev-workflow finding: once a phone is in AOA accessory mode, `adb`
+cannot reach it over USB at all, and there is no clean software-only way
+back to normal mode.** This matters a lot for iteration speed, since
+testing any Android code change requires reinstalling the APK. Confirmed
+this session:
+
+- Normal USB `adb` genuinely cannot connect while the device is
+  enumerated in accessory mode (`adb devices` sits at "- waiting for
+  device -" indefinitely) -- not a timing issue, retried well past any
+  reasonable enumeration delay.
+- **Wireless debugging (`adb connect <ip>:<port>`, discovered via `adb
+  mdns services`) is the only channel that reaches the phone in this
+  state**, since it's a plain Wi-Fi TCP connection with no dependency on
+  the USB interface at all -- confirmed it doesn't conflict with
+  `libusb` either (unlike USB `adb`, which requires `adb kill-server`
+  before every `aoa_probe` handshake). This made several rounds of
+  install-and-relaunch possible without physically replugging.
+- **But `adb mdns services` discovery is not reliable** -- it found the
+  phone's service once, then repeatedly found nothing on later attempts
+  in the same session, with Wi-Fi and the Wireless debugging toggle both
+  confirmed on by the user each time. No root cause identified (possibly
+  a Windows Firewall/mDNS-multicast quirk, possibly router-side --not
+  investigated further). When it fails, the phone's Wireless debugging
+  settings screen shows the IP:port directly and can be read off that
+  screen instead of relying on discovery.
+- There is genuinely no host-triggered way to force the phone out of
+  accessory mode short of a physical unplug/replug -- consistent with
+  the [libwdi/UsbDk issue](https://github.com/daynix/UsbDk/issues/34)
+  found earlier this phase. If wireless adb isn't reachable, a replug is
+  the only path back to a state where new code can be installed and
+  run.

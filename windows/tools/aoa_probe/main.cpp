@@ -17,6 +17,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -171,25 +173,48 @@ int RunHandshake(libusb_context* ctx) {
     libusb_close(handle);
 
     std::printf("ACCESSORY_START sent. Phone should disconnect and re-enumerate as VID 0x18D1.\n");
-    std::printf("Waiting up to 3s for re-enumeration...\n");
-    std::this_thread::sleep_for(std::chrono::seconds(3));
-    return ReadCheckpointLoop(ctx);
+    std::printf("Waiting up to 10s for re-enumeration (this can take longer than the AOA spec's\n");
+    std::printf("usual few seconds -- confirmed empirically this phase)...\n");
+
+    // --handshake's only job now is switching the phone into accessory mode and confirming it --
+    // it used to also run ReadCheckpointLoop, but that tested AoaAccessoryTransport's throwaway
+    // checkpoint pattern, which the real AoaTransport (now what MainActivity opens on accessory
+    // attach) never sends. Run --read-only or --test-video as a separate step afterward.
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        libusb_device** list = nullptr;
+        ssize_t count = libusb_get_device_list(ctx, &list);
+        bool found = false;
+        for (ssize_t i = 0; i < count; ++i) {
+            libusb_device_descriptor desc{};
+            if (libusb_get_device_descriptor(list[i], &desc) != 0) continue;
+            if (desc.idVendor == kGoogleVid && IsAccessoryModePid(desc.idProduct)) {
+                std::printf("Re-enumerated as VID=0x%04X PID=0x%04X\n", desc.idVendor, desc.idProduct);
+                found = true;
+                break;
+            }
+        }
+        libusb_free_device_list(list, 1);
+        if (found) return 0;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    std::printf("Device did not re-enumerate as an AOA accessory PID within the wait.\n");
+    return 1;
 }
 
-// Finds the re-enumerated accessory-mode device, claims its interface 0 (the accessory function
-// is always interface 0 per the AOA spec -- adb, if the device offers 0x2D01, is a separate,
-// later interface we don't touch here), and reads from its bulk IN endpoint for a while. This is
-// meant to run in the SAME process invocation as the handshake above, immediately after
-// ACCESSORY_START, specifically so there's no gap where a second process would have to re-find
-// and re-open the device -- keeping it all in one run avoids any question of whether the phone's
-// accessory-open timeout (Android reverts if nothing calls openAccessory() in time) could expire
-// between two separate probe invocations.
-int ReadCheckpointLoop(libusb_context* ctx) {
+// Finds the re-enumerated accessory-mode device, opens it, and claims its AOA accessory
+// interface (distinguished from an "accessory,adb" composite config's other interface by class
+// triple -- accessory is 0xFF/0xFF/0x00, adb is 0xFF/0x42/0x01, see source.android.com's AOA
+// docs -- NOT by assuming interface 0, which isn't guaranteed and was a real bug here once).
+// Shared by ReadCheckpointLoop and RunTestVideo so both open the device the same, already-
+// debugged way.
+bool OpenAccessoryInterface(libusb_context* ctx, libusb_device_handle** outHandle, int* outInterfaceNum,
+                             uint8_t* outBulkIn, uint8_t* outBulkOut) {
     libusb_device** list = nullptr;
     ssize_t count = libusb_get_device_list(ctx, &list);
     if (count < 0) {
         std::printf("libusb_get_device_list failed: %s\n", libusb_error_name(static_cast<int>(count)));
-        return 1;
+        return false;
     }
 
     libusb_device* accessory = nullptr;
@@ -205,7 +230,7 @@ int ReadCheckpointLoop(libusb_context* ctx) {
     if (!accessory) {
         std::printf("Device did not re-enumerate as an AOA accessory PID within the wait.\n");
         libusb_free_device_list(list, 1);
-        return 1;
+        return false;
     }
 
     libusb_device_handle* handle = nullptr;
@@ -213,7 +238,7 @@ int ReadCheckpointLoop(libusb_context* ctx) {
     libusb_free_device_list(list, 1);
     if (rc != 0) {
         std::printf("libusb_open (accessory) failed: %s\n", libusb_error_name(rc));
-        return 1;
+        return false;
     }
 
     libusb_config_descriptor* config = nullptr;
@@ -221,17 +246,9 @@ int ReadCheckpointLoop(libusb_context* ctx) {
     if (rc != 0) {
         std::printf("libusb_get_active_config_descriptor failed: %s\n", libusb_error_name(rc));
         libusb_close(handle);
-        return 1;
+        return false;
     }
 
-    // BUG FIXED HERE: this used to hardcode interface 0 and assume it was the accessory
-    // function. In an "accessory,adb" composite config, nothing guarantees the accessory
-    // interface comes first in descriptor order -- claiming the wrong interface (e.g. ADB's) and
-    // reading its bulk IN would produce exactly what was observed: a persistent IO error, no
-    // data, regardless of what the phone-side app does. The two interfaces are only
-    // distinguishable by class triple: AOA accessory is class 0xFF/subclass 0xFF/protocol 0x00;
-    // ADB is class 0xFF/subclass 0x42/protocol 0x01 (see source.android.com's AOA docs and the
-    // well-known adb USB interface descriptor).
     std::printf("Device has %d interface(s):\n", config->bNumInterfaces);
     int accessoryInterfaceNum = -1;
     uint8_t bulkInEndpoint = 0;
@@ -265,22 +282,44 @@ int ReadCheckpointLoop(libusb_context* ctx) {
     if (accessoryInterfaceNum < 0) {
         std::printf("No interface matched the AOA accessory class triple (0xFF/0xFF/0x00).\n");
         libusb_close(handle);
-        return 1;
+        return false;
     }
 
     rc = libusb_claim_interface(handle, accessoryInterfaceNum);
     if (rc != 0) {
         std::printf("libusb_claim_interface(%d) failed: %s\n", accessoryInterfaceNum, libusb_error_name(rc));
         libusb_close(handle);
-        return 1;
+        return false;
     }
 
     if (bulkInEndpoint == 0) {
         std::printf("No bulk IN endpoint found on the accessory interface.\n");
         libusb_release_interface(handle, accessoryInterfaceNum);
         libusb_close(handle);
+        return false;
+    }
+
+    *outHandle = handle;
+    *outInterfaceNum = accessoryInterfaceNum;
+    *outBulkIn = bulkInEndpoint;
+    *outBulkOut = bulkOutEndpoint;
+    return true;
+}
+
+// This is meant to run in the SAME process invocation as the handshake above, immediately after
+// ACCESSORY_START, specifically so there's no gap where a second process would have to re-find
+// and re-open the device -- keeping it all in one run avoids any question of whether the phone's
+// accessory-open timeout (Android reverts if nothing calls openAccessory() in time) could expire
+// between two separate probe invocations.
+int ReadCheckpointLoop(libusb_context* ctx) {
+    libusb_device_handle* handle = nullptr;
+    int accessoryInterfaceNum = -1;
+    uint8_t bulkInEndpoint = 0;
+    uint8_t bulkOutEndpoint = 0;
+    if (!OpenAccessoryInterface(ctx, &handle, &accessoryInterfaceNum, &bulkInEndpoint, &bulkOutEndpoint)) {
         return 1;
     }
+    int rc = 0;
 
     std::printf("Reading from bulk IN endpoint 0x%02X for up to 60s (waiting for the app to\n", bulkInEndpoint);
     std::printf("auto-launch and call openAccessory())...\n");
@@ -413,6 +452,125 @@ int ReadCheckpointLoop(libusb_context* ctx) {
     return 0;
 }
 
+// Phase 7's Phase-3B-equivalent proof: the real AoaTransport.kt (Android) tags real
+// WireFraming-framed H.264 packets as Channel.Video and writes them over the same accessory pipe
+// -- this reads them back, strips the 1-byte channel tag and WireFraming's own 20-byte header,
+// and appends the raw Annex-B payload to a file, same discriminating check as
+// docs/architecture.md's Phase 3B ("if the reassembled file decodes cleanly with ffmpeg, the
+// framing is byte-correct end to end"). Requires MainActivity's TEMPORARY AoaTransport test
+// wiring to already be running a capture session (see its class doc comment) -- this tool does
+// not trigger capture itself, only reads whatever the phone is already sending.
+//
+// Deliberately reads into a generously-sized buffer and parses from an accumulator, never a
+// small/fixed-size read per message -- see AoaAccessoryTransport.kt's doc comment for the
+// concrete bug (permanently losing bytes) that shape of bug caused earlier in this phase.
+int RunTestVideo(libusb_context* ctx, const std::wstring& outputPath) {
+    libusb_device_handle* handle = nullptr;
+    int accessoryInterfaceNum = -1;
+    uint8_t bulkInEndpoint = 0;
+    uint8_t bulkOutEndpoint = 0;
+    if (!OpenAccessoryInterface(ctx, &handle, &accessoryInterfaceNum, &bulkInEndpoint, &bulkOutEndpoint)) {
+        return 1;
+    }
+
+    // ASCII-only paths, per main()'s caller -- narrowed back just for printing, same assumption.
+    std::string narrowPathForLog(outputPath.begin(), outputPath.end());
+
+    std::ofstream out(outputPath, std::ios::binary);
+    if (!out) {
+        std::fprintf(stderr, "Cannot open output file: %s\n", narrowPathForLog.c_str());
+        libusb_release_interface(handle, accessoryInterfaceNum);
+        libusb_close(handle);
+        return 1;
+    }
+    std::printf("Reading Channel.Video frames for up to 30s, writing Annex-B payload to %s...\n",
+                narrowPathForLog.c_str());
+    std::fflush(stdout);
+
+    std::vector<unsigned char> accum;
+    unsigned char readBuf[16 * 1024];
+    int configCount = 0, frameCount = 0, keyframeCount = 0;
+    size_t totalPayloadBytes = 0;
+    constexpr uint8_t kChannelVideo = 0;
+    constexpr uint8_t kChannelControl = 1;
+    constexpr size_t kWireHeaderSize = 20;  // WireFraming.kt's fixed header, see docs/wire-protocol.md
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < deadline) {
+        int actual = 0;
+        int rc = libusb_bulk_transfer(handle, bulkInEndpoint, readBuf, sizeof(readBuf), &actual, /*timeout=*/1000);
+        if (rc == LIBUSB_ERROR_NO_DEVICE) {
+            std::printf("Device disappeared (LIBUSB_ERROR_NO_DEVICE).\n");
+            break;
+        }
+        if (rc != 0 && rc != LIBUSB_ERROR_TIMEOUT) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+        if (actual > 0) {
+            accum.insert(accum.end(), readBuf, readBuf + actual);
+        }
+
+        // Consume every complete frame currently at the front of accum, keeping only a genuinely
+        // incomplete trailing frame (if any) for the next read to complete.
+        size_t pos = 0;
+        while (pos < accum.size()) {
+            uint8_t tag = accum[pos];
+            if (tag == kChannelVideo) {
+                if (accum.size() - pos < 1 + kWireHeaderSize) break;  // header not fully arrived yet
+                const unsigned char* header = accum.data() + pos + 1;
+                // WireFraming layout: [0]=magic(0x9C) [1]=type [2]=flags [3]=reserved
+                // [4..7]=seq LE [8..15]=pts_us LE [16..19]=payload_len LE. Keying on the outer
+                // Channel tag first, then trusting this header, per the advisor's explicit
+                // caution -- never scan for the magic byte itself to resync, which could
+                // false-lock onto payload data instead of a real header boundary.
+                uint32_t payloadLen = static_cast<uint32_t>(header[16]) | (static_cast<uint32_t>(header[17]) << 8) |
+                                       (static_cast<uint32_t>(header[18]) << 16) |
+                                       (static_cast<uint32_t>(header[19]) << 24);
+                size_t frameTotal = 1 + kWireHeaderSize + payloadLen;
+                if (accum.size() - pos < frameTotal) break;  // payload not fully arrived yet
+
+                bool isConfig = header[1] == 0;  // WireFraming.TYPE_CONFIG
+                bool keyframe = (header[2] & 0x01) != 0;
+                const unsigned char* payload = accum.data() + pos + 1 + kWireHeaderSize;
+                out.write(reinterpret_cast<const char*>(payload), static_cast<std::streamsize>(payloadLen));
+                totalPayloadBytes += payloadLen;
+                if (isConfig) {
+                    ++configCount;
+                } else {
+                    ++frameCount;
+                    if (keyframe) ++keyframeCount;
+                }
+                if ((configCount + frameCount) % 30 == 0) {
+                    std::printf("... %d config, %d frames (%d keyframes), %zu payload bytes\n", configCount,
+                                frameCount, keyframeCount, totalPayloadBytes);
+                    std::fflush(stdout);
+                }
+                pos += frameTotal;
+            } else if (tag == kChannelControl) {
+                if (accum.size() - pos < 5) break;
+                uint32_t bodyLen = static_cast<uint32_t>(accum[pos + 1]) | (static_cast<uint32_t>(accum[pos + 2]) << 8) |
+                                    (static_cast<uint32_t>(accum[pos + 3]) << 16) |
+                                    (static_cast<uint32_t>(accum[pos + 4]) << 24);
+                if (accum.size() - pos < 5 + bodyLen) break;
+                pos += 5 + bodyLen;  // not yet parsed/used by this test -- control isn't wired to AOA yet
+            } else {
+                ++pos;  // unexpected tag -- drop one byte and resync, matching AoaTransport.kt's reader
+            }
+        }
+        if (pos > 0) {
+            accum.erase(accum.begin(), accum.begin() + static_cast<std::ptrdiff_t>(pos));
+        }
+    }
+
+    std::printf("Done. Total: %d config, %d frames (%d keyframes), %zu payload bytes.\n", configCount, frameCount,
+                keyframeCount, totalPayloadBytes);
+
+    libusb_release_interface(handle, accessoryInterfaceNum);
+    libusb_close(handle);
+    return (configCount > 0 && frameCount > 0) ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -423,6 +581,7 @@ int main(int argc, char** argv) {
     // re-sending ACCESSORY_START (which would fail anyway; the device isn't in normal mode
     // anymore) and just claims+reads against whatever's already there.
     bool readOnly = std::strcmp(mode, "--read-only") == 0;
+    bool testVideo = std::strcmp(mode, "--test-video") == 0;
 
     libusb_context* ctx = nullptr;
     int rc = libusb_init(&ctx);
@@ -443,6 +602,15 @@ int main(int argc, char** argv) {
         result = RunHandshake(ctx);
     } else if (readOnly) {
         result = ReadCheckpointLoop(ctx);
+    } else if (testVideo) {
+        if (argc > 2) {
+            std::string narrowPath = argv[2];
+            std::wstring outputPath(narrowPath.begin(), narrowPath.end());  // ASCII paths only, fine here
+            result = RunTestVideo(ctx, outputPath);
+        } else {
+            std::fprintf(stderr, "usage: aoa_probe --test-video <output.h264>\n");
+            result = 1;
+        }
     } else {
         EnumerateOnly(ctx);
     }
