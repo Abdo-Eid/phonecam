@@ -32,6 +32,17 @@ class CaptureController(private val context: Context) {
   private var controlThread: Thread? = null
   private val stopRequested = AtomicBoolean(false)
 
+  // A fresh token per start() cycle, captured by that cycle's thread closures -- NOT a single
+  // shared field like [stopRequested] or [state]. Those get reset by the very next start() call,
+  // which can race a slow-to-notice previous cycle: if Cancel fires start() again quickly (the
+  // Idle branch of MainScreen's auto-start effect does this immediately, no delay), the old
+  // accept thread's socket-bind retry loop could still be running in the background with no way
+  // to learn it was cancelled, silently orphaned while a new thread races it for the same
+  // abstract socket name -- confirmed live as a "Cancel -> stuck in Address already in use" loop.
+  // Each cycle's own token is set to true by stop() and only ever read by that cycle's own
+  // threads, so there's no shared-state race to lose.
+  private var cancelToken = AtomicBoolean(true) // "cancelled": true when nothing is running
+
   @Volatile
   var state: CaptureState = CaptureState.IDLE
     private set
@@ -114,6 +125,8 @@ class CaptureController(private val context: Context) {
     lensFacing: Int = CameraCharacteristics.LENS_FACING_BACK,
   ) {
     stopRequested.set(false)
+    val myCancelToken = AtomicBoolean(false)
+    cancelToken = myCancelToken
     state = CaptureState.WAITING_FOR_CONNECTION
     lastWidth = width
     lastHeight = height
@@ -132,18 +145,22 @@ class CaptureController(private val context: Context) {
           // releasing the just-closed previous session's socket, and
           // VideoSocketServer.open() already retries that briefly -- doing
           // it here keeps the UI thread from blocking on those retries too.
+          //
+          // Every bail-out check below reads myCancelToken (this cycle's own token), never the
+          // shared `state` field -- state gets overwritten by the very next start() call, so it
+          // can't reliably tell this thread "you were cancelled" if a new cycle already began.
           val server = VideoSocketServer()
           try {
-            server.open()
+            server.open(isCancelled = myCancelToken::get)
           } catch (e: IOException) {
-            if (state != CaptureState.IDLE) {
+            if (!myCancelToken.get()) {
               state = CaptureState.IDLE
               onError(e)
             }
             return@Thread
           }
           videoServer = server
-          if (state == CaptureState.IDLE) {
+          if (myCancelToken.get()) {
             // stop() raced us during open() -- bail before accept().
             server.close()
             return@Thread
@@ -151,16 +168,16 @@ class CaptureController(private val context: Context) {
 
           val out =
             try {
-              server.accept()
+              server.accept(isCancelled = myCancelToken::get)
             } catch (e: IOException) {
-              // state == IDLE means stop() closed the socket deliberately -- not a real error.
-              if (state != CaptureState.IDLE) {
+              // cancelled means stop() closed the socket deliberately -- not a real error.
+              if (!myCancelToken.get()) {
                 state = CaptureState.IDLE
                 onError(e)
               }
               return@Thread
             }
-          if (state == CaptureState.IDLE) {
+          if (myCancelToken.get()) {
             // stop() raced us right as the PC connected -- bail without starting anything.
             try {
               out.close()
@@ -198,7 +215,7 @@ class CaptureController(private val context: Context) {
           val channel = ControlChannel(context, commandListener)
           controlChannel = channel
           try {
-            channel.start()
+            channel.start(isCancelled = myCancelToken::get)
           } catch (_: IOException) {
             controlChannel = null
           }
@@ -212,28 +229,46 @@ class CaptureController(private val context: Context) {
     // main thread is still in progress on the same encoder/camera -- only
     // the first caller should actually tear anything down.
     if (!stopRequested.compareAndSet(false, true)) return
-    state = CaptureState.IDLE // set first: signals the accept-thread this is a deliberate stop
+    cancelToken.set(true) // this cycle's own token -- see its declaration for why not `state`
+    state = CaptureState.IDLE // set first: signals both accept threads this is a deliberate stop
+
+    // Close both servers BEFORE joining either thread (not close-video/join-video/close-control/
+    // join-control in sequence): the video and control accept threads are independent, so
+    // unblocking them together bounds total teardown latency by whichever is slower, not the sum
+    // of both. Joining sequentially previously left the abstract socket names bound for up to
+    // ~2s under worst-case timing (two back-to-back 1000ms joins) -- long enough that the
+    // auto-retry LaunchedEffect's rebind (500ms retry budget) reliably lost the race and the app
+    // got stuck cycling Waiting-for-connection/Error{Address already in use} indefinitely,
+    // confirmed live after ~35 minutes of unattended auto-retry.
+    //
+    // Even with that fix, a thread already blocked inside accept() isn't guaranteed to actually
+    // unblock just because the socket got close()'d from here -- confirmed live: it can stay
+    // blocked forever, permanently holding the abstract socket name bound so every future rebind
+    // fails. That's what accept()'s own poll-with-timeout loop (VideoSocketServer/
+    // ControlSocketServer) now guards against -- close() here is still the fast path, but no
+    // longer the only path to actually unblocking a stuck accept().
     videoServer?.close() // unblocks a pending accept(), if still waiting
     videoServer = null
-    // Guard against self-join: onError can be invoked synchronously from
-    // within this very thread (the accept()-failed path), and a thread
-    // joining itself blocks for the full timeout for no reason.
+    controlChannel?.stop() // unblocks a pending accept()/read, same as videoServer above
+    controlChannel = null
+
+    // Guard against self-join: onError can be invoked synchronously from within this very thread
+    // (the accept()-failed path), and a thread joining itself blocks for the full timeout for no
+    // reason.
     if (acceptThread !== Thread.currentThread()) {
       acceptThread?.join(1000)
     }
     acceptThread = null
+    if (controlThread !== Thread.currentThread()) {
+      controlThread?.join(1000)
+    }
+    controlThread = null
+
     camera?.stop()
     camera = null
     encoder?.stop()
     encoder = null
     startTimeMs = 0
-
-    controlChannel?.stop() // unblocks a pending accept()/read, same as videoServer above
-    controlChannel = null
-    if (controlThread !== Thread.currentThread()) {
-      controlThread?.join(1000)
-    }
-    controlThread = null
   }
 
   val framesEncoded: Int

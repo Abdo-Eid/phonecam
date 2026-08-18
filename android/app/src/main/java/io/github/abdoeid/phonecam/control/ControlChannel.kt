@@ -62,10 +62,10 @@ class ControlChannel(private val context: Context, private val listener: Control
    * CapabilityDescriptor and starts the receive loop on a new background thread. Call this from a
    * background thread -- accept() blocks.
    */
-  fun start() {
+  fun start(isCancelled: () -> Boolean = { false }) {
     stopped.set(false)
-    server.open()
-    val (input, out) = server.accept()
+    server.open(isCancelled)
+    val (input, out) = server.accept(isCancelled)
     if (stopped.get()) {
       try {
         input.close()
