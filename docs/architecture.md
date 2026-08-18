@@ -70,7 +70,7 @@ Media Foundation and DirectShow paths — are done, with captured evidence:
 ## Status: Phase 2 complete (Camera2 → MediaCodec H.264, on-device proven)
 
 `capture/CameraCapture.kt` (Camera2, `TEMPLATE_RECORD`, `SessionConfiguration`
-API since minSdk 30 > 28) streams straight into `encode/H264Encoder.kt`'s
+API, requires API 28) streams straight into `encode/H264Encoder.kt`'s
 `MediaCodec` input `Surface` — zero-copy, no CPU frame ever exists.
 `capture/CaptureController.kt` wires the two together and owns the output
 file. Auto exposure/focus/white-balance only: manual controls (ISO, exposure

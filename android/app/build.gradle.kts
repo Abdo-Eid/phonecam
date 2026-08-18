@@ -9,7 +9,14 @@ android {
     compileSdk = 36
     defaultConfig {
         applicationId = "io.github.abdoeid.phonecam"
-        minSdk = 30
+        // 28 (Android 9), not 30: zoom (CONTROL_ZOOM_RATIO) is the only feature that genuinely
+        // needs API 30+ (see CameraCapabilityProbe.kt/CameraCapture.kt's SDK_INT guards around it)
+        // and isn't worth gating the whole app's compatibility on -- it degrades gracefully instead
+        // (reports a fixed 1.0x range, so the PC UI's capability-driven design just never shows a
+        // zoom control for that device, same as any other genuinely-unsupported control). 28 itself
+        // is a real floor, not arbitrary: CameraCapture.kt's SessionConfiguration API requires it
+        // (unconditionally, no fallback for older devices -- verified while lowering this).
+        minSdk = 28
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"

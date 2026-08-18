@@ -51,7 +51,10 @@ object CameraCapabilityProbe {
     val capabilities = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
     val hasManualSensor = capabilities.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
 
-    val zoomRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+    // CONTROL_ZOOM_RATIO_RANGE requires API 30 (minSdk is 28, see build.gradle.kts) -- null below
+    // 30 means addZoomRatioRange reports a fixed 1.0..1.0 range, so the PC's capability-driven UI
+    // just never shows a zoom control on those devices, same as any other unsupported capability.
+    val zoomRange = if (Build.VERSION.SDK_INT >= 30) chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) else null
     val evRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
     val evStep = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
     val isoRange = if (hasManualSensor) chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) else null

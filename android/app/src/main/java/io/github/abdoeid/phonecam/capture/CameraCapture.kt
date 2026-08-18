@@ -12,6 +12,7 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Range
@@ -168,7 +169,11 @@ class CameraCapture(private val context: Context) {
   // Each returns whether the update was actually submitted (false => no open session yet, e.g.
   // a command arrived mid-lens-switch) so ControlChannel can Ack{Busy} instead of Ack{Ok}.
 
-  fun setZoomRatio(ratio: Float): Boolean = updateRequest { it.set(CaptureRequest.CONTROL_ZOOM_RATIO, ratio) }
+  // CONTROL_ZOOM_RATIO requires API 30 (minSdk is 28, see build.gradle.kts) -- below that,
+  // CameraCapabilityProbe already advertised a fixed 1.0..1.0 zoom range, so the PC never sends
+  // this command for such a device; false here is just a safety net against nothing.
+  fun setZoomRatio(ratio: Float): Boolean =
+    if (Build.VERSION.SDK_INT >= 30) updateRequest { it.set(CaptureRequest.CONTROL_ZOOM_RATIO, ratio) } else false
 
   fun setEv(steps: Int): Boolean = updateRequest { it.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, steps) }
 
