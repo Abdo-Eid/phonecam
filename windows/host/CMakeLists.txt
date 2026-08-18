@@ -20,7 +20,15 @@ add_custom_target(phonecam_proto_gen
     DEPENDS ${PHONECAM_PROTO_GEN_DIR}/wire_generated.h ${PHONECAM_PROTO_GEN_DIR}/control_generated.h
 )
 
-add_executable(phonecam-host
+# WIN32: links with the GUI subsystem so double-clicking phonecam-host.exe (the real end-user
+# path -- it's a tray-icon background app, not a CLI tool) doesn't pop a console window. main.cpp
+# still defines wmain(argc, argv), not WinMain -- /ENTRY:wmainCRTStartup below tells the linker to
+# keep using wmain's CRT startup despite the GUI subsystem, so argv-based flags (--aoa etc.) still
+# work unchanged. Logging (std::printf/phonecam::log::*) is unaffected either way: with no console
+# attached (a real double-click launch) those writes just go nowhere, same as before this had a
+# console to write into; run from an existing terminal (as in dev/test) and they still show up,
+# since a GUI-subsystem child process launched from an interactive console inherits its handles.
+add_executable(phonecam-host WIN32
     main.cpp
     vcam_ctl/VCamControl.h
     vcam_ctl/VCamControl.cpp
@@ -61,6 +69,7 @@ target_include_directories(phonecam-host PRIVATE
 target_link_libraries(phonecam-host PRIVATE phonecam_common mfplat mfuuid ole32 ws2_32 shell32
     ${LIBUSB_DIR}/lib/libusb-1.0.lib)
 target_compile_features(phonecam-host PRIVATE cxx_std_20)
+target_link_options(phonecam-host PRIVATE "/ENTRY:wmainCRTStartup")
 
 # libusb-1.0.dll must sit next to the exe at runtime -- same reasoning as
 # aoa_probe's own copy and adb.exe's PostBuildEvent copy for phonecam-vcam.dll.
