@@ -257,7 +257,7 @@ private fun ViewfinderPanel(state: CaptureUiState, onStart: () -> Unit, onStop: 
             MonoCaption("tap start to begin transmitting")
           CaptureUiState.WaitingForConnection ->
             MonoCaption("open phonecam on your pc")
-          is CaptureUiState.Streaming -> OsdReadout(s.framesEncoded, s.measuredFps)
+          is CaptureUiState.Streaming -> OsdReadout(s.elapsedSeconds, s.measuredFps)
           is CaptureUiState.Error -> MonoCaption(s.message, color = Dim)
         }
       }
@@ -305,18 +305,28 @@ private fun PanelButton(label: String, accent: Color, onClick: () -> Unit, fille
 }
 
 // A real camera's on-screen viewfinder display: dim tabular labels, bright monospace values.
-// FPS/FRM come straight from measured encoder output; RES reflects Phase 6's fixed 1080p
-// pipeline (see docs/architecture.md) -- would need to become dynamic alongside a future
-// PC-driven SetResolution.
+// FPS comes straight from measured encoder output; RES reflects Phase 6's fixed 1080p pipeline
+// (see docs/architecture.md) -- would need to become dynamic alongside a future PC-driven
+// SetResolution. TIME is elapsed mm:ss rather than a raw frame count -- a frame counter's digit
+// width keeps growing for as long as a session runs, while mm:ss stays a fixed, glanceable shape
+// (and rolls over to hh:mm:ss only past a full hour, far longer than any real session).
 @Composable
-private fun OsdReadout(framesEncoded: Int, measuredFps: Double) {
+private fun OsdReadout(elapsedSeconds: Double, measuredFps: Double) {
   Row(horizontalArrangement = Arrangement.spacedBy(18.dp), verticalAlignment = Alignment.CenterVertically) {
     OsdField("FPS", "%.1f".format(measuredFps))
     OsdDivider()
     OsdField("RES", "1920×1080")
     OsdDivider()
-    OsdField("FRM", framesEncoded.toString())
+    OsdField("TIME", formatElapsed(elapsedSeconds))
   }
+}
+
+private fun formatElapsed(seconds: Double): String {
+  val total = seconds.toLong().coerceAtLeast(0)
+  val h = total / 3600
+  val m = (total % 3600) / 60
+  val s = total % 60
+  return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
 }
 
 @Composable

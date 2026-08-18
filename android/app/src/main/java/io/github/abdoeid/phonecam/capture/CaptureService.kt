@@ -32,8 +32,8 @@ class CaptureService : Service() {
   val state: CaptureState
     get() = controller.state
 
-  val framesEncoded: Int
-    get() = controller.framesEncoded
+  val elapsedSeconds: Double
+    get() = controller.elapsedSeconds
 
   val measuredFps: Double
     get() = controller.measuredFps

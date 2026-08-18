@@ -24,7 +24,7 @@ sealed interface CaptureUiState {
 
   data object WaitingForConnection : CaptureUiState
 
-  data class Streaming(val framesEncoded: Int, val measuredFps: Double) : CaptureUiState
+  data class Streaming(val elapsedSeconds: Double, val measuredFps: Double) : CaptureUiState
 
   data class Error(val message: String) : CaptureUiState
 }
@@ -104,7 +104,7 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
             when (service.state) {
               CaptureState.IDLE -> CaptureUiState.Idle
               CaptureState.WAITING_FOR_CONNECTION -> CaptureUiState.WaitingForConnection
-              CaptureState.STREAMING -> CaptureUiState.Streaming(service.framesEncoded, service.measuredFps)
+              CaptureState.STREAMING -> CaptureUiState.Streaming(service.elapsedSeconds, service.measuredFps)
             }
           delay(500)
         }
