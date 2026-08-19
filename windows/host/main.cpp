@@ -1,5 +1,6 @@
 #include <mfapi.h>
 #include <windows.h>
+#include <shellapi.h>
 
 #include <atomic>
 #include <cstdio>
@@ -34,6 +35,13 @@ constexpr GUID kVCamSourceClsid = {
 // isn't guaranteed either) -- exactly one of the two is non-null at a time.
 phonecam::tray::TrayIcon* g_tray = nullptr;
 HANDLE g_stopEvent = nullptr;
+
+// Static storage duration, not a block-scoped local: the elevated helper it guards runs on a
+// detached worker thread (see RunUsbDriverHelperElevated's launchHelper wiring below) that can
+// outlive the block it was started in if the app shuts down mid-install -- a block-scoped
+// std::atomic captured by reference would dangle in that case. This is the same reasoning as
+// g_tray/g_stopEvent above, just for a different piece of cross-thread shutdown-adjacent state.
+std::atomic<bool> g_driverSetupInFlight{false};
 
 BOOL WINAPI ConsoleHandler(DWORD /*ctrlType*/) {
     if (g_tray) {
@@ -113,6 +121,55 @@ bool DetectAdbDevicePresent() {
     // adb's device-state vocabulary ("device", "unauthorized", "offline", "no permissions",
     // "authorizing") has no overlap after a tab, so a plain substring search is safe here.
     return output.find("\tdevice") != std::string::npos;
+}
+
+// Phase 2 UX: launches windows/usbdriver/phonecam-usbdriver.exe (built to sit next to this
+// exe, same directory PhoneCam.iss installs both into) elevated via ShellExecuteExW's "runas"
+// verb -- this is the ONE UAC prompt covering the whole install-or-revert operation, not
+// phonecam-host.exe itself, which stays asInvoker throughout (see its own build.md notes on
+// why elevating the main process would be the wrong shape). Blocks the CALLING thread until
+// the helper exits -- callers run this on a dedicated worker thread (see the tray menu wiring
+// below), never on the tray's own message-pump thread, so a UAC prompt or a slow install never
+// freezes the tray icon.
+//
+// Returns the helper's exit code, or -1 if it couldn't even be launched (missing binary, or
+// ShellExecuteExW itself failing -- e.g. ERROR_CANCELLED if the user clicks "No" on the UAC
+// prompt, which is the expected, non-error way to decline).
+int RunUsbDriverHelperElevated(const wchar_t* args) {
+    wchar_t exePath[MAX_PATH];
+    const DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (len == 0 || len == MAX_PATH) {
+        phonecam::log::Error("RunUsbDriverHelperElevated: GetModuleFileNameW failed");
+        return -1;
+    }
+    std::wstring helperPath(exePath, len);
+    const size_t lastSlash = helperPath.find_last_of(L"\\/");
+    if (lastSlash == std::wstring::npos) return -1;
+    helperPath = helperPath.substr(0, lastSlash + 1) + L"phonecam-usbdriver.exe";
+
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";
+    sei.lpFile = helperPath.c_str();
+    sei.lpParameters = args;
+    sei.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&sei) || !sei.hProcess) {
+        const DWORD err = GetLastError();
+        if (err == ERROR_CANCELLED) {
+            phonecam::log::Info("USB driver helper: user declined the admin prompt");
+        } else {
+            phonecam::log::Error("RunUsbDriverHelperElevated: ShellExecuteExW failed (is phonecam-usbdriver.exe "
+                                  "next to phonecam-host.exe?)");
+        }
+        return -1;
+    }
+
+    WaitForSingleObject(sei.hProcess, INFINITE);
+    DWORD exitCode = static_cast<DWORD>(-1);
+    GetExitCodeProcess(sei.hProcess, &exitCode);
+    CloseHandle(sei.hProcess);
+    return static_cast<int>(exitCode);
 }
 
 // Phase 3A offline proof: decode a raw .h264 file (same shape as the
@@ -361,11 +418,45 @@ int wmain(int argc, wchar_t* argv[]) {
         std::printf("PhoneCam virtual camera started. Ctrl+C (or close this window) to stop.\n");
         std::fflush(stdout);
 
+        // Phase 2 UX: g_driverSetupInFlight guards against a second click launching a second
+        // elevated helper (and a second UAC prompt) while one is still running; the actual
+        // RunUsbDriverHelperElevated() call always happens on a fresh detached worker thread,
+        // never on the tray's own message-pump thread, so a slow install or an unanswered UAC
+        // prompt never freezes the tray icon or its menu.
+        auto launchHelper = [](const wchar_t* args, const char* verb) {
+            if (g_driverSetupInFlight.exchange(true)) return;  // already running one
+            std::thread([args, verb]() {
+                phonecam::log::Info(std::string("USB driver helper: launching (") + verb + ")...");
+                const int rc = RunUsbDriverHelperElevated(args);
+                phonecam::log::Info(std::string("USB driver helper: ") + verb + " finished, exit code " +
+                                     std::to_string(rc));
+                g_driverSetupInFlight.store(false);
+            }).detach();
+        };
+
         // Phase 5: a tray icon so phonecam-host.exe can run backgrounded/minimized instead of
         // requiring a visible console. Status text is a cheap read of atomics/getters already
         // updated by the bridge and control-channel supervise loops above -- no polling thread of
         // its own needed, TrayIcon refreshes on its own timer and on menu-open.
         phonecam::tray::TrayIcon tray;
+        tray.SetMenuItems([&]() -> std::vector<phonecam::tray::MenuItem> {
+            std::vector<phonecam::tray::MenuItem> items;
+            if (g_driverSetupInFlight.load()) {
+                items.push_back({"USB driver helper running...", nullptr, false});
+                return items;
+            }
+            // Only offered in AOA mode -- the adb path never needs this driver at all, and
+            // offering it there would be actively misleading (see AoaVideoTransport's own
+            // composite-device guard: installing this while debugging is on is refused anyway).
+            if (useAoa) {
+                items.push_back({"Set up USB driver for AOA...",
+                                  [&]() { launchHelper(L"--install", "install"); }, false});
+            }
+            items.push_back(
+                {"Remove USB driver (restore file transfer)", [&]() { launchHelper(L"--revert-all", "revert"); },
+                 false});
+            return items;
+        });
         const bool trayCreated = tray.Create([&]() -> std::string {
             if (useTestPattern) return "test pattern (dev mode)";
             const bool video = bridge.IsConnected();

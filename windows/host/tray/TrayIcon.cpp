@@ -15,6 +15,7 @@ constexpr UINT kTimerIntervalMs = 3000;
 constexpr UINT kIconId = 1;
 constexpr UINT kMenuIdStatus = 100;  // disabled, display-only
 constexpr UINT kMenuIdExit = 101;
+constexpr UINT kMenuIdDynamicBase = 200;  // SetMenuItems' entries, allocated fresh each menu-open
 constexpr const wchar_t* kWindowClassName = L"PhoneCamTrayWindow";
 }  // namespace
 
@@ -22,6 +23,11 @@ struct TrayIcon::Impl {
     HWND hwnd = nullptr;
     HICON icon = nullptr;
     std::function<std::string()> statusProvider;
+    std::function<std::vector<MenuItem>()> itemsProvider;
+    // Rebuilt at the top of every ShowContextMenu() call, indexed by (menu ID - kMenuIdDynamicBase)
+    // -- WM_COMMAND looks a clicked dynamic item's callback up here rather than needing a
+    // permanent, ever-growing table, since the menu itself is already rebuilt fresh each time.
+    std::vector<std::function<void()>> dynamicCallbacks;
     bool iconAdded = false;
 
     void RefreshTooltip() {
@@ -44,6 +50,28 @@ struct TrayIcon::Impl {
         HMENU menu = CreatePopupMenu();
         const std::string status = statusProvider ? statusProvider() : std::string();
         AppendMenuW(menu, MF_STRING | MF_GRAYED, kMenuIdStatus, std::wstring(status.begin(), status.end()).c_str());
+
+        dynamicCallbacks.clear();
+        if (itemsProvider) {
+            const std::vector<MenuItem> items = itemsProvider();
+            if (!items.empty()) {
+                AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                for (const MenuItem& item : items) {
+                    UINT flags = MF_STRING;
+                    UINT id;
+                    if (item.onClick) {
+                        id = kMenuIdDynamicBase + static_cast<UINT>(dynamicCallbacks.size());
+                        dynamicCallbacks.push_back(item.onClick);
+                        if (item.checked) flags |= MF_CHECKED;
+                    } else {
+                        id = kMenuIdStatus;  // reused: any disabled/display-only item shares its (no-op) ID
+                        flags |= MF_GRAYED;
+                    }
+                    AppendMenuW(menu, flags, id, std::wstring(item.label.begin(), item.label.end()).c_str());
+                }
+            }
+        }
+
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kMenuIdExit, L"Exit");
 
@@ -75,11 +103,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER:
             if (impl && wParam == kTimerId) impl->RefreshTooltip();
             return 0;
-        case WM_COMMAND:
-            if (LOWORD(wParam) == kMenuIdExit) {
+        case WM_COMMAND: {
+            const UINT id = LOWORD(wParam);
+            if (id == kMenuIdExit) {
                 DestroyWindow(hwnd);
+            } else if (impl && id >= kMenuIdDynamicBase) {
+                const size_t idx = id - kMenuIdDynamicBase;
+                if (idx < impl->dynamicCallbacks.size() && impl->dynamicCallbacks[idx]) {
+                    impl->dynamicCallbacks[idx]();
+                }
             }
             return 0;
+        }
         case WM_DESTROY:
             if (impl) {
                 if (impl->iconAdded) {
@@ -109,6 +144,10 @@ TrayIcon::~TrayIcon() {
     if (impl_->hwnd) {
         DestroyWindow(impl_->hwnd);
     }
+}
+
+void TrayIcon::SetMenuItems(std::function<std::vector<MenuItem>()> itemsProvider) {
+    impl_->itemsProvider = std::move(itemsProvider);
 }
 
 bool TrayIcon::Create(std::function<std::string()> statusProvider) {

@@ -178,14 +178,27 @@ bool ParseHex16(const char* s, unsigned short* out) {
     return true;
 }
 
-// Finds the currently-present device matching vid/pid, refuses composite
-// devices, generates and installs a self-signed libusbK driver package for
-// it. Mirrors the exact shape already proven manually against the Note 8's
-// accessory-mode node (see docs/architecture.md's "Resolved, not just
-// diagnosed" section) -- same driver type, same wdi_prepare_driver +
-// wdi_install_driver pair, just automated and targeting whatever VID/PID is
-// passed in rather than a hardcoded one.
+// Known Android-device VIDs, used only for --install's auto-detect mode
+// (no --vid/--pid given). Deliberately a short, project-specific list, not
+// a general OEM database -- matches "for now on my Note 8", not a
+// commitment to support every Android phone brand. Xiaomi's own VID (this
+// project's reference device's normal-mode VID) plus Google's (used by
+// some devices even in normal mode, and always for the accessory-mode
+// re-enumeration -- see kGoogleVid above).
+constexpr unsigned short kXiaomiVid = 0x2717;
+
+// Finds the currently-present device matching vid/pid (or, if both are 0,
+// auto-detects the first present, non-composite device matching a known
+// Android VID -- accessory-mode PIDs are excluded from the scan, since a
+// device already in accessory mode isn't what this function installs for),
+// refuses composite devices, generates and installs a self-signed libusbK
+// driver package for it. Mirrors the exact shape already proven manually
+// against the Note 8's accessory-mode node (see docs/architecture.md's
+// "Resolved, not just diagnosed" section) -- same driver type, same
+// wdi_prepare_driver + wdi_install_driver pair.
 int InstallForPresentDevice(unsigned short vid, unsigned short pid) {
+    const bool autoDetect = (vid == 0 && pid == 0);
+
     wdi_options_create_list createOpts{};
     createOpts.list_all = TRUE;    // the device already has a driver (wpdmtp.inf) -- not driverless
     createOpts.list_hubs = TRUE;   // composite parent devices only show up with this on
@@ -200,13 +213,28 @@ int InstallForPresentDevice(unsigned short vid, unsigned short pid) {
 
     wdi_device_info* target = nullptr;
     for (wdi_device_info* d = list; d != nullptr; d = d->next) {
-        if (d->vid == vid && d->pid == pid) {
+        if (autoDetect) {
+            bool knownVid = d->vid == kXiaomiVid || d->vid == kGoogleVid;
+            bool isAccessoryPid = d->vid == kGoogleVid && d->pid >= kAccessoryPidLow && d->pid <= kAccessoryPidHigh;
+            if (knownVid && !isAccessoryPid && !d->is_composite) {
+                target = d;
+                vid = d->vid;
+                pid = d->pid;
+                break;
+            }
+        } else if (d->vid == vid && d->pid == pid) {
             target = d;
             break;
         }
     }
     if (!target) {
-        std::printf("Device VID_%04X&PID_%04X is not currently present.\n", vid, pid);
+        if (autoDetect) {
+            std::printf(
+                "No present, non-composite Android device found (checked VID_%04X and VID_%04X).\n",
+                kXiaomiVid, kGoogleVid);
+        } else {
+            std::printf("Device VID_%04X&PID_%04X is not currently present.\n", vid, pid);
+        }
         wdi_destroy_list(list);
         return kExitNoDevice;
     }
@@ -450,11 +478,12 @@ int RevertAll() {
 
 void PrintUsage() {
     std::printf(
-        "phonecam-usbdriver.exe --install --vid <hex> --pid <hex>\n"
-        "  Installs a libusbK driver binding for the given, currently-attached,\n"
-        "  non-composite USB device, then pre-stages drivers for all six\n"
-        "  standardized AOA accessory-mode PIDs so the phone's post-handshake\n"
-        "  re-enumeration also has a driver ready, with no second prompt.\n"
+        "phonecam-usbdriver.exe --install [--vid <hex> --pid <hex>]\n"
+        "  Installs a libusbK driver binding for a currently-attached, non-composite\n"
+        "  USB device, then pre-stages drivers for all six standardized AOA\n"
+        "  accessory-mode PIDs so the phone's post-handshake re-enumeration also has\n"
+        "  a driver ready, with no second prompt. With no --vid/--pid, auto-detects\n"
+        "  the first present, non-composite device matching a known Android VID.\n"
         "  Requires administrator privileges.\n"
         "\n"
         "phonecam-usbdriver.exe --revert-all\n"
@@ -490,9 +519,17 @@ int main(int argc, char** argv) {
         return RevertAll();
     }
 
-    if (!doInstall || !haveVid || !havePid) {
+    // --vid/--pid are optional: given neither, InstallForPresentDevice auto-detects the
+    // first present, non-composite device matching a known Android VID. Given one but not
+    // the other is treated as a usage error (an incomplete manual override, not a request
+    // to auto-detect).
+    if (!doInstall || (haveVid != havePid)) {
         PrintUsage();
         return kExitBadArgs;
+    }
+    if (!haveVid) {
+        vid = 0;
+        pid = 0;
     }
 
     wdi_set_log_level(WDI_LOG_LEVEL_INFO);

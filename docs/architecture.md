@@ -1664,3 +1664,55 @@ all). The debugging-on -> adb-preferred direction is the same
 was not separately re-verified live this pass, since the two branches
 share identical code and the adb path itself is already proven
 extensively elsewhere in this document.
+
+## Status: driver-setup helper wired into `phonecam-host.exe` itself, verified live -- Phase 2 is now a real product feature, not a CLI tool
+
+Previously `phonecam-usbdriver.exe` was only invokable by hand (a PowerShell
+script running it elevated). Now `phonecam-host.exe`'s tray menu has two
+real items -- **"Set up USB driver for AOA..."** (shown only when the host
+picked AOA, i.e. no debugging-enabled phone was found) and **"Remove USB
+driver (restore file transfer)"** (always available) -- each launching the
+helper via `ShellExecuteExW`'s `runas` verb on a dedicated worker thread
+(`windows/host/main.cpp`'s `RunUsbDriverHelperElevated`), so the one UAC
+prompt and the install itself never block the tray's own message loop.
+`phonecam-host.exe` itself stays `asInvoker` throughout -- only the small
+helper ever elevates.
+
+This needed two small preparatory additions:
+- **`TrayIcon` gained real extensibility** (`SetMenuItems`, `MenuItem`):
+  a callback invoked fresh every time the context menu opens, appending
+  items (with click callbacks, checkable state) between the status line
+  and Exit. Minimal on purpose -- no submenus yet, dynamic IDs starting
+  at `WM_APP`-adjacent 200, looked up in a per-open-rebuilt vector rather
+  than a permanent table. This is the same mechanism Phase 4's future
+  camera/rotation menus will use.
+- **`phonecam-usbdriver.exe --install` gained auto-detect** (no
+  `--vid`/`--pid` needed): scans present devices for the first
+  non-composite match against a short, project-specific known-Android-VID
+  list (Xiaomi + Google), rather than requiring the host to already know
+  the phone's exact hardware ID. Keeps `--vid`/`--pid` as an explicit
+  manual override for testing.
+
+**Verified live, the complete real user flow, start to finish:** phone
+attached, debugging off, driver not yet installed -> `phonecam-host.exe`
+launched with no flags, tray shows "waiting for phone..." plus both new
+menu items -> clicked "Set up USB driver for AOA..." -> one UAC prompt,
+approved -> `pnputil` confirms the binding (`Class Name: libusbk
+devices`) -> and, with no further action at all, the *same already-running*
+`phonecam-host.exe`'s own background `LiveVideoBridge` retry loop picked
+up the newly-available driver on its next attempt and logged
+`AoaVideoTransport: connected` -- the phone had already re-enumerated
+into accessory mode (`PID_2D00`) by the time the install finished. No
+restart, no second click, no separate tool run by hand. This is the
+complete product experience the whole Phase 2 investigation was building
+toward.
+
+**Not yet done:** the automatic *proactive* offer (a balloon/prompt shown
+once, on its own, if AOA has been failing to connect for a while) --
+today the tray items are always there to click manually, which is the
+core requirement satisfied, but nothing nudges a first-time user toward
+them yet. Also still open: wiring `phonecam-usbdriver.exe` into
+`windows/installer/PhoneCam.iss` so it actually ships next to
+`phonecam-host.exe`, and testing this whole flow on a phone this dev
+machine has never touched (the Note 7, once the composite-guard and
+pre-staging are exercised against it too).
