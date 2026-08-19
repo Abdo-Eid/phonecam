@@ -65,6 +65,56 @@ std::vector<std::vector<uint8_t>> SplitAnnexBNalus(const std::vector<uint8_t>& b
 
 uint8_t NaluType(const std::vector<uint8_t>& nalu) { return nalu.size() < 4 ? 0xFF : (nalu[3] & 0x1F); }
 
+// Phase 1 (transport auto-detect): runs `adb devices` and checks for a
+// line ending in a real device state ("...\tdevice"), as opposed to
+// "unauthorized"/"offline"/"no permissions"/absent entirely. Used once at
+// startup to decide adb vs. AOA -- see the useAoa computation in wmain.
+// Deliberately does NOT re-check continuously: a given phone/PC setup is
+// consistently debugging-on or debugging-off in practice, and if the user
+// changes it, relaunching phonecam-host (easy via the tray's Exit item)
+// picks up the new state -- a live-switching design would need
+// restructuring LiveVideoBridge to swap transports mid-run, which the
+// reconnect loop doesn't support and isn't worth building for an edge case.
+bool DetectAdbDevicePresent() {
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE readPipe = nullptr, writePipe = nullptr;
+    if (!CreatePipe(&readPipe, &writePipe, &sa, 0)) return false;
+    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = writePipe;
+    si.hStdError = writePipe;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"adb devices";
+    const BOOL ok =
+        CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(writePipe);
+    if (!ok) {
+        phonecam::log::Error("DetectAdbDevicePresent: failed to launch adb (is it on PATH?) -- assuming AOA");
+        CloseHandle(readPipe);
+        return false;
+    }
+
+    std::string output;
+    char buf[4096];
+    DWORD bytesRead = 0;
+    while (ReadFile(readPipe, buf, sizeof(buf), &bytesRead, nullptr) && bytesRead > 0) {
+        output.append(buf, bytesRead);
+    }
+    CloseHandle(readPipe);
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    // adb's device-state vocabulary ("device", "unauthorized", "offline", "no permissions",
+    // "authorizing") has no overlap after a tab, so a plain substring search is safe here.
+    return output.find("\tdevice") != std::string::npos;
+}
+
 // Phase 3A offline proof: decode a raw .h264 file (same shape as the
 // scratchpad captures already validated with ffmpeg in Phase 2) with zero
 // phone/transport involvement, and dump one decoded frame's packed NV12 so
@@ -222,15 +272,23 @@ int wmain(int argc, wchar_t* argv[]) {
     // opt-in dev tool for exercising the PC side (ring/vcam/Frame Server)
     // without a phone connected. Real usage is the default path below.
     const bool useTestPattern = argc > 1 && std::wstring(argv[1]) == L"--test-pattern";
-    // --aoa: Phase 7's alternative video transport (transport/AoaTransport.h),
-    // in place of the default adb-forward one -- video channel only, control
-    // still runs over adb regardless of this flag (see AoaVideoTransport's
-    // class doc comment for why). Added alongside the proven adb path, not
-    // in place of it: AOA's reconnect behavior after a dropped session is
-    // less understood (see docs/architecture.md's Phase 7 notes on there
-    // being no clean software-only way back into accessory mode without a
-    // physical replug).
-    const bool useAoa = argc > 1 && std::wstring(argv[1]) == L"--aoa";
+    // --aoa / --adb: explicit dev overrides, unchanged from Phase 7. Video
+    // channel only either way -- control still runs over adb regardless of
+    // which video transport is picked (see AoaVideoTransport's class doc
+    // comment for why).
+    const bool forceAoa = argc > 1 && std::wstring(argv[1]) == L"--aoa";
+    const bool forceAdb = argc > 1 && std::wstring(argv[1]) == L"--adb";
+    // Phase 1: with no explicit flag, auto-detect -- prefer adb when a
+    // debugging-enabled phone is actually present (the proven, no-extra-
+    // setup path), fall back to AOA otherwise (which needs the driver from
+    // windows/usbdriver/ to have been set up; if it hasn't, AoaVideoTransport
+    // ::Connect() just fails and retries, same as adb failing to find a
+    // phone streaming -- see LiveVideoBridge::Run()'s existing backoff).
+    const bool useAoa = forceAoa || (!forceAdb && !useTestPattern && !DetectAdbDevicePresent());
+    if (!forceAoa && !forceAdb && !useTestPattern) {
+        phonecam::log::Info(useAoa ? "No debugging-enabled phone detected -- using AOA"
+                                    : "Debugging-enabled phone detected -- using adb");
+    }
 
     phonecam::bridge::TestPatternProducer producer;
     phonecam::bridge::LiveVideoBridge bridge(

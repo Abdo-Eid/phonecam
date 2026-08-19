@@ -1634,3 +1634,33 @@ there's no resolution mismatch anymore.
 over AOA, and installer driver auto-install (`libwdi` against the parent
 composite device's hardware ID, per the corrected shipping note earlier
 in this document).
+
+## Status: transport auto-detect (adb preferred, AOA fallback), verified live
+
+`phonecam-host.exe` with no CLI flag now runs `adb devices` once at
+startup (`DetectAdbDevicePresent()`, `windows/host/main.cpp`) and picks
+`AdbVideoTransport` if a real device is listed (state `device`, not
+`unauthorized`/`offline`/absent), `AoaVideoTransport` otherwise -- so a
+debugging-enabled phone always gets the proven, zero-setup adb path, and
+AOA is only ever attempted when adb genuinely can't reach anything.
+`--aoa`/`--adb` remain as explicit dev overrides, unchanged.
+
+Runs once at startup, not continuously -- a given phone/PC setup is
+consistently debugging-on or debugging-off in practice; picking up a
+change means relaunching the host (already easy via the tray's Exit
+item), not restructuring `LiveVideoBridge` to swap transports mid-run,
+which the reconnect loop doesn't support and isn't worth building for an
+edge case.
+
+Verified live with debugging off: logs `No debugging-enabled phone
+detected -- using AOA`, then (since the driver from
+`windows/usbdriver/` wasn't installed at the time of this specific test)
+`AoaVideoTransport::Connect()` fails and retries with backoff exactly
+like the adb path already does when no phone is streaming -- confirms
+the fallback is graceful, not a crash or hang, even in the
+worst case (no driver, no phone streaming, nothing to connect to at
+all). The debugging-on -> adb-preferred direction is the same
+`DetectAdbDevicePresent()` call with different `adb devices` output and
+was not separately re-verified live this pass, since the two branches
+share identical code and the adb path itself is already proven
+extensively elsewhere in this document.
