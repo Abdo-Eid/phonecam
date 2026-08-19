@@ -30,8 +30,14 @@
 
 namespace phonecam::shm {
 
-inline constexpr wchar_t kMappingName[] = L"Global\\PhoneCam_FrameRing_v1";
-inline constexpr wchar_t kReadyEventName[] = L"Global\\PhoneCam_FrameReady_v1";
+// Bumped v1 -> v2 when RingHeader gained the transform field (Phase 7,
+// rotation/mirror): a name bump makes an old/new binary mismatch structurally
+// impossible to alias onto the same mapping, rather than relying on a
+// version-field check both sides have to remember to add. Whichever binary
+// (host or vcam DLL) gets redeployed second after this change simply creates
+// (or opens) a distinct mapping -- there's no live section to corrupt.
+inline constexpr wchar_t kMappingName[] = L"Global\\PhoneCam_FrameRing_v2";
+inline constexpr wchar_t kReadyEventName[] = L"Global\\PhoneCam_FrameReady_v2";
 
 // SYSTEM, Administrators, Local Service, Network Service, Everyone: generic
 // all access. Broad on purpose -- this is single-machine local IPC carrying
@@ -59,8 +65,30 @@ struct FrameSlot {
     uint8_t data[kMaxFrameBytes];
 };
 
+inline constexpr uint32_t kRingMagic = 0x504D4332;    // 'PMC2'
+inline constexpr uint32_t kRingVersion = 2;
+
+// Rotation is always a quarter turn applied clockwise before mirror (so
+// "mirror" consistently means "flip what the viewer sees", regardless of
+// rotation) -- see FrameGenerator::DrawLatestRingFrameOrWaitingMessage.
+enum class Rotation : uint32_t { Deg0 = 0, Deg90 = 1, Deg180 = 2, Deg270 = 3 };
+
 struct RingHeader {
+    uint32_t magic;
+    uint32_t version;
     std::atomic<uint32_t> writeIndex;  // index into slots[] last published
+    // Packed: bits 0-1 = Rotation, bit 2 = mirror. A standing setting (not
+    // per-frame) -- set from the host's tray, read by the vcam DLL on every
+    // draw -- so it must live here, not HKCU (invisible to the vcam's
+    // service-account session) and not stamped per-frame (couldn't change
+    // while the phone is disconnected and no frames are being written).
+    std::atomic<uint32_t> transform;
+    // What the consuming app actually negotiated (MediaStream::Start's MF_MT_FRAME_SIZE),
+    // published by the vcam DLL on every draw -- read by the host's tray as a read-only display
+    // (there's no PC-side "push resolution" mechanism; see docs/architecture.md's Phase 7 section).
+    // 0,0 until a consumer has negotiated at least once.
+    std::atomic<uint32_t> negotiatedWidth;
+    std::atomic<uint32_t> negotiatedHeight;
     FrameSlot slots[kRingSlots];
 };
 
@@ -116,8 +144,11 @@ public:
         if (!MapAndOpenEvent()) {
             return false;
         }
+        RingHeader* header = static_cast<RingHeader*>(view_);
         if (!alreadyExisted) {
             ZeroMemory(view_, sizeof(RingHeader));
+            header->magic = kRingMagic;
+            header->version = kRingVersion;
         }
         return true;
     }
@@ -130,7 +161,15 @@ public:
         if (!mapping_) {
             return false;
         }
-        return MapAndOpenEvent();
+        if (!MapAndOpenEvent()) {
+            return false;
+        }
+        RingHeader* header = static_cast<RingHeader*>(view_);
+        if (header->magic != kRingMagic || header->version != kRingVersion) {
+            Close();
+            return false;
+        }
+        return true;
     }
 
     void Close() {
@@ -154,9 +193,13 @@ public:
     // (stride == width). Not thread-safe against concurrent writers -- the
     // host has exactly one producer thread.
     bool WriteFrame(uint32_t width, uint32_t height, uint64_t timestampUs, const uint8_t* nv12Data) {
-        if (!view_ || width == 0 || height == 0 || width > kMaxWidth || height > kMaxHeight) {
+        if (!view_ || width == 0 || height == 0) {
             return false;
         }
+        // Byte-count bound, not separate width/height caps: rotation stays PC-side (see
+        // FrameGenerator) so portrait frames never actually enter the ring today, but this
+        // removes a latent 1080x1920-shaped landmine for any future phone-side work -- any
+        // width/height combination that fits the buffer is accepted.
         const size_t frameBytes = static_cast<size_t>(width) * height * 3 / 2;
         if (frameBytes > kMaxFrameBytes) {
             return false;
@@ -236,6 +279,53 @@ public:
             return false;
         }
         return WaitForSingleObject(readyEvent_, timeoutMs) == WAIT_OBJECT_0;
+    }
+
+    // Either side may call these -- the host's tray writes the setting, the
+    // vcam DLL reads it on every draw. No-op (false / rotation=Deg0,mirror=false)
+    // if the ring isn't open yet, matching this class's existing lazy-open pattern.
+    bool SetTransform(Rotation rotation, bool mirror) {
+        if (!view_) {
+            return false;
+        }
+        RingHeader* header = static_cast<RingHeader*>(view_);
+        const uint32_t packed = (static_cast<uint32_t>(rotation) & 0x3u) | (mirror ? 0x4u : 0u);
+        header->transform.store(packed, std::memory_order_release);
+        return true;
+    }
+
+    void GetTransform(Rotation& rotation, bool& mirror) const {
+        rotation = Rotation::Deg0;
+        mirror = false;
+        if (!view_) {
+            return;
+        }
+        const RingHeader* header = static_cast<const RingHeader*>(view_);
+        const uint32_t packed = header->transform.load(std::memory_order_acquire);
+        rotation = static_cast<Rotation>(packed & 0x3u);
+        mirror = (packed & 0x4u) != 0;
+    }
+
+    // Consumer (vcam) publishes; producer (host) reads for the tray's read-only display.
+    bool SetNegotiatedSize(uint32_t width, uint32_t height) {
+        if (!view_) {
+            return false;
+        }
+        RingHeader* header = static_cast<RingHeader*>(view_);
+        header->negotiatedWidth.store(width, std::memory_order_release);
+        header->negotiatedHeight.store(height, std::memory_order_release);
+        return true;
+    }
+
+    void GetNegotiatedSize(uint32_t& width, uint32_t& height) const {
+        width = 0;
+        height = 0;
+        if (!view_) {
+            return;
+        }
+        const RingHeader* header = static_cast<const RingHeader*>(view_);
+        width = header->negotiatedWidth.load(std::memory_order_acquire);
+        height = header->negotiatedHeight.load(std::memory_order_acquire);
     }
 
 private:

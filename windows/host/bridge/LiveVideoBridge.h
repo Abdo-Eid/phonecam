@@ -41,6 +41,13 @@ public:
     // connection is actually up, not while the supervise loop is retrying.
     bool IsConnected() const { return connected_.load(); }
 
+    // Thin forwarders so main.cpp/the tray (Phase 4) can reach the ring's standing settings
+    // without touching the private ring_ member directly. SetTransform is a no-op (returns false)
+    // until Start() has opened the ring; GetNegotiatedSize reports 0,0 the same way until the vcam
+    // side has negotiated a size at least once.
+    bool SetTransform(phonecam::shm::Rotation rotation, bool mirror) { return ring_.SetTransform(rotation, mirror); }
+    void GetNegotiatedSize(uint32_t& width, uint32_t& height) const { ring_.GetNegotiatedSize(width, height); }
+
 private:
     void Run();
     bool WaitBeforeRetry();

@@ -7,6 +7,57 @@
 #include "MediaStream.h"
 #include "MediaSource.h"
 
+namespace
+{
+	// Real, app-negotiated resolution (Phase 7): the vcam advertises multiple sizes and lets the
+	// consuming app (Zoom/OBS/Chrome/...) pick one via normal MF/DirectShow negotiation, exactly
+	// like a real UVC webcam -- there's no other mechanism, and forcing a live format change on a
+	// running consumer would make the device disappear out from under it rather than gracefully
+	// re-negotiate. Index 0 (1920x1080 RGB32) is kept first and unchanged from before this
+	// existed, since some consumers pick index 0 blindly.
+	//
+	// 720p and 1080p only (not the vcam's job to invent sizes nobody asked for), landscape and
+	// portrait for both (portrait is what lets a vertically-mounted phone + a tray rotation
+	// setting fill the frame exactly -- see FrameGenerator's rotation math).
+	constexpr UINT32 kSizes[][2] = { {1920, 1080}, {1280, 720}, {1080, 1920}, {720, 1280} };
+	constexpr size_t kNumSizes = _countof(kSizes);
+
+	HRESULT AddVideoType(IMFMediaType** out, REFGUID subtype, UINT32 width, UINT32 height)
+	{
+		wil::com_ptr_nothrow<IMFMediaType> type;
+		RETURN_IF_FAILED(MFCreateMediaType(&type));
+		type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+		type->SetGUID(MF_MT_SUBTYPE, subtype);
+		MFSetAttributeSize(type.get(), MF_MT_FRAME_SIZE, width, height);
+		type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+		type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
+		type->SetUINT32(MF_MT_FIXED_SIZE_SAMPLES, TRUE);
+		MFSetAttributeRatio(type.get(), MF_MT_FRAME_RATE, 30, 1);
+		MFSetAttributeRatio(type.get(), MF_MT_FRAME_RATE_RANGE_MIN, 30, 1);
+		MFSetAttributeRatio(type.get(), MF_MT_FRAME_RATE_RANGE_MAX, 30, 1);
+		MFSetAttributeRatio(type.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+
+		if (subtype == MFVideoFormat_RGB32)
+		{
+			type->SetUINT32(MF_MT_DEFAULT_STRIDE, width * 4);
+			type->SetUINT32(MF_MT_SAMPLE_SIZE, width * height * 4);
+			type->SetUINT32(MF_MT_AVG_BITRATE, (UINT32)((UINT64)width * height * 4 * 8 * 30));
+		}
+		else // NV12
+		{
+			// Y-plane stride -- NOT width*1.5. Setting this to the whole-frame byte multiplier
+			// (the pre-Phase-7 bug) is evidence this type was never actually exercised by a real
+			// consumer, since a wrong MF_MT_DEFAULT_STRIDE here would misread every NV12 sample.
+			type->SetUINT32(MF_MT_DEFAULT_STRIDE, width);
+			type->SetUINT32(MF_MT_SAMPLE_SIZE, (UINT32)((UINT64)width * height * 3 / 2));
+			type->SetUINT32(MF_MT_AVG_BITRATE, (UINT32)((UINT64)width * height * 3 / 2 * 8 * 30));
+		}
+
+		*out = type.detach();
+		return S_OK;
+	}
+}
+
 HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 {
 	RETURN_HR_IF_NULL(E_POINTER, source);
@@ -20,53 +71,20 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 
 	RETURN_IF_FAILED(MFCreateEventQueue(&_queue));
 
-	// set 1 here to force RGB32 only
-	auto types = wil::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFMediaType>>(2);
-
-	// Must match the phone's actual capture resolution (MainScreenViewModel's
-	// default -- see docs/architecture.md's Phase 6 section) -- FrameGenerator
-	// sizes its D2D1 bitmap to whatever's really in the ring, but this
-	// declared MF_MT_FRAME_SIZE is what consumers actually negotiate against,
-	// so a mismatch here silently stretches the real content to fit (e.g. the
-	// original 1280x960 -- left over from Phase 1's TestPatternProducer
-	// default -- vertically stretched live 1280x720 phone frames by 1.33x).
-	// Bumped to 1080p in Phase 6 ("push stable 1080p30" exit criterion) --
-	// still static: true dynamic resolution (matching a future PC-driven
-	// SetResolution) would need MF stream-descriptor renegotiation, a much
-	// larger change deliberately out of Phase 6's quality/perf scope.
-#define NUM_IMAGE_COLS 1920
-#define NUM_IMAGE_ROWS 1080
-
-	wil::com_ptr_nothrow<IMFMediaType> rgbType;
-	RETURN_IF_FAILED(MFCreateMediaType(&rgbType));
-	rgbType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-	rgbType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-	MFSetAttributeSize(rgbType.get(), MF_MT_FRAME_SIZE, NUM_IMAGE_COLS, NUM_IMAGE_ROWS);
-	rgbType->SetUINT32(MF_MT_DEFAULT_STRIDE, NUM_IMAGE_COLS * 4);
-	rgbType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-	rgbType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
-	MFSetAttributeRatio(rgbType.get(), MF_MT_FRAME_RATE, 30, 1);
-	auto bitrate = (uint32_t)(NUM_IMAGE_COLS * NUM_IMAGE_ROWS * 4 * 8 * 30);
-	rgbType->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
-	MFSetAttributeRatio(rgbType.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-	types[0] = rgbType.detach();
-
-	if (types.size() > 1)
+	// RGB32 then NV12, for each size in kSizes -- 8 types total. Must match what the phone can
+	// actually produce (720p/1080p, from CaptureController.kt's own supported set) -- FrameGenerator
+	// resamples to whatever a consumer picked, so there's no need for the ring's real content to
+	// match exactly, just for these declared sizes to be ones FrameGenerator can actually fill.
+	auto types = wil::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFMediaType>>(kNumSizes * 2);
+	for (size_t i = 0; i < kNumSizes; ++i)
 	{
+		wil::com_ptr_nothrow<IMFMediaType> rgbType;
+		RETURN_IF_FAILED(AddVideoType(&rgbType, MFVideoFormat_RGB32, kSizes[i][0], kSizes[i][1]));
+		types[i * 2] = rgbType.detach();
+
 		wil::com_ptr_nothrow<IMFMediaType> nv12Type;
-		RETURN_IF_FAILED(MFCreateMediaType(&nv12Type));
-		nv12Type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-		nv12Type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-		nv12Type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-		nv12Type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
-		MFSetAttributeSize(nv12Type.get(), MF_MT_FRAME_SIZE, NUM_IMAGE_COLS, NUM_IMAGE_ROWS);
-		nv12Type->SetUINT32(MF_MT_DEFAULT_STRIDE, (UINT)(NUM_IMAGE_COLS * 1.5));
-		MFSetAttributeRatio(nv12Type.get(), MF_MT_FRAME_RATE, 30, 1);
-		// frame size * pixel bit size * framerate
-		bitrate = (uint32_t)(NUM_IMAGE_COLS * 1.5 * NUM_IMAGE_ROWS * 8 * 30);
-		nv12Type->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
-		MFSetAttributeRatio(nv12Type.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-		types[1] = nv12Type.detach();
+		RETURN_IF_FAILED(AddVideoType(&nv12Type, MFVideoFormat_NV12, kSizes[i][0], kSizes[i][1]));
+		types[i * 2 + 1] = nv12Type.detach();
 	}
 
 	RETURN_IF_FAILED_MSG(MFCreateStreamDescriptor(_index, (DWORD)types.size(), types.get(), &_descriptor), "MFCreateStreamDescriptor failed");
@@ -87,11 +105,27 @@ HRESULT MediaStream::Start(IMFMediaType* type)
 	{
 		RETURN_IF_FAILED(type->GetGUID(MF_MT_SUBTYPE, &_format));
 		WINTRACE(L"MediaStream::Start format: %s", GUID_ToStringW(_format).c_str());
+
+		// Honor whatever size the consumer actually negotiated -- previously this was read and
+		// then ignored, with EnsureRenderTarget always called at a hardcoded 1920x1080
+		// regardless. Falls through to the last-known _negotiatedWidth/_negotiatedHeight (see
+		// below) if this specific type has no MF_MT_FRAME_SIZE set, which shouldn't happen for
+		// any type Initialize() itself declared, but is a safe no-op either way.
+		UINT32 w = 0, h = 0;
+		if (SUCCEEDED(MFGetAttributeSize(type, MF_MT_FRAME_SIZE, &w, &h)) && w && h)
+		{
+			_negotiatedWidth = w;
+			_negotiatedHeight = h;
+		}
 	}
+	// type == nullptr happens via SetStreamState(MF_STREAM_STATE_RUNNING) -- a real, exercised
+	// path (e.g. a consumer that stops and restarts the stream without releasing the device) --
+	// falls back to whatever was negotiated last, rather than a hardcoded default.
+	WINTRACE(L"MediaStream::Start negotiated size: %ux%u", _negotiatedWidth, _negotiatedHeight);
 
 	// at this point, set D3D manager may have not been called
 	// so we want to create a D2D1 renter target anyway
-	RETURN_IF_FAILED(_generator.EnsureRenderTarget(NUM_IMAGE_COLS, NUM_IMAGE_ROWS));
+	RETURN_IF_FAILED(_generator.EnsureRenderTarget(_negotiatedWidth, _negotiatedHeight));
 
 	RETURN_IF_FAILED(_allocator->InitializeSampleAllocator(10, type));
 	RETURN_IF_FAILED(_queue->QueueEventParamVar(MEStreamStarted, GUID_NULL, S_OK, nullptr));
@@ -127,7 +161,10 @@ HRESULT MediaStream::SetD3DManager(IUnknown* manager)
 
 	// comment these 2 lines to force CPU usage
 	RETURN_IF_FAILED(_allocator->SetDirectXManager(manager));
-	RETURN_IF_FAILED(_generator.SetD3DManager(manager, NUM_IMAGE_COLS, NUM_IMAGE_ROWS));
+	// No size here anymore -- SetAllocator/SetD3DManager can both run before Start(), i.e. before
+	// the negotiated MF_MT_FRAME_SIZE is known at all. _generator.EnsureRenderTarget(...), called
+	// from Start() once that size IS known, is what actually sizes everything.
+	RETURN_IF_FAILED(_generator.SetD3DManager(manager));
 	return S_OK;
 }
 
@@ -240,7 +277,13 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 STDMETHODIMP MediaStream::SetStreamState(MF_STREAM_STATE value)
 {
 	WINTRACE(L"MediaStream::SetStreamState current:%u value:%u", _state, value);
-	if (_state = value)
+	// Was `if (_state = value)` -- an assignment, not a comparison, so it silently overwrote
+	// _state and then (since PAUSED=1 and RUNNING=2 are both truthy) returned S_OK before ever
+	// reaching the switch below for those two states. In practice this meant a caller that starts
+	// or pauses the stream via SetStreamState (e.g. Start(nullptr)'s own entry point) never
+	// actually ran Start()/the PAUSED transition's own guard -- fixed to the evident intent, an
+	// idempotency check ("already in the requested state, nothing to do").
+	if (_state == value)
 		return S_OK;
 	switch (value)
 	{

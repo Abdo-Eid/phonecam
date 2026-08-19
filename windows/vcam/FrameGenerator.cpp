@@ -7,7 +7,89 @@
 
 HRESULT FrameGenerator::EnsureRenderTarget(UINT width, UINT height)
 {
-	if (!HasD3DManager())
+	// Idempotent: called on every MediaStream::Start (including the Start(nullptr) path from
+	// SetStreamState), so a repeat call at the same size that's already set up must be a cheap
+	// no-op, not a resource-recreation storm.
+	if (_renderTarget && _width == width && _height == height)
+	{
+		_prevTime = MFGetSystemTime();
+		_frame = 0;
+		return S_OK;
+	}
+
+	// A real resize (or first-time init): drop everything sized to the old dimensions before
+	// rebuilding. _dxgiManager/_deviceHandle are NOT reset here -- SetD3DManager owns those, and
+	// a resolution change on an already-GPU-mode stream must not need a fresh SetD3DManager call.
+	_renderTarget.reset();
+	_texture.reset();
+	_bitmap.reset();
+	_whiteBrush.reset();
+	_textFormat.reset();
+	_converter.reset();
+
+	if (IsGpuMode())
+	{
+		wil::com_ptr_nothrow<ID3D11Device> device;
+		RETURN_IF_FAILED(_dxgiManager->GetVideoService(_deviceHandle, IID_PPV_ARGS(&device)));
+
+		// create a texture/surface to write
+		CD3D11_TEXTURE2D_DESC desc
+		(
+			DXGI_FORMAT_B8G8R8A8_UNORM,
+			width,
+			height,
+			1,
+			1,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET
+		);
+		RETURN_IF_FAILED(device->CreateTexture2D(&desc, nullptr, &_texture));
+		wil::com_ptr_nothrow<IDXGISurface> surface;
+		RETURN_IF_FAILED(_texture.copy_to(&surface));
+
+		// create a D2D1 render target from 2D GPU surface
+		wil::com_ptr_nothrow<ID2D1Factory> d2d1Factory;
+		RETURN_IF_FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, IID_PPV_ARGS(&d2d1Factory)));
+
+		auto props = D2D1::RenderTargetProperties
+		(
+			D2D1_RENDER_TARGET_TYPE_DEFAULT,
+			D2D1::PixelFormat(DXGI_FORMAT_UNKNOWN, D2D1_ALPHA_MODE_PREMULTIPLIED)
+		);
+		RETURN_IF_FAILED(d2d1Factory->CreateDxgiSurfaceRenderTarget(surface.get(), props, &_renderTarget));
+
+		RETURN_IF_FAILED(CreateRenderTargetResources(width, height));
+
+		// create GPU RGB => NV12 converter, fresh at the new size -- re-typing a live MFT needs
+		// its own flush/SetInputType(0,nullptr,0) dance; recreating outright is simpler and this
+		// only runs on an actual resolution change, not per-frame.
+		RETURN_IF_FAILED(CoCreateInstance(CLSID_VideoProcessorMFT, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&_converter)));
+
+		wil::com_ptr_nothrow<IMFAttributes> atts;
+		RETURN_IF_FAILED(_converter->GetAttributes(&atts));
+		TraceMFAttributes(atts.get(), L"VideoProcessorMFT");
+
+		MFT_OUTPUT_STREAM_INFO info{};
+		RETURN_IF_FAILED(_converter->GetOutputStreamInfo(0, &info));
+		WINTRACE(L"FrameGenerator::EnsureRenderTarget CLSID_VideoProcessorMFT flags:0x%08X size:%u alignment:%u width:%u height:%u", info.dwFlags, info.cbSize, info.cbAlignment, width, height);
+
+		wil::com_ptr_nothrow<IMFMediaType> inputType;
+		RETURN_IF_FAILED(MFCreateMediaType(&inputType));
+		inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+		inputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+		MFSetAttributeSize(inputType.get(), MF_MT_FRAME_SIZE, width, height);
+		RETURN_IF_FAILED(_converter->SetInputType(0, inputType.get(), 0));
+
+		wil::com_ptr_nothrow<IMFMediaType> outputType;
+		RETURN_IF_FAILED(MFCreateMediaType(&outputType));
+		outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+		outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+		MFSetAttributeSize(outputType.get(), MF_MT_FRAME_SIZE, width, height);
+		RETURN_IF_FAILED(_converter->SetOutputType(0, outputType.get(), 0));
+
+		// make sure the video processor works on GPU
+		RETURN_IF_FAILED(_converter->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)_dxgiManager.get()));
+	}
+	else
 	{
 		// create a D2D1 render target from WIC bitmap
 		wil::com_ptr_nothrow<ID2D1Factory> d2d1Factory;
@@ -31,76 +113,17 @@ HRESULT FrameGenerator::EnsureRenderTarget(UINT width, UINT height)
 	return S_OK;
 }
 
-const bool FrameGenerator::HasD3DManager() const
+const bool FrameGenerator::IsGpuMode() const
 {
-	return _texture != nullptr;
+	return _dxgiManager != nullptr;
 }
 
-HRESULT FrameGenerator::SetD3DManager(IUnknown* manager, UINT width, UINT height)
+HRESULT FrameGenerator::SetD3DManager(IUnknown* manager)
 {
 	RETURN_HR_IF_NULL(E_POINTER, manager);
-	RETURN_HR_IF(E_INVALIDARG, !width || !height);
 
 	RETURN_IF_FAILED(manager->QueryInterface(&_dxgiManager));
 	RETURN_IF_FAILED(_dxgiManager->OpenDeviceHandle(&_deviceHandle));
-
-	wil::com_ptr_nothrow<ID3D11Device> device;
-	RETURN_IF_FAILED(_dxgiManager->GetVideoService(_deviceHandle, IID_PPV_ARGS(&device)));
-
-	// create a texture/surface to write
-	CD3D11_TEXTURE2D_DESC desc
-	(
-		DXGI_FORMAT_B8G8R8A8_UNORM,
-		width,
-		height,
-		1,
-		1,
-		D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET
-	);
-	RETURN_IF_FAILED(device->CreateTexture2D(&desc, nullptr, &_texture));
-	wil::com_ptr_nothrow<IDXGISurface> surface;
-	RETURN_IF_FAILED(_texture.copy_to(&surface));
-
-	// create a D2D1 render target from 2D GPU surface
-	wil::com_ptr_nothrow<ID2D1Factory> d2d1Factory;
-	RETURN_IF_FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, IID_PPV_ARGS(&d2d1Factory)));
-
-	auto props = D2D1::RenderTargetProperties
-	(
-		D2D1_RENDER_TARGET_TYPE_DEFAULT,
-		D2D1::PixelFormat(DXGI_FORMAT_UNKNOWN, D2D1_ALPHA_MODE_PREMULTIPLIED)
-	);
-	RETURN_IF_FAILED(d2d1Factory->CreateDxgiSurfaceRenderTarget(surface.get(), props, &_renderTarget));
-
-	RETURN_IF_FAILED(CreateRenderTargetResources(width, height));
-
-	// create GPU RGB => NV12 converter
-	RETURN_IF_FAILED(CoCreateInstance(CLSID_VideoProcessorMFT, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&_converter)));
-
-	wil::com_ptr_nothrow<IMFAttributes> atts;
-	RETURN_IF_FAILED(_converter->GetAttributes(&atts));
-	TraceMFAttributes(atts.get(), L"VideoProcessorMFT");
-
-	MFT_OUTPUT_STREAM_INFO info{};
-	RETURN_IF_FAILED(_converter->GetOutputStreamInfo(0, &info));
-	WINTRACE(L"FrameGenerator::SetD3DManager CLSID_VideoProcessorMFT flags:0x%08X size:%u alignment:%u", info.dwFlags, info.cbSize, info.cbAlignment);
-
-	wil::com_ptr_nothrow<IMFMediaType> inputType;
-	RETURN_IF_FAILED(MFCreateMediaType(&inputType));
-	inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-	inputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-	MFSetAttributeSize(inputType.get(), MF_MT_FRAME_SIZE, width, height);
-	RETURN_IF_FAILED(_converter->SetInputType(0, inputType.get(), 0));
-
-	wil::com_ptr_nothrow<IMFMediaType> outputType;
-	RETURN_IF_FAILED(MFCreateMediaType(&outputType));
-	outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-	outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-	MFSetAttributeSize(outputType.get(), MF_MT_FRAME_SIZE, width, height);
-	RETURN_IF_FAILED(_converter->SetOutputType(0, outputType.get(), 0));
-
-	// make sure the video processor works on GPU
-	RETURN_IF_FAILED(_converter->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)manager));
 	return S_OK;
 }
 
@@ -130,6 +153,12 @@ HRESULT FrameGenerator::DrawLatestRingFrameOrWaitingMessage()
 	{
 		_ring.Open();
 	}
+	if (_ring.IsOpen())
+	{
+		// Cheap atomic store, once per draw -- keeps the tray's read-only resolution display fresh
+		// across host restarts without a separate "just opened" special case.
+		_ring.SetNegotiatedSize(_width, _height);
+	}
 
 	UINT32 frameW = 0, frameH = 0;
 	UINT64 ts = 0;
@@ -158,13 +187,34 @@ HRESULT FrameGenerator::DrawLatestRingFrameOrWaitingMessage()
 		auto props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
 		RETURN_IF_FAILED(_renderTarget->CreateBitmap(D2D1::SizeU(frameW, frameH), _rgb32Scratch.get(), rgbStride, props, &bitmap));
 
+		phonecam::shm::Rotation rotation = phonecam::shm::Rotation::Deg0;
+		bool mirror = false;
+		_ring.GetTransform(rotation, mirror);
+		const bool swapWH = (rotation == phonecam::shm::Rotation::Deg90 || rotation == phonecam::shm::Rotation::Deg270);
+		const FLOAT rotatedSrcW = swapWH ? (FLOAT)frameH : (FLOAT)frameW;
+		const FLOAT rotatedSrcH = swapWH ? (FLOAT)frameW : (FLOAT)frameH;
+		// Fit rotated source into the negotiated canvas -- 1.0 exactly for the headline case (a
+		// 1920x1080 sensor frame rotated 90 into a 1080x1920 canvas), pillarboxed/letterboxed
+		// otherwise (e.g. rotating into a landscape-only canvas), never distorted.
+		const FLOAT scale = ((FLOAT)_width / rotatedSrcW < (FLOAT)_height / rotatedSrcH)
+			? (FLOAT)_width / rotatedSrcW
+			: (FLOAT)_height / rotatedSrcH;
+		const FLOAT angleDegrees = (FLOAT)(static_cast<int>(rotation) * 90);
+
+		// Composed about the origin, in source-pixel space, with the bitmap drawn into a rect
+		// centered at the origin below: rotate first, then mirror (so "mirror" always means "flip
+		// what the viewer sees", regardless of the chosen rotation), then scale to fit, then
+		// translate to the canvas center.
+		const auto transform =
+			D2D1::Matrix3x2F::Rotation(angleDegrees) *
+			D2D1::Matrix3x2F::Scale(mirror ? -scale : scale, scale) *
+			D2D1::Matrix3x2F::Translation((FLOAT)_width / 2.0f, (FLOAT)_height / 2.0f);
+
 		_renderTarget->BeginDraw();
 		_renderTarget->Clear(D2D1::ColorF(0, 0, 0, 1));
-		// DrawBitmap scales to the render target's configured _width/_height,
-		// which may differ from the ring frame's size (e.g. the consumer
-		// negotiated a different resolution than the host is currently
-		// producing).
-		_renderTarget->DrawBitmap(bitmap.get(), D2D1::RectF(0, 0, (FLOAT)_width, (FLOAT)_height));
+		_renderTarget->SetTransform(transform);
+		_renderTarget->DrawBitmap(bitmap.get(), D2D1::RectF(-(FLOAT)frameW / 2.0f, -(FLOAT)frameH / 2.0f, (FLOAT)frameW / 2.0f, (FLOAT)frameH / 2.0f));
+		_renderTarget->SetTransform(D2D1::Matrix3x2F::Identity());
 		return _renderTarget->EndDraw();
 	}
 
@@ -198,7 +248,7 @@ HRESULT FrameGenerator::Generate(IMFSample* sample, REFGUID format, IMFSample** 
 
 	// build a sample using either D3D/DXGI (GPU) or WIC (CPU)
 	wil::com_ptr_nothrow<IMFMediaBuffer> mediaBuffer;
-	if (HasD3DManager())
+	if (IsGpuMode())
 	{
 		// remove all existing buffers
 		RETURN_IF_FAILED(sample->RemoveAllBuffers());
