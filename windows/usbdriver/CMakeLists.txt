@@ -15,6 +15,8 @@ target_link_libraries(phonecam-usbdriver PRIVATE
     setupapi
     newdev
     ntdll
+    crypt32
+    cfgmgr32
 )
 target_compile_features(phonecam-usbdriver PRIVATE cxx_std_20)
 
