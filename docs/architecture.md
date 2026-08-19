@@ -1716,3 +1716,197 @@ them yet. Also still open: wiring `phonecam-usbdriver.exe` into
 `phonecam-host.exe`, and testing this whole flow on a phone this dev
 machine has never touched (the Note 7, once the composite-guard and
 pre-staging are exercised against it too).
+
+## Phase 3: vcam real 720p/1080p + rotation/mirror, built and verified --
+## with one confirmed Windows platform bug scoped and documented
+
+Two structural pieces landed together, since the second depends on the first:
+
+**Resource-lifetime split (`FrameGenerator`).** Previously `SetD3DManager`
+did double duty -- opening the D3D device handle *and* allocating every
+GPU/D2D resource at a hardcoded 1920x1080, with `HasD3DManager()`
+conflating "GPU mode" with "resources are sized correctly". Split into
+`SetD3DManager(IUnknown*)` (device handle only) and `EnsureRenderTarget(w,
+h)` (idempotent -- no-ops if already sized correctly, else tears down and
+rebuilds everything including a fresh `CLSID_VideoProcessorMFT`, never
+re-typed on a live MFT). `MediaStream::Start(IMFMediaType*)` now actually
+reads the negotiated `MF_MT_FRAME_SIZE` and calls `EnsureRenderTarget`
+with it, instead of ignoring it and always using 1920x1080. Also fixed in
+passing: `SetStreamState`'s `if (_state = value)` -- assignment, not
+comparison, silently skipping the Start()/Stop() calls on every
+PAUSED/RUNNING transition.
+
+**8 media types, real app-negotiated resolution.** `MediaStream::
+Initialize` now declares RGB32 + NV12 at four sizes (1920x1080, 1280x720,
+1080x1920, 720x1280) instead of two hardcoded-1080p types -- confirmed via
+`ffmpeg -f dshow -list_options` showing all four sizes across `bgr0`/
+`yuyv422`/`nv12`. This is genuinely how a UVC webcam exposes resolution:
+**the consuming app picks the size**, there's no PC-side "push
+resolution" mechanism (`MFVirtualCamera::Stop()`/`Start()` would make the
+device disappear from a running consumer). Also fixed a real latent bug
+found while rewriting this: NV12's `MF_MT_DEFAULT_STRIDE` was declared as
+`width * 1.5` (the whole-frame byte multiplier) instead of the Y-plane
+stride (`width`) -- evidence this type had never been exercised by a real
+consumer before now.
+
+**Rotation/mirror: `SharedFrameRing` header, `_v1` -> `_v2`.** A packed
+`std::atomic<uint32_t> transform` field (2 bits rotation quarter-turns +
+1 bit mirror) plus `magic`/`version` fields were added to `RingHeader`.
+This is a *standing* setting, not per-frame -- it belongs in the ring
+because the vcam DLL runs inside the Frame Server's Session-0
+service-account process, invisible to `HKCU`, and because it must survive
+across periods with no frames being written (phone disconnected). The
+mapping/event names were bumped `PhoneCam_FrameRing_v1` ->
+`..._v2` in the same change, on purpose: a name bump makes an old/new
+binary mismatch structurally impossible to alias onto the same section,
+rather than relying on both sides remembering to check a version field.
+`WriteFrame`'s bound also relaxed from separate `width > kMaxWidth ||
+height > kMaxHeight` checks to a single byte-count bound -- not required
+today (rotation stays PC-side, portrait frames never enter the ring) but
+removes a latent 1080x1920-shaped landmine for any future phone-side
+work. `FrameGenerator::DrawLatestRingFrameOrWaitingMessage` applies the
+transform as a D2D `SetTransform` composed as rotate -> mirror -> scale
+-> translate (mirror always composed *after* rotation, so "mirror" keeps
+meaning "flip what the viewer sees" regardless of the chosen rotation),
+scaling the rotated source to exactly fill the negotiated canvas
+(`scale = 1.0` exactly for the headline case: a 1920x1080 sensor frame
+rotated 90 into a 1080x1920 canvas). `LiveVideoBridge` gained thin
+`SetTransform`/`GetNegotiatedSize` forwarders (the latter fed by
+`FrameGenerator` publishing `_width`/`_height` into the ring's header on
+every draw) so Phase 4's tray can reach both without touching the ring
+directly. Rotation itself has not yet been tested against a live rotated
+frame (needs the phone attached, next session) -- the matrix math was
+independently checked by the advisor and the identity case (0, no
+mirror) is provably unchanged from the pre-Phase-3 behavior, but this is
+still open.
+
+### A real, confirmed Windows platform bug: portrait sizes corrupt through DirectShow, not through native Media Foundation
+
+Pulling the new portrait sizes (1080x1920, 720x1280) through `ffmpeg -f
+dshow` (any pixel format -- `nv12`, `bgr0`, `yuyv422` all equally
+affected) produced a reproducible diagonal shear/green-noise corruption
+across the *entire* frame, including flat background regions with no
+rendered content. All four landscape-equivalent widths that had ever been
+exercised before (1920, 1280) were clean; only the two new portrait
+widths (1080, 720) broke. Isolated with three targeted tests rather than
+guessed at:
+
+1. **Added a throwaway 1024x1920 size** (1024 x 4 bytes/px = 4096, a
+   multiple of 256; still portrait). Clean. This separates the two
+   hypotheses that were otherwise perfectly confounded on 4 data points
+   (1080/720 fail, 1920/1280 don't) -- "portrait orientation" and "row
+   byte-width not 256-byte-aligned" -- and confirms alignment, not
+   orientation, correlates with the bug.
+2. **Forced `IsGpuMode()` to `false`**, redeployed, re-pulled 1080x1920.
+   Identical corruption. This rules out our own GPU-vs-CPU rendering
+   choice as the cause: the CPU/WIC path builds its NV12 output using the
+   *actual* destination sample buffer's pitch (from `Lock2DSize`), which
+   is provably self-consistent regardless of width -- if even that path
+   shows the bug, the corruption isn't in anything `FrameGenerator`
+   produces.
+3. **Wrote a throwaway native Media Foundation probe**
+   (`IMFSourceReader`, not DirectShow) to pull the same 1080x1920 and
+   720x1280 NV12 samples directly. Both perfectly clean, buffer size
+   exactly matching the tightly-packed expectation
+   (`width*height*1.5`, no padding).
+
+Conclusion: the corruption is 100% confined to the Windows Frame
+Server's DirectShow bridge (`VCAMDS`, visible in its own log lines when a
+dshow app opens the camera) -- the closed-source compatibility shim that
+lets legacy DirectShow apps see an MF-based virtual camera at all, part
+of the OS (`MFCreateVirtualCamera`'s own plumbing, not anything in this
+repo's vendored/third-party code), not something this project can patch.
+Native MF consumption (what Chrome, the Windows Camera app, and modern
+capture backends use) is unaffected and was independently verified clean
+for both portrait sizes with the real (GPU) render path restored.
+
+**Practical impact, stated plainly:** portrait resolutions work correctly
+in native-MF apps. They are expected to render corrupted in DirectShow-
+based apps -- this specifically includes Zoom's classic Windows desktop
+client and older/classic OBS capture, both DirectShow-based, both named
+targets of this project. This was not tested against real Zoom/OBS
+directly (no license/build available in this session) -- confirmed via
+`ffmpeg -f dshow`, which uses the same DirectShow capture APIs those
+apps do, so the same VCAMDS bridge is exercised. **No workaround was
+attempted**: there is no alternate portrait size that is both
+256-byte-aligned *and* a real 9:16 resolution apps would recognize, and
+patching or bypassing `VCAMDS` is outside this project's reach. Landscape
+sizes (1920x1080, 1280x720) are unaffected in every consumer tested,
+including DirectShow.
+
+## Phase 4: tray controls -- all 7, verified live over AOA (rotation/mirror), with a real
+## AOA reconnect bug found and worked around along the way
+
+Built in one pass: lens switch, zoom, exposure (EV), torch, focus mode, rotation, and mirror,
+all as real tray menu items -- not stubs. Three pieces of plumbing had to land first:
+
+- **`TrayIcon` gained real submenus** (`MenuItem::submenu`), replacing the flat list Phase 2
+  left it with. `AppendItems()` recurses, building a child `HMENU` via `MF_POPUP` for any item
+  with a non-empty `submenu` and otherwise falling through to the existing flat-item logic --
+  dynamic-ID allocation and the `dynamicCallbacks` vector are unchanged, since Windows destroys a
+  submenu's `HMENU` together with its parent, so nothing new needs explicit cleanup.
+- **`ControlChannel` gained a capability/settings cache** (`GetLastCapabilities()`/
+  `HasCapabilities()`/`GetLastSettings()`/`HasSettings()`), populated inside the existing
+  `RunReceiveLoop` before the message reaches the caller's handler -- this is the single decode
+  chokepoint every consumer already reads from, so the tray reads from here directly rather than
+  duplicating `ConsoleControlUi`'s own private cache (that duplication stays, intentionally, for
+  the console UI itself -- not worth touching working code for this).
+- **`ControlTransport::Send` gained a dedicated send mutex**, separate from the existing
+  connect/disconnect mutex so a send failing fast during teardown doesn't block on an unrelated
+  lock. Was genuinely unsynchronized before this -- fine while only `ConsoleControlUi`'s console
+  thread ever called it, a real bug once the tray's message-pump thread became a second
+  concurrent sender (lens/zoom/ev/torch/focus clicks).
+
+**What's live vs. not, honestly:** rotation, mirror, and the resolution display are fully
+PC-side (no phone involvement at all) and were verified live end-to-end, including the default
+(below). Lens/zoom/exposure/torch/focus are fully wired -- `ControlChannel::Send*` calls fire
+correctly -- but only *reach* the phone over the adb control channel, which is still adb-forward
+-only (see `AoaVideoTransport`'s class doc). Over AOA their submenus simply don't appear at all
+(no capabilities have ever arrived to build them from), matching the existing "never show a
+control the phone doesn't support" rule rather than showing dead menu items. **Decided not to
+build a control channel over AOA** to close this gap -- discussed directly: these five controls
+are realistically set once per session (camera/zoom/torch/focus at setup, rarely mid-call), so
+setting them by hand at the phone once is an acceptable tradeoff against the real cross-stack
+work (Android accessory-pipe write path + a host-side transport abstraction change) that closing
+it properly would need. This is a deliberate scope boundary, not a forgotten TODO.
+
+**Default rotation is 90 clockwise, not 0** -- the reference mounting for this whole project is
+the phone held vertically, and a landscape sensor frame needs exactly this rotation to look
+normal; 0 would come out sideways for the common case. Applied automatically at startup
+(`bridge.SetTransform` right after `vcam.Start` succeeds), not just offered as a tray option.
+
+**Verified live:** pulled a frame from the running vcam with the default rotation in effect --
+confirmed the pillarboxed-into-a-landscape-canvas geometry is exactly right (a vertical strip
+centered with black bars either side, matching the fallback case documented in Phase 3 above)
+without ever touching the tray. Rotation/mirror submenus themselves show the right checkmarks
+against `currentRotation`/`currentMirror` (tray-thread-only state, see `main.cpp`'s comment on
+why that's safe without a mutex -- `itemsProvider` and every `onClick` run on the same thread).
+
+### A real AOA reconnect bug, found while testing this live, worked around not yet fixed
+
+While testing over AOA tonight (phone: Redmi Note 8, MIUI, debugging off), the connection got
+stuck **stuck-but-silent** more than once: `AoaVideoTransport::Connect()` succeeds (libusb
+claims the accessory interface fine), logged as `AoaVideoTransport: connected`, but no bytes
+ever arrive -- `RunReceiveLoop`'s `libusb_bulk_transfer` just times out forever
+(`LIBUSB_ERROR_TIMEOUT`, silently `continue`d, by design -- see its own comment), never hitting
+the `LIBUSB_ERROR_NO_DEVICE` branch that would let the reconnect loop retry. Confirmed this
+happens even when the phone is physically replugged while the host process keeps running: a real
+`Get-PnpDevice` check showed the phone back in normal mode (not accessory) while the *host's*
+connection state hadn't budged -- the stale libusb handle from the previous accessory session
+just never learns the device is gone.
+
+**What actually unwedges it**, confirmed by repetition, not guessed: restarting
+`phonecam-host.exe` itself while the phone is *not* currently in accessory mode. A graceful
+`taskkill` (not `/F`) alone did **not** fix it once (the phone was still in accessory mode from
+the stale session at that moment, so the new process just re-claimed the same lingering
+connection without ever re-running `RunHandshake()`) -- what worked was the sequence: phone-side
+Cancel -> physical unplug/replug (forces the phone genuinely back to normal-mode enumeration,
+confirmed via `Get-PnpDevice`) -> *then* restart the host process, so its fresh `Connect()` call
+actually goes through `RunHandshake()` again instead of finding an already-accessory-mode device
+and skipping straight to `OpenAccessoryInterface()`.
+
+**Not fixed, flagged for later:** `RunReceiveLoop` should detect a dead connection itself (e.g. a
+consecutive-timeout counter that gives up and returns after some threshold, rather than looping
+`LIBUSB_ERROR_TIMEOUT` forever) so the existing reconnect loop can recover without a manual
+process restart. Real, reproducible, but out of scope for tonight -- noted here rather than
+silently worked around with no trace.
