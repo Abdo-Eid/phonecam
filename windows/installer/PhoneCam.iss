@@ -26,7 +26,7 @@
 ; cycle on this machine (not just re-blessing already-installed state). See docs/build.md.
 
 #define MyAppName "PhoneCam"
-#define MyAppVersion "0.5.0"
+#define MyAppVersion "0.8.0"
 #define MyAppPublisher "PhoneCam (open source)"
 #define MyAppURL "https://github.com/abdoeid/phonecam"
 
@@ -58,6 +58,13 @@ ArchitecturesInstallIn64BitMode=x64compatible
 [Files]
 Source: "..\build\host\Release\phonecam-host.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\build\svc\Release\phonecam-svc.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Two real bugs found and fixed the day the first release was cut: phonecam-host.exe links
+; libusb-1.0.dll unconditionally (needed for the AOA fallback transport), so without this an
+; installed build fails to launch at all -- not just fails --aoa. And RunUsbDriverHelperElevated
+; (main.cpp) looks for phonecam-usbdriver.exe next to itself, so the tray's "Set up/Remove USB
+; driver" items (AOA-only) silently can't launch it without this either.
+Source: "..\..\third_party\libusb\bin\libusb-1.0.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\build\usbdriver\Release\phonecam-usbdriver.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\third_party\platform-tools\adb.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\third_party\platform-tools\AdbWinApi.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\third_party\platform-tools\AdbWinUsbApi.dll"; DestDir: "{app}"; Flags: ignoreversion
