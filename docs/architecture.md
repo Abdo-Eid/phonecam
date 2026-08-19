@@ -1864,11 +1864,26 @@ correctly -- but only *reach* the phone over the adb control channel, which is s
 -only (see `AoaVideoTransport`'s class doc). Over AOA their submenus simply don't appear at all
 (no capabilities have ever arrived to build them from), matching the existing "never show a
 control the phone doesn't support" rule rather than showing dead menu items. **Decided not to
-build a control channel over AOA** to close this gap -- discussed directly: these five controls
-are realistically set once per session (camera/zoom/torch/focus at setup, rarely mid-call), so
-setting them by hand at the phone once is an acceptable tradeoff against the real cross-stack
-work (Android accessory-pipe write path + a host-side transport abstraction change) that closing
-it properly would need. This is a deliberate scope boundary, not a forgotten TODO.
+build a control channel over AOA** to close this gap -- discussed directly, first on the premise
+that these five controls are realistically set once per session (camera/zoom/torch/focus at
+setup, rarely mid-call) so setting them by hand at the phone once would be an acceptable
+tradeoff against the real cross-stack work (Android accessory-pipe write path + a host-side
+transport abstraction change) that closing it properly would need.
+
+**Correction, found immediately after committing this:** "set them by hand at the phone" isn't
+actually possible today -- `MainScreen.kt` has no UI for any of these five controls at all
+(Start/Cancel/Stop and a status readout, nothing else). So on AOA right now, these five controls
+are unreachable from *both* sides: not the tray (blocked, no capabilities without the adb control
+channel) and not the phone (no UI exists there either). The only way to actually touch any of
+them today is switching to the adb path (debugging on), where the tray controls fully work,
+since the control channel is adb-only regardless of which *video* transport is active.
+
+The smallest real fix identified for this -- not built, explicitly paused -- would be a one-time
+controls screen in the phone app itself (a handful of sliders/toggles/pickers, pure Android UI,
+no protocol or transport work needed, much smaller than an AOA control channel). **User decision:
+stop investing in this path for now.** AOA users get video (+ rotation/mirror/resolution, all
+fully PC-side) with camera-content controls left at their auto defaults for the session; anyone
+who needs live zoom/exposure/torch/focus/lens control today should use the adb path instead.
 
 **Default rotation is 90 clockwise, not 0** -- the reference mounting for this whole project is
 the phone held vertically, and a landscape sensor frame needs exactly this rotation to look
