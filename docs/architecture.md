@@ -987,6 +987,14 @@ sub-interfaces at all) and `adb logcat`:
   assuming this generalizes, but not worth more investigation on this
   one now that a working path exists.
 
+**Alternative considered and rejected: USB tethering (RNDIS/NCM) instead of
+libusb/WinUSB.** Driver-free (Windows binds RNDIS with its own inbox driver)
+and not gated behind Developer Options, but tethering is carrier/SIM-gated on
+many real devices, and an existing project solving nearly this exact
+phone-PC-over-USB problem ([Genymobile/gnirehtet](https://github.com/Genymobile/gnirehtet))
+deliberately routes over adb instead for that reason. Would also mean
+building a second full transport, not a small substitution. Not pursued.
+
 **Product-shipping note, decided but not yet implemented:** end users
 must never be asked to run Zadig themselves. The real fix belongs in the
 Windows installer -- silently installing a `libwdi`-driven driver binding
@@ -1002,6 +1010,98 @@ child interface. Deferred to its own follow-up phase, out of scope for
 finishing the real `AoaTransport` -- it also needs code signing and an
 install-time verification story (does it work on a machine that has
 never seen this phone?) that hasn't been designed yet.
+
+## Status: Phase 7 driver-auto-install investigation, stopped at a real blocker, 2026-08-19
+
+Attempted the "does it work on a machine that's never seen this phone"
+verification called for above, using a second, unrelated device -- a
+Redmi Note 7 (Android 9/10, no root, USB debugging never turned on,
+never connected to this PC before). Before testing, rolled back this
+PC's own earlier Zadig actions (see "Resolved, not just diagnosed" above)
+as best as non-elevated access allowed: `pnputil /delete-driver
+oem129.inf|oem107.inf /uninstall` succeeded at un-assigning both from
+their device instances, but the actual driver-store packages couldn't be
+purged (`Access is denied` without elevation). Also found, while checking
+this: Windows' own driver ranking for the Note 8's accessory-mode PID
+already prefers a pre-existing **Samsung** driver (`ssudbus.inf`) over
+either of ours, leftover from unrelated history on this machine -- this
+PC was never a clean reference machine to begin with, which is exactly
+why testing against a second, never-touched device mattered more than
+trying to scrub this one.
+
+**Confirmed the core hypothesis first:** `aoa_probe --handshake` against
+the clean Note 7 failed exactly as predicted --
+`libusb_open()` succeeds (opening the raw USB device needs no driver),
+but `winusbx_claim_interface` fails to auto-claim *any* interface
+(`[1] Incorrect function`, tried across all 32 interface numbers), ending
+in `GetProtocol failed: LIBUSB_ERROR_NOT_FOUND`. This is the real,
+reproducible "what a normal user hits" case: no Zadig history at all,
+AOA cannot start.
+
+**Researched alternatives before committing to the libwdi-installer
+fix** (web research + advisor, this session):
+- **WCID/MS OS Descriptors** (the theoretically clean fix -- a device
+  that advertises WinUSB-compatibility via its own descriptors gets
+  Windows' inbox `winusb.sys` auto-bound, zero custom driver needed at
+  all) would have to be implemented in Android's own USB accessory
+  gadget driver (kernel-level, `f_accessory.c`). Not reachable from a
+  non-rooted stock phone -- confirmed no evidence AOSP's accessory
+  gadget implements this, and the exact issue this project already found
+  ([libwdi#332](https://github.com/pbatard/libwdi/issues/332)) still
+  describes Zadig as required. Dead end, not our decision to make.
+- **USB tethering (RNDIS/NCM)** as a fully driver-free alternative
+  transport: real (Windows binds its own inbox RNDIS driver, and
+  tethering isn't gated behind Developer Options), but carrier/SIM-gated
+  on many real devices, and
+  [Genymobile/gnirehtet](https://github.com/Genymobile/gnirehtet) -- an
+  existing project solving nearly this exact phone-PC-over-USB problem --
+  deliberately routes over adb instead of raw tethering for that reason.
+  Rejected: would also mean building a second full transport, not a
+  small substitution.
+
+**Then hit a real, unresolved blocker trying the libwdi/Zadig fix
+itself on the clean Note 7.** Unlike the Note 8 (which exposes several
+separate USB interfaces -- MTP, ADB, etc. -- when debugging is on), this
+Note 7 in File Transfer mode with debugging **off** enumerates as a
+single, non-composite MTP interface: `pnputil` shows only one device
+node (`USB\VID_2717&PID_FF40`, driver `wpdmtp.inf`), no child
+interfaces to attach a second driver to alongside the existing one.
+
+Zadig detected this device already implements **WCID** itself, declaring
+`MS_COMP_MTP` compatibility (this is *how* Windows already auto-binds
+its MTP driver with no driver disk needed -- consistent with the WCID
+research above, just for MTP, not for the AOA accessory interface).
+Zadig's "Install WCID Driver" button (installing against that declared
+compatible ID rather than the hardware ID) reported success, but had no
+real effect: after a replug, `pnputil /enum-devices ... /drivers` showed
+only one matching driver at all -- `wpdmtp.inf` via `USB\MS_COMP_MTP`,
+rank `00FF2000` -- the libusbK package never became a candidate. This
+makes sense in hindsight: an install keyed to `MS_COMP_MTP` would claim
+*every* MTP device on the machine, not just this phone, which is exactly
+the kind of over-broad rule this project already reasoned was unsafe
+elsewhere (see the parallel finding about `oem107.inf`'s ADB-class-triple
+match, earlier in this document) -- Windows plausibly declined to
+register something that broad, or registered it somewhere that doesn't
+match this specific device instance.
+
+The advisor's suggested next check -- retry with Zadig's plain
+**"Install Driver"** (hardware-ID-targeted, the same shape as `oem129.inf`
+on the Note 8, which demonstrably did register) instead of "Install WCID
+Driver" -- was not completed; the user stopped the investigation here.
+
+**Where this leaves the installer design, unresolved:** if only a
+hardware-ID-targeted install can ever work against a device like this
+(the untested-but-likely case), the "no debugging" AOA transport's driver
+requirement is **irreducibly per-phone-model** -- there is no safe generic
+rule that covers unknown Android OEMs, only a maintained VID/PID list
+(matching how Google's own official USB driver package is structured) or
+an on-attach, per-device elevated install triggered the first time a new
+phone connects. Either shape is real, additional design work, not a
+quick finish. **Not pursued further this session -- parked as a known
+open problem**, not a solved one. The existing adb-based transport
+(Phase 3-6, proven, no driver needed) remains the default and only
+fully-working path; `--aoa` remains a working-but-Zadig-dependent
+alternative, exactly as before this investigation.
 
 **`adb` conflicts with `libusb` over USB, but not over Wi-Fi.** `adb`
 holding the phone's ADB interface open (as soon as its server sees the
