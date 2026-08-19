@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr" data-lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhoneCam — an open-source Android webcam for Windows</title>
+<meta name="description" content="Use your Android phone as a webcam on Windows. Open-source, GPL-3.0. How it works, how it compares, and what needs doing.">
+<meta property="og:title" content="PhoneCam — an open-source Android webcam for Windows">
+<meta property="og:description" content="Use your Android phone as a webcam on Windows. Open-source, GPL-3.0. How it works, how it compares, and what needs doing.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://abdo-eid.github.io/phonecam/assets/logo_full.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="assets/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Sans+Arabic:wght@400;600;700&family=IBM+Plex+Sans+Condensed:wght@600;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================================
+   PhoneCam project site.
+
+   IDENTITY -- an equipment datasheet, not a product landing page. PhoneCam's
+   whole job is turning a phone into a device, so the page is written as that
+   device's spec sheet: instrument-white cards on cool paper, precise hairlines,
+   monospace for anything that is a measurement.
+
+   The colour SEMANTICS are inherited from the Android app's own theme
+   (android/.../theme/Color.kt), so the site and the app are visibly one product:
+   a tally lamp where RED MEANS LIVE (inverted from the usual red=error), a
+   standby amber for partial states, and the CRT "no signal" blue for what is
+   disconnected or unbuilt. Each has a darker -ink variant for text, because the
+   app's values are lamp colours and do not carry enough contrast on white.
+
+   The paper is deliberately cool and faintly green -- the inverse of the app's
+   teal-cast near-black -- rather than the warm cream this kind of page usually
+   defaults to.
+
+   Layout uses CSS logical properties throughout (margin-inline, padding-inline,
+   border-inline-start, text-align: start) so the Arabic view mirrors from a
+   single stylesheet. Two deliberate exceptions, both marked below:
+     - .chain stays LTR in both languages: it depicts a physical signal path
+       (phone -> cable -> PC), and mirroring it would imply video flows backwards.
+     - .ports is positioned with explicit left/right rather than logical inset,
+       because its own `direction: ltr` would otherwise resolve inset-inline-start
+       against itself and pin it to the left in Arabic too.
+   ============================================================================ */
+
+:root {
+  --paper:      #F1F5F3;  /* cool, faintly green -- the inverse of the app's Ink */
+  --card:       #FFFFFF;
+  --ink:        #101917;  /* mirrors the app's Ink #0B0F0E */
+  --ink-2:      #40504B;
+  --dim:        #64756F;
+  --line:       #D3DED9;
+  --line-strong:#B4C4BE;
+
+  /* lamp colours: straight from Color.kt */
+  --tally:      #FF3B4E;
+  --standby:    #F5A623;
+  --nosignal:   #3D8BFF;
+  /* text-safe variants of the same three */
+  --tally-ink:    #B3122A;
+  --standby-ink:  #8A5A00;
+  --nosignal-ink: #1A5FBF;
+
+  --font-display: "IBM Plex Sans Condensed", "IBM Plex Sans", system-ui, sans-serif;
+  --font-body:    "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-mono:    "IBM Plex Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  --measure: 68ch;
+  --gutter: clamp(1.25rem, 4vw, 3.5rem);
+  --rule: 1px solid var(--line);
+  --radius: 4px;
+}
+
+html[data-lang="ar"] {
+  --font-display: "IBM Plex Sans Arabic", system-ui, sans-serif;
+  --font-body:    "IBM Plex Sans Arabic", system-ui, sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: clamp(1rem, 0.97rem + 0.15vw, 1.0625rem);
+  line-height: 1.65;
+  overflow-x: hidden;
+}
+
+/* ---- language switching -------------------------------------------------- */
+html[data-lang="en"] .t-ar,
+html[data-lang="ar"] .t-en { display: none; }
+
+/* ---- shared primitives --------------------------------------------------- */
+.wrap { width: 100%; max-width: 1180px; margin-inline: auto; padding-inline: var(--gutter); }
+
+.eyebrow {
+  font-family: var(--font-mono); font-size: 0.75rem; font-weight: 500;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--tally-ink); margin: 0 0 0.85rem;
+}
+html[data-lang="ar"] .eyebrow {
+  letter-spacing: 0; text-transform: none; font-family: var(--font-body);
+  font-weight: 600; font-size: 0.875rem;
+}
+
+h1, h2, h3 { font-family: var(--font-display); line-height: 1.12; margin: 0; font-weight: 700; }
+h1 { font-size: clamp(2.1rem, 1.2rem + 4.2vw, 4rem); letter-spacing: -0.015em; }
+h2 { font-size: clamp(1.5rem, 1.1rem + 1.8vw, 2.35rem); letter-spacing: -0.01em; }
+h3 { font-size: 1.0625rem; letter-spacing: 0.005em; }
+html[data-lang="ar"] h1 { letter-spacing: 0; line-height: 1.35; }
+html[data-lang="ar"] h2 { letter-spacing: 0; line-height: 1.45; }
+
+p { margin: 0 0 1rem; max-width: var(--measure); }
+a { color: inherit; }
+
+code, .mono { font-family: var(--font-mono); font-size: 0.875em; }
+code {
+  background: #EDF3F0; border: 1px solid var(--line); border-radius: 3px;
+  padding: 0.08em 0.36em; color: #24352F;
+  direction: ltr; unicode-bidi: isolate; display: inline-block;
+}
+
+.lede { font-size: clamp(1.05rem, 1rem + 0.35vw, 1.25rem); color: var(--ink-2); }
+
+/* Latin technical terms containing symbols (C++, C++/COM) inside Arabic prose.
+   Without isolation the bidi algorithm reorders the trailing "++" to the wrong
+   side of the name. */
+.ltr { direction: ltr; unicode-bidi: isolate; }
+
+section { padding-block: clamp(3.5rem, 8vw, 6.5rem); }
+section + section { border-top: var(--rule); }
+.section-head { margin-bottom: clamp(2rem, 4vw, 3rem); }
+
+/* ---- top bar ------------------------------------------------------------- */
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  background: color-mix(in srgb, var(--paper) 90%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: var(--rule);
+}
+.topbar-inner { display: flex; align-items: center; gap: 1rem; min-height: 62px; }
+.brand { display: flex; align-items: center; gap: 0.6rem; text-decoration: none; }
+.brand img { height: 26px; width: auto; display: block; }
+.brand-name { font-family: var(--font-display); font-weight: 700; font-size: 1.05rem; }
+.topbar-spacer { flex: 1; }
+
+.navlinks { display: flex; gap: 1.15rem; align-items: center; }
+.navlinks a {
+  font-family: var(--font-mono); font-size: 0.78rem; font-weight: 500;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--dim); text-decoration: none;
+  padding-block: 0.35rem; border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+html[data-lang="ar"] .navlinks a { font-family: var(--font-body); letter-spacing: 0; text-transform: none; font-size: 0.9rem; }
+.navlinks a:hover, .navlinks a:focus-visible { color: var(--ink); border-bottom-color: var(--tally); }
+@media (max-width: 780px) { .navlinks { display: none; } }
+
+.langtoggle {
+  font-family: var(--font-mono); font-size: 0.75rem; font-weight: 500;
+  letter-spacing: 0.08em;
+  background: var(--card); color: var(--ink);
+  border: 1px solid var(--line-strong); border-radius: 3px;
+  padding: 0.42rem 0.75rem; cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.langtoggle:hover, .langtoggle:focus-visible { border-color: var(--tally); }
+
+/* ---- hero ---------------------------------------------------------------- */
+.hero { padding-block: clamp(3rem, 7vw, 5rem) clamp(3rem, 7vw, 5.5rem); }
+.hero h1 { margin-bottom: 1.2rem; max-width: 18ch; }
+.hero .lede { max-width: 62ch; margin-bottom: 2rem; }
+
+.cta-row { display: flex; flex-wrap: wrap; gap: 0.7rem; }
+.btn {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  font-family: var(--font-mono); font-size: 0.8125rem; font-weight: 500;
+  letter-spacing: 0.05em; text-decoration: none;
+  padding: 0.68rem 1.15rem; border-radius: 3px;
+  border: 1px solid var(--line-strong);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+html[data-lang="ar"] .btn { font-family: var(--font-body); letter-spacing: 0; font-size: 0.9375rem; }
+.btn-primary { background: var(--tally-ink); border-color: var(--tally-ink); color: #fff; font-weight: 600; }
+.btn-primary:hover, .btn-primary:focus-visible { background: #8E0E21; border-color: #8E0E21; }
+.btn-ghost { background: var(--card); color: var(--ink); }
+.btn-ghost:hover, .btn-ghost:focus-visible { border-color: var(--ink); }
+
+.hero-note {
+  margin-top: 1.9rem; padding-top: 1.4rem; border-top: var(--rule);
+  font-size: 0.9375rem; color: var(--ink-2); max-width: 68ch;
+}
+
+/* ---- signal chain -------------------------------------------------------- */
+/* Always LTR: a technical signal path, not prose. See stylesheet header. */
+.chain { direction: ltr; }
+/* Fixed 3x2 rather than auto-fit: six across left each column ~177px, which is
+   narrower than unbreakable API names like MFCreateVirtualCamera, so they
+   overflowed and collided with neighbouring text (visible first in Arabic).
+   Reading order is still sequential and the stages are numbered, so the chain
+   reads the same wrapped as it did in one row. */
+.chain-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px; background: var(--line);
+  border: var(--rule); border-radius: var(--radius); overflow: hidden;
+}
+@media (max-width: 880px) { .chain-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 540px) { .chain-grid { grid-template-columns: minmax(0, 1fr); } }
+.stage {
+  background: var(--card); padding: 1.35rem 1.25rem 1.5rem;
+  min-block-size: 100%; min-inline-size: 0;
+}
+/* last-resort break for any token still wider than its column */
+.stage h3, .stage p { overflow-wrap: anywhere; }
+.stage-n {
+  font-family: var(--font-mono); font-size: 0.6875rem; font-weight: 600;
+  letter-spacing: 0.14em; color: var(--tally-ink); display: block; margin-bottom: 0.55rem;
+}
+.stage h3 {
+  font-family: var(--font-mono); font-weight: 600; font-size: 0.8125rem;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink); margin-bottom: 0.6rem;
+}
+.stage p { font-size: 0.875rem; line-height: 1.55; color: var(--ink-2); margin: 0; max-width: none; }
+html[data-lang="ar"] .stage h3 { font-family: var(--font-body); letter-spacing: 0; text-transform: none; font-size: 0.9375rem; }
+html[data-lang="ar"] .stage p, html[data-lang="ar"] .stage h3 { direction: rtl; text-align: right; }
+html[data-lang="ar"] .stage-n { direction: ltr; text-align: right; }
+
+/* ---- transports ---------------------------------------------------------- */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); gap: 1.1rem; }
+.card {
+  border: var(--rule); border-radius: var(--radius); background: var(--card);
+  padding: 1.5rem 1.4rem 1.6rem;
+  border-inline-start: 3px solid var(--line-strong);
+}
+.card[data-rank="primary"]  { border-inline-start-color: var(--tally); }
+.card[data-rank="proven"]   { border-inline-start-color: var(--ink-2); }
+.card[data-rank="fallback"] { border-inline-start-color: var(--standby); }
+
+.card-tag {
+  font-family: var(--font-mono); font-size: 0.6875rem; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 0.7rem; display: block;
+}
+html[data-lang="ar"] .card-tag { font-family: var(--font-body); letter-spacing: 0; text-transform: none; font-size: 0.8125rem; }
+.card[data-rank="primary"]  .card-tag { color: var(--tally-ink); }
+.card[data-rank="proven"]   .card-tag { color: var(--dim); }
+.card[data-rank="fallback"] .card-tag { color: var(--standby-ink); }
+
+.card h3 { margin-bottom: 0.7rem; font-size: 1.2rem; }
+.card p { font-size: 0.9375rem; color: var(--ink-2); margin-bottom: 0.9rem; }
+
+.spec { list-style: none; margin: 0; padding: 0; border-top: var(--rule); }
+.spec li {
+  display: flex; gap: 0.8rem; justify-content: space-between;
+  padding-block: 0.5rem; border-bottom: var(--rule); font-size: 0.8125rem;
+}
+.spec li:last-child { border-bottom: none; }
+.spec .k { color: var(--dim); font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.04em; }
+html[data-lang="ar"] .spec .k { font-family: var(--font-body); letter-spacing: 0; font-size: 0.8125rem; }
+.spec .v { text-align: end; font-weight: 600; }
+.v-good { color: var(--ink); }
+.v-warn { color: var(--standby-ink); }
+.v-bad  { color: var(--nosignal-ink); }
+
+/* ---- table --------------------------------------------------------------- */
+.table-scroll { overflow-x: auto; border: var(--rule); border-radius: var(--radius); background: var(--card); }
+table { border-collapse: collapse; inline-size: 100%; min-inline-size: 580px; }
+caption {
+  caption-side: bottom; text-align: start; color: var(--dim);
+  font-size: 0.8125rem; padding: 0.9rem 0 0; max-width: var(--measure);
+}
+th, td { text-align: start; padding: 0.85rem 1rem; border-bottom: var(--rule); font-size: 0.9rem; vertical-align: top; }
+thead th {
+  background: #EDF3F0;
+  font-family: var(--font-mono); font-weight: 600; font-size: 0.75rem;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink);
+}
+html[data-lang="ar"] thead th { font-family: var(--font-body); letter-spacing: 0; text-transform: none; font-size: 0.875rem; }
+tbody th { font-weight: 400; color: var(--ink-2); }
+tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
+td.own { color: var(--ink); font-weight: 600; }
+.miss { color: var(--nosignal-ink); font-weight: 600; }
+
+/* ---- repo map ------------------------------------------------------------ */
+.map { display: grid; gap: 1px; background: var(--line); border: var(--rule); border-radius: var(--radius); overflow: hidden; }
+.map-row {
+  display: grid; grid-template-columns: minmax(180px, 260px) 1fr; gap: 1.2rem;
+  background: var(--card); padding: 1rem 1.2rem; align-items: baseline;
+}
+@media (max-width: 640px) { .map-row { grid-template-columns: 1fr; gap: 0.35rem; } }
+.map-path {
+  font-family: var(--font-mono); font-size: 0.8125rem; font-weight: 500;
+  color: var(--tally-ink); direction: ltr; unicode-bidi: isolate; text-align: start;
+}
+.map-what { font-size: 0.9rem; color: var(--ink-2); }
+
+/* ---- open problems ------------------------------------------------------- */
+.issues { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); }
+.issue { border: var(--rule); border-radius: var(--radius); background: var(--card); padding: 1.3rem 1.35rem 1.4rem; }
+.issue h3 { font-size: 1rem; margin-bottom: 0.55rem; }
+.issue p { font-size: 0.875rem; color: var(--ink-2); margin: 0 0 0.9rem; max-width: none; }
+.tags { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.tag {
+  font-family: var(--font-mono); font-size: 0.6875rem; font-weight: 500;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  border: var(--rule); border-radius: 2px; padding: 0.2rem 0.5rem; color: var(--dim);
+  background: #F7FAF9;
+  /* Tags hold bare technical tokens. Without this, "C++" renders as "++C" in
+     the Arabic view -- the trailing symbols take the paragraph direction. A
+     single all-Arabic tag still reads correctly inside an LTR box, since the
+     Arabic run is ordered internally. */
+  direction: ltr; unicode-bidi: isolate;
+}
+html[data-lang="ar"] .tag { font-family: var(--font-body); letter-spacing: 0; text-transform: none; font-size: 0.75rem; }
+.tag[data-t="hard"]  { color: var(--tally-ink);    border-color: color-mix(in srgb, var(--tally) 45%, var(--line)); }
+.tag[data-t="med"]   { color: var(--standby-ink);  border-color: color-mix(in srgb, var(--standby) 55%, var(--line)); }
+.tag[data-t="start"] { color: var(--nosignal-ink); border-color: color-mix(in srgb, var(--nosignal) 45%, var(--line)); }
+
+/* ---- build --------------------------------------------------------------- */
+pre {
+  background: var(--card); border: var(--rule); border-radius: var(--radius);
+  padding: 1.1rem 1.2rem; overflow-x: auto;
+  font-family: var(--font-mono); font-size: 0.8125rem; line-height: 1.7;
+  color: #24352F; direction: ltr; text-align: left; margin: 0 0 1rem;
+}
+pre code { background: none; border: none; padding: 0; display: inline; color: inherit; }
+.two-col { display: grid; gap: clamp(1.5rem, 4vw, 3rem); grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); align-items: start; }
+
+/* ---- footer -------------------------------------------------------------- */
+footer { border-top: var(--rule); padding-block: 2.75rem 3.5rem; color: var(--dim); font-size: 0.875rem; }
+.footer-inner { display: flex; flex-wrap: wrap; gap: 1rem 2rem; align-items: center; }
+footer a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--line-strong); }
+footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
+
+/* ---- a11y ---------------------------------------------------------------- */
+:focus-visible { outline: 2px solid var(--tally-ink); outline-offset: 3px; border-radius: 2px; }
+.skip {
+  position: absolute; inset-inline-start: -9999px; top: 0; z-index: 100;
+  background: var(--tally-ink); color: #fff; padding: 0.7rem 1.1rem;
+  font-family: var(--font-mono); font-size: 0.8125rem; text-decoration: none;
+}
+.skip:focus { inset-inline-start: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">
+  <span class="t-en">Skip to content</span><span class="t-ar">تخطَّ إلى المحتوى</span>
+</a>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="./">
+      <img src="assets/logo.png" alt="">
+      <span class="brand-name">PhoneCam</span>
+    </a>
+    <div class="topbar-spacer"></div>
+    <nav class="navlinks" aria-label="Sections">
+      <a href="#how"><span class="t-en">How it works</span><span class="t-ar">كيف يعمل</span></a>
+      <a href="#transports"><span class="t-en">Transports</span><span class="t-ar">قنوات النقل</span></a>
+      <a href="#compare"><span class="t-en">Compare</span><span class="t-ar">مقارنة</span></a>
+      <a href="#code"><span class="t-en">Codebase</span><span class="t-ar">الشيفرة</span></a>
+      <a href="#work"><span class="t-en">Open work</span><span class="t-ar">عمل متاح</span></a>
+    </nav>
+    <button class="langtoggle" id="langtoggle" type="button" aria-live="polite">
+      <span class="t-en">العربية</span><span class="t-ar">English</span>
+    </button>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- ===================== HERO ===================== -->
+<section class="hero">
+  <div class="wrap">
+          <h1>
+            <span class="t-en">Use your Android phone as a webcam on Windows.</span>
+            <span class="t-ar">استخدم هاتف أندرويد ككاميرا ويب على ويندوز.</span>
+          </h1>
+
+          <p class="lede">
+            <span class="t-en">PhoneCam is an open-source Android app plus a Windows program. Together they register a real virtual camera, so Zoom, Chrome, OBS and Windows Camera all see the phone as a normal webcam. It works today, but it is not finished. This page is for people who want to help build it.</span>
+            <span class="t-ar">‏PhoneCam تطبيق أندرويد مفتوح المصدر مع برنامج على ويندوز. معًا يسجّلان كاميرا افتراضية حقيقية، فترى تطبيقات Zoom و Chrome و OBS وكاميرا ويندوز الهاتفَ ككاميرا ويب عادية. يعمل المشروع اليوم لكنه غير مكتمل، وهذه الصفحة لمن يريد المساعدة في تطويره.</span>
+          </p>
+
+          <div class="cta-row">
+            <a class="btn btn-primary" href="https://github.com/Abdo-Eid/phonecam">
+              <span class="t-en">View on GitHub</span><span class="t-ar">افتح على GitHub</span>
+            </a>
+            <a class="btn btn-ghost" href="https://github.com/Abdo-Eid/phonecam/blob/master/CONTRIBUTING.md">
+              <span class="t-en">Contributing guide</span><span class="t-ar">دليل المساهمة</span>
+            </a>
+            <a class="btn btn-ghost" href="https://github.com/Abdo-Eid/phonecam/blob/master/docs/architecture.md">
+              <span class="t-en">Architecture log</span><span class="t-ar">سجل البنية</span>
+            </a>
+          </div>
+
+      <p class="hero-note">
+        <span class="t-en"><strong>Status:</strong> the whole pipeline works on real hardware and has been tested. There is no installer and no release yet, so for now you build it from source. This page says plainly what is done and what is not.</span>
+        <span class="t-ar"><strong>الحالة:</strong> المسار كامل يعمل على عتاد حقيقي وجرى اختباره. لا يوجد مُثبِّت ولا إصدار جاهز بعد، لذا تبنيه حاليًا من المصدر. تذكر هذه الصفحة بوضوح ما أُنجز وما لم يُنجز.</span>
+      </p>
+  </div>
+</section>
+
+<!-- ===================== HOW IT WORKS ===================== -->
+<section id="how" class="chain">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow"><span class="t-en">Pipeline</span><span class="t-ar">المسار</span></p>
+      <h2><span class="t-en">How it works</span><span class="t-ar">كيف يعمل</span></h2>
+      <p class="lede" style="margin-top:1rem">
+        <span class="t-en">Video passes through six stages in order, from the phone's camera to the virtual camera Windows shows to apps.</span>
+        <span class="t-ar">يمرّ الفيديو عبر ست مراحل بالترتيب، من كاميرا الهاتف إلى الكاميرا الافتراضية التي يعرضها ويندوز للتطبيقات.</span>
+      </p>
+    </div>
+
+    <div class="chain-grid">
+      <article class="stage">
+        <span class="stage-n">01</span>
+        <h3><span class="t-en">Capture</span><span class="t-ar">التقاط</span></h3>
+        <p><span class="t-en">Camera2 binds straight to MediaCodec's input Surface. Hardware H.264, no pixel copies on the phone.</span><span class="t-ar">تُربط Camera2 مباشرةً بـ input Surface الخاص بـ MediaCodec. ترميز H.264 بالعتاد، دون أي نسخ للبكسلات على الهاتف.</span></p>
+      </article>
+      <article class="stage">
+        <span class="stage-n">02</span>
+        <h3><span class="t-en">Frame</span><span class="t-ar">تأطير</span></h3>
+        <p><span class="t-en">A fixed 20-byte header per video packet; FlatBuffers envelopes carry commands and telemetry on a second channel.</span><span class="t-ar">ترويسة ثابتة من 20 بايت لكل حزمة فيديو، بينما تحمل رسائل FlatBuffers الأوامر والقياسات على قناة ثانية.</span></p>
+      </article>
+      <article class="stage">
+        <span class="stage-n">03</span>
+        <h3><span class="t-en">Transport</span><span class="t-ar">النقل</span></h3>
+        <p><span class="t-en">USB tethering, ADB, or AOA — detected automatically in that order, no setting to choose.</span><span class="t-ar">‏USB tethering أو ADB أو AOA — يُكتشف تلقائيًا بهذا الترتيب، دون أي إعداد يختاره المستخدم.</span></p>
+      </article>
+      <article class="stage">
+        <span class="stage-n">04</span>
+        <h3><span class="t-en">Decode</span><span class="t-ar">فكّ الترميز</span></h3>
+        <p><span class="t-en">Media Foundation decodes H.264 into NV12 frames on the PC, hardware-accelerated where available.</span><span class="t-ar">تفكّ Media Foundation ترميز H.264 إلى إطارات NV12 على الحاسوب، بتسريع عتادي حيثما توفّر.</span></p>
+      </article>
+      <article class="stage">
+        <span class="stage-n">05</span>
+        <h3><span class="t-en">Handoff</span><span class="t-ar">التسليم</span></h3>
+        <p><span class="t-en">A shared-memory ring crosses the process and session boundary into Windows' Frame Server, which runs as a service.</span><span class="t-ar">‏ring buffer في ذاكرة مشتركة يصل بين العمليتين إلى Frame Server في ويندوز، وهو يعمل كخدمة.</span></p>
+      </article>
+      <article class="stage">
+        <span class="stage-n">06</span>
+        <h3><span class="t-en">Camera</span><span class="t-ar">الكاميرا</span></h3>
+        <p><span class="t-en">MFCreateVirtualCamera registers a source Windows serves to Media Foundation and DirectShow apps alike.</span><span class="t-ar">يسجّل MFCreateVirtualCamera مصدرًا يقدّمه ويندوز لتطبيقات Media Foundation و DirectShow على حدّ سواء.</span></p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== TRANSPORTS ===================== -->
+<section id="transports">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow"><span class="t-en">Stage 03</span><span class="t-ar">المرحلة 03</span></p>
+      <h2><span class="t-en">The three transports</span><span class="t-ar">قنوات النقل الثلاث</span></h2>
+      <p class="lede" style="margin-top:1rem">
+        <span class="t-en">Getting video off an Android phone over USB without root is the hardest part of the project. Three transports exist, and the Windows program picks one automatically at startup.</span>
+        <span class="t-ar">إخراج الفيديو من هاتف أندرويد عبر USB دون صلاحيات root هو أصعب جزء في المشروع. توجد ثلاث قنوات نقل، ويختار برنامج ويندوز إحداها تلقائيًا عند بدء التشغيل.</span>
+      </p>
+    </div>
+
+    <div class="cards">
+      <article class="card" data-rank="primary">
+        <span class="card-tag"><span class="t-en">Recommended</span><span class="t-ar">موصى به</span></span>
+        <h3><span class="t-en">USB tethering</span><span class="t-ar">USB tethering</span></h3>
+        <p>
+          <span class="t-en">Turn on USB tethering on the phone. It presents a network interface, Windows loads its own built-in driver, and the connection becomes a normal TCP socket carrying both video and camera controls.</span>
+          <span class="t-ar">فعّل USB tethering في الهاتف. سيقدّم واجهة شبكة، ويحمّل ويندوز تعريفه المدمج، ويصبح الاتصال مجرد TCP socket عادي يحمل الفيديو وأوامر التحكم بالكاميرا معًا.</span>
+        </p>
+        <ul class="spec">
+          <li><span class="k"><span class="t-en">Driver to install</span><span class="t-ar">تعريف يُثبَّت</span></span><span class="v v-good"><span class="t-en">None</span><span class="t-ar">لا شيء</span></span></li>
+          <li><span class="k"><span class="t-en">Developer Options</span><span class="t-ar">خيارات المطوّر</span></span><span class="v v-good"><span class="t-en">Not needed</span><span class="t-ar">غير مطلوبة</span></span></li>
+          <li><span class="k"><span class="t-en">Latency</span><span class="t-ar">زمن الاستجابة</span></span><span class="v v-good">2–5 ms</span></li>
+          <li><span class="k"><span class="t-en">Camera controls</span><span class="t-ar">التحكم بالكاميرا</span></span><span class="v v-good"><span class="t-en">Yes</span><span class="t-ar">نعم</span></span></li>
+          <li><span class="k"><span class="t-en">Displaces</span><span class="t-ar">يُعطّل</span></span><span class="v v-good"><span class="t-en">Nothing</span><span class="t-ar">لا شيء</span></span></li>
+        </ul>
+      </article>
+
+      <article class="card" data-rank="proven">
+        <span class="card-tag"><span class="t-en">Original path</span><span class="t-ar">المسار الأصلي</span></span>
+        <h3><span class="t-en">ADB</span><span class="t-ar">ADB</span></h3>
+        <p>
+          <span class="t-en">Forwards a port over the Android Debug Bridge. Reliable and well tested, but the user has to turn on Developer Options first. That is the step the other two transports avoid.</span>
+          <span class="t-ar">يمرّر منفذًا عبر Android Debug Bridge. موثوق ومُختبر جيدًا، لكن على المستخدم تفعيل خيارات المطوّر أولًا. وهذه هي الخطوة التي تتفاداها القناتان الأخريان.</span>
+        </p>
+        <ul class="spec">
+          <li><span class="k"><span class="t-en">Driver to install</span><span class="t-ar">تعريف يُثبَّت</span></span><span class="v v-good"><span class="t-en">None</span><span class="t-ar">لا شيء</span></span></li>
+          <li><span class="k"><span class="t-en">Developer Options</span><span class="t-ar">خيارات المطوّر</span></span><span class="v v-bad"><span class="t-en">Required</span><span class="t-ar">مطلوبة</span></span></li>
+          <li><span class="k"><span class="t-en">Latency</span><span class="t-ar">زمن الاستجابة</span></span><span class="v v-good">USB</span></li>
+          <li><span class="k"><span class="t-en">Camera controls</span><span class="t-ar">التحكم بالكاميرا</span></span><span class="v v-good"><span class="t-en">Yes</span><span class="t-ar">نعم</span></span></li>
+          <li><span class="k"><span class="t-en">Displaces</span><span class="t-ar">يُعطّل</span></span><span class="v v-good"><span class="t-en">Nothing</span><span class="t-ar">لا شيء</span></span></li>
+        </ul>
+      </article>
+
+      <article class="card" data-rank="fallback">
+        <span class="card-tag"><span class="t-en">Fallback</span><span class="t-ar">احتياطي</span></span>
+        <h3><span class="t-en">AOA</span><span class="t-ar">AOA</span></h3>
+        <p>
+          <span class="t-en">Android Open Accessory mode. Also needs no Developer Options, but Windows has no built-in driver for raw USB access, so one has to be installed. That stops file transfer working until it is removed again.</span>
+          <span class="t-ar">وضع Android Open Accessory. لا يحتاج خيارات المطوّر أيضًا، لكن ويندوز لا يملك تعريفًا مدمجًا يتيح الوصول المباشر إلى USB، فيلزم تثبيت واحد. وهذا يوقف نقل الملفات حتى تتم إزالته.</span>
+        </p>
+        <ul class="spec">
+          <li><span class="k"><span class="t-en">Driver to install</span><span class="t-ar">تعريف يُثبَّت</span></span><span class="v v-warn"><span class="t-en">Yes, one prompt</span><span class="t-ar">نعم، بموافقة واحدة</span></span></li>
+          <li><span class="k"><span class="t-en">Developer Options</span><span class="t-ar">خيارات المطوّر</span></span><span class="v v-good"><span class="t-en">Not needed</span><span class="t-ar">غير مطلوبة</span></span></li>
+          <li><span class="k"><span class="t-en">Latency</span><span class="t-ar">زمن الاستجابة</span></span><span class="v v-good">USB</span></li>
+          <li><span class="k"><span class="t-en">Camera controls</span><span class="t-ar">التحكم بالكاميرا</span></span><span class="v v-bad"><span class="t-en">No — video only</span><span class="t-ar">لا — فيديو فقط</span></span></li>
+          <li><span class="k"><span class="t-en">Displaces</span><span class="t-ar">يُعطّل</span></span><span class="v v-warn"><span class="t-en">File transfer</span><span class="t-ar">نقل الملفات</span></span></li>
+        </ul>
+      </article>
+    </div>
+
+    <p class="hero-note" style="border-top:none;padding-top:1.6rem;margin-top:0.4rem">
+      <span class="t-en">USB tethering is not wireless. It is a USB cable carrying a network protocol, which is why it has USB latency but needs no driver. It replaced AOA as the recommended transport.</span>
+      <span class="t-ar">‏USB tethering ليس اتصالًا لاسلكيًا. هو كابل USB يحمل بروتوكول شبكة، ولذلك يعطي زمن استجابة USB دون الحاجة إلى أي تعريف. وقد حلّ محلّ AOA كقناة النقل الموصى بها.</span>
+    </p>
+  </div>
+</section>
+
+<!-- ===================== COMPARE ===================== -->
+<section id="compare">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow"><span class="t-en">Where it sits</span><span class="t-ar">موقعه بين البدائل</span></p>
+      <h2><span class="t-en">How it compares</span><span class="t-ar">مقارنة بالبدائل</span></h2>
+      <p class="lede" style="margin-top:1rem">
+        <span class="t-en">DroidCam, Iriun, Camo and iVCam solve the same problem the same way: a PC application feeding a registered virtual camera. The differences are in licensing and how finished each one is, not in the architecture.</span>
+        <span class="t-ar">تحلّ تطبيقات DroidCam و Iriun و Camo و iVCam المشكلة نفسها بالطريقة نفسها: تطبيق على الحاسوب يغذّي كاميرا افتراضية مسجّلة. الفروق في الترخيص ومدى اكتمال كل منها، لا في البنية.</span>
+      </p>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <td></td>
+            <th scope="col">PhoneCam</th>
+            <th scope="col"><span class="t-en">The commercial apps</span><span class="t-ar">التطبيقات التجارية</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row"><span class="t-en">Source code</span><span class="t-ar">الشيفرة المصدرية</span></th>
+            <td class="own"><span class="t-en">Open, GPL-3.0</span><span class="t-ar">مفتوحة، برخصة GPL-3.0</span></td>
+            <td><span class="t-en">Closed</span><span class="t-ar">مغلقة</span></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="t-en">Cost</span><span class="t-ar">التكلفة</span></th>
+            <td class="own"><span class="t-en">Free, no paid tier</span><span class="t-ar">مجاني، دون نسخة مدفوعة</span></td>
+            <td><span class="t-en">Free tier plus a paid upgrade</span><span class="t-ar">نسخة مجانية مع ترقية مدفوعة</span></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="t-en">Camera controls from the PC</span><span class="t-ar">التحكم بالكاميرا من الحاسوب</span></th>
+            <td class="own"><span class="t-en">Zoom, exposure, focus, torch, lens — all free</span><span class="t-ar">تقريب، تعريض، تركيز، إضاءة، عدسة — كلها مجانية</span></td>
+            <td><span class="t-en">Varies by product and tier</span><span class="t-ar">يختلف حسب المنتج والباقة</span></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="t-en">You can read and change it</span><span class="t-ar">إمكانية القراءة والتعديل</span></th>
+            <td class="own"><span class="t-en">Yes — that is the point of this page</span><span class="t-ar">نعم — وهذا هو غرض هذه الصفحة</span></td>
+            <td><span class="t-en">No</span><span class="t-ar">لا</span></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="t-en">Ready for a non-technical user</span><span class="t-ar">جاهز لمستخدم غير تقني</span></th>
+            <td><span class="miss"><span class="t-en">Not yet — no installer, build from source</span><span class="t-ar">ليس بعد — لا مُثبِّت، ويُبنى من المصدر</span></span></td>
+            <td><span class="t-en">Yes</span><span class="t-ar">نعم</span></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="t-en">Audio</span><span class="t-ar">الصوت</span></th>
+            <td><span class="miss"><span class="t-en">Not built yet</span><span class="t-ar">غير مُنجز بعد</span></span></td>
+            <td><span class="t-en">Generally yes</span><span class="t-ar">متوفّر غالبًا</span></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="t-en">Years of polish</span><span class="t-ar">سنوات من الصقل</span></th>
+            <td><span class="miss"><span class="t-en">No</span><span class="t-ar">لا</span></span></td>
+            <td><span class="t-en">Yes</span><span class="t-ar">نعم</span></td>
+          </tr>
+        </tbody>
+        <caption>
+          <span class="t-en">Deliberately limited to differences that are structural and publicly verifiable. Feature sets, pricing and free-tier limits change often — check each product's own site rather than trusting a table on a competitor's page, including this one.</span>
+          <span class="t-ar">اقتصرت المقارنة عمدًا على الفروق البنيوية القابلة للتحقق علنًا. المزايا والأسعار وحدود النسخ المجانية تتغيّر باستمرار — راجع الموقع الرسمي لكل منتج بدل الوثوق بجدول في صفحة منافس، بما في ذلك هذه الصفحة.</span>
+        </caption>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== CODEBASE ===================== -->
+<section id="code">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow"><span class="t-en">Orientation</span><span class="t-ar">خريطة المشروع</span></p>
+      <h2><span class="t-en">Repository layout</span><span class="t-ar">هيكل المستودع</span></h2>
+      <p class="lede" style="margin-top:1rem">
+        <span class="t-en">Two languages and three build systems. The Windows and Android sides share no code, only the wire format in <code>proto/</code>.</span>
+        <span class="t-ar">لغتان وثلاثة أنظمة بناء. لا يتشارك جانبا ويندوز وأندرويد أي شيفرة، بل صيغة النقل في <code>proto/</code> فقط.</span>
+      </p>
+    </div>
+
+    <div class="map">
+      <div class="map-row"><div class="map-path">android/</div><div class="map-what"><span class="t-en">Kotlin. Camera2 capture, MediaCodec encode, the transports, and the on-phone UI.</span><span class="t-ar">بلغة Kotlin. التقاط عبر Camera2، وترميز عبر MediaCodec، وقنوات النقل، وواجهة الهاتف.</span></div></div>
+      <div class="map-row"><div class="map-path">windows/host/</div><div class="map-what"><span class="t-en">C++. <code>phonecam-host.exe</code> — transports, H.264 decode, the tray UI and its controls.</span><span class="t-ar">بلغة <span class="ltr">C++</span>. ملف <code>phonecam-host.exe</code> — قنوات النقل، وفكّ ترميز H.264، وواجهة شريط المهام وأدواتها.</span></div></div>
+      <div class="map-row"><div class="map-path">windows/vcam/</div><div class="map-what"><span class="t-en">C++/COM. The <code>MFCreateVirtualCamera</code> media source Windows loads into its own Frame Server.</span><span class="t-ar">بلغة <span class="ltr">C++/COM</span>. مصدر الوسائط <code>MFCreateVirtualCamera</code> الذي يُحمّله ويندوز داخل Frame Server.</span></div></div>
+      <div class="map-row"><div class="map-path">windows/common/</div><div class="map-what"><span class="t-en">Shared C++: the cross-process frame ring, wire framing, logging.</span><span class="t-ar">شيفرة <span class="ltr">C++</span> مشتركة: ring buffer الإطارات بين العمليات، وتأطير البيانات، والتسجيل.</span></div></div>
+      <div class="map-row"><div class="map-path">windows/usbdriver/</div><div class="map-what"><span class="t-en">The elevated helper that installs and removes the AOA driver. Only used by the fallback transport.</span><span class="t-ar">أداة مساعدة تعمل بصلاحيات المدير، تثبّت تعريف AOA وتزيله. تُستخدم فقط مع القناة الاحتياطية.</span></div></div>
+      <div class="map-row"><div class="map-path">proto/</div><div class="map-what"><span class="t-en">FlatBuffers schemas — the contract both sides compile against. Change here, change both sides.</span><span class="t-ar">مخططات FlatBuffers — العقد الذي يُبنى عليه الجانبان. أي تغيير هنا يستلزم تعديل الطرفين.</span></div></div>
+      <div class="map-row"><div class="map-path">docs/architecture.md</div><div class="map-what"><span class="t-en">The real history: every phase, every bug found and fixed, and the decisions that were later proven wrong. Start here.</span><span class="t-ar">التاريخ الحقيقي: كل مرحلة، وكل خلل اكتُشف وأُصلح، والقرارات التي ثبت خطؤها لاحقًا. ابدأ من هنا.</span></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== OPEN WORK ===================== -->
+<section id="work">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow"><span class="t-en">Contributors</span><span class="t-ar">للمساهمين</span></p>
+      <h2><span class="t-en">What needs doing</span><span class="t-ar">ما يحتاج إلى عمل</span></h2>
+      <p class="lede" style="margin-top:1rem">
+        <span class="t-en">Open problems, described as they actually are. Each one is covered in more detail in the architecture log.</span>
+        <span class="t-ar">مشكلات مفتوحة، موصوفة كما هي فعلًا. كل واحدة مشروحة بتفصيل أكبر في سجل البنية.</span>
+      </p>
+    </div>
+
+    <div class="issues">
+      <article class="issue">
+        <h3><span class="t-en">Portrait breaks in DirectShow apps</span><span class="t-ar">الوضع الرأسي يتعطّل في تطبيقات DirectShow</span></h3>
+        <p><span class="t-en">The vertical resolutions look correct in Media Foundation apps but come out corrupted in DirectShow apps, which includes Zoom's classic client and older OBS. The cause is a byte-alignment bug in a Windows component, not in this code. Needs a workaround.</span><span class="t-ar">تبدو الدقّات الرأسية صحيحة في تطبيقات Media Foundation لكنها تخرج تالفة في تطبيقات DirectShow، ومنها نسخة Zoom التقليدية وإصدارات OBS القديمة. السبب خلل في محاذاة البايتات داخل مكوّن من ويندوز، لا في هذه الشيفرة. تحتاج إلى حلّ التفافي.</span></p>
+        <div class="tags"><span class="tag" data-t="hard"><span class="t-en">Hard</span><span class="t-ar">صعب</span></span><span class="tag">Windows</span><span class="tag">C++</span></div>
+      </article>
+
+      <article class="issue">
+        <h3><span class="t-en">The AOA connection can wedge silently</span><span class="t-ar">اتصال AOA قد يتعلّق بصمت</span></h3>
+        <p><span class="t-en">After a replug, the USB read loop can time out forever without ever reporting the device is gone, so the reconnect logic never fires and the process needs a manual restart. A consecutive-timeout threshold would likely fix it.</span><span class="t-ar">بعد إعادة توصيل الكابل، قد تستمر حلقة القراءة عبر USB في انتهاء المهلة إلى الأبد دون الإبلاغ عن اختفاء الجهاز، فلا تعمل آلية إعادة الاتصال ويحتاج البرنامج إلى إعادة تشغيل يدوية. غالبًا يكفي حدّ أقصى لعدد المهلات المتتالية.</span></p>
+        <div class="tags"><span class="tag" data-t="med"><span class="t-en">Medium</span><span class="t-ar">متوسط</span></span><span class="tag">libusb</span><span class="tag">C++</span></div>
+      </article>
+
+      <article class="issue">
+        <h3><span class="t-en">The installer is incomplete</span><span class="t-ar">المُثبِّت غير مكتمل</span></h3>
+        <p><span class="t-en">The Inno Setup script does not yet ship <code>libusb-1.0.dll</code> or the USB driver helper, so an installed build would fail to launch. Small, well-defined, and blocking the first real release.</span><span class="t-ar">لا يتضمّن سكربت Inno Setup بعد ملف <code>libusb-1.0.dll</code> ولا أداة تثبيت التعريف، لذا ستفشل النسخة المثبَّتة في العمل. مهمة صغيرة وواضحة، لكنها تعيق أول إصدار حقيقي.</span></p>
+        <div class="tags"><span class="tag" data-t="start"><span class="t-en">Good first task</span><span class="t-ar">مناسبة للبداية</span></span><span class="tag">Inno Setup</span></div>
+      </article>
+
+      <article class="issue">
+        <h3><span class="t-en">No audio</span><span class="t-ar">لا يوجد صوت</span></h3>
+        <p><span class="t-en">Video only, for now. Synced audio over the same cable is a stated goal and nothing has been built for it. The wire protocol has no audio channel, so this is a design task before it is a coding one.</span><span class="t-ar">فيديو فقط حاليًا. نقل صوت متزامن عبر الكابل نفسه هدف معلن ولم يُبنَ منه شيء. لا يحتوي بروتوكول النقل على قناة صوت، لذا فهي مهمة تصميم قبل أن تكون مهمة برمجة.</span></p>
+        <div class="tags"><span class="tag" data-t="hard"><span class="t-en">Hard</span><span class="t-ar">صعب</span></span><span class="tag">Kotlin</span><span class="tag">C++</span></div>
+      </article>
+
+      <article class="issue">
+        <h3><span class="t-en">Wi-Fi as a transport</span><span class="t-ar">الواي فاي كقناة نقل</span></h3>
+        <p><span class="t-en">The network transport already accepts an explicit address, so Wi-Fi mostly works already — what is missing is discovery and any way to choose it in the UI. Mostly a UX problem.</span><span class="t-ar">تقبل قناة النقل الشبكية عنوانًا صريحًا بالفعل، لذا فالواي فاي يعمل غالبًا — الناقص هو اكتشاف الجهاز وطريقة لاختياره من الواجهة. المشكلة في تجربة الاستخدام أساسًا.</span></p>
+        <div class="tags"><span class="tag" data-t="start"><span class="t-en">Good first task</span><span class="t-ar">مناسبة للبداية</span></span><span class="tag">C++</span><span class="tag">UX</span></div>
+      </article>
+
+      <article class="issue">
+        <h3><span class="t-en">Tested on one phone</span><span class="t-ar">مُختبر على هاتف واحد</span></h3>
+        <p><span class="t-en">Everything here is verified on a Redmi Note 8 running Android 11. Whether USB tethering is carrier-gated on your device, and whether AOA behaves the same, is genuinely unknown. Reports from other hardware are useful contributions on their own.</span><span class="t-ar">كل ما سبق جرى التحقق منه على هاتف Redmi Note 8 بنظام أندرويد 11. أما إن كان USB tethering مقيَّدًا من مشغّل شبكتك، وهل يتصرّف AOA بالطريقة نفسها، فغير معروف فعلًا. تقارير من أجهزة أخرى تُعدّ مساهمة قيّمة بحدّ ذاتها.</span></p>
+        <div class="tags"><span class="tag" data-t="start"><span class="t-en">No code needed</span><span class="t-ar">لا تحتاج برمجة</span></span><span class="tag">Android</span></div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== BUILD ===================== -->
+<section id="build">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow"><span class="t-en">Getting started</span><span class="t-ar">البداية</span></p>
+      <h2><span class="t-en">Building from source</span><span class="t-ar">البناء من المصدر</span></h2>
+    </div>
+
+    <div class="two-col">
+      <div>
+        <h3 style="margin-bottom:0.9rem"><span class="t-en">You will need</span><span class="t-ar">ما تحتاجه</span></h3>
+        <p style="font-size:0.9375rem;color:var(--ink-2)">
+          <span class="t-en">Visual Studio 2022 Build Tools with the C++ workload, the Windows 11 SDK, CMake, <code>flatc</code> and <code>adb</code> on PATH, plus JDK 21 and the Android SDK for the phone side. Full detail in <code>docs/build.md</code>.</span>
+          <span class="t-ar">أدوات بناء Visual Studio 2022 مع حزمة <span class="ltr">C++</span>، وحزمة Windows 11 SDK، و CMake، ووجود <code>flatc</code> و <code>adb</code> في PATH، إضافةً إلى JDK 21 وحزمة Android SDK لجانب الهاتف. التفاصيل كاملة في <code>docs/build.md</code>.</span>
+        </p>
+      </div>
+      <div>
+        <h3 style="margin-bottom:0.9rem"><span class="t-en">Then</span><span class="t-ar">ثم</span></h3>
+<pre><code>git clone https://github.com/Abdo-Eid/phonecam
+cd phonecam
+git submodule update --init --recursive
+
+# Windows host
+cmake --build windows/build --target phonecam-host --config Debug
+
+# Android app
+cd android &amp;&amp; ./gradlew assembleDebug</code></pre>
+      </div>
+    </div>
+
+    <p class="hero-note">
+      <span class="t-en">The virtual camera builds with MSBuild rather than CMake, and has to be registered once. Both that and the deployment step people usually miss are explained in <code>docs/build.md</code>.</span>
+      <span class="t-ar">تُبنى الكاميرا الافتراضية عبر MSBuild لا CMake، ويجب تسجيلها مرة واحدة. كلاهما وخطوة النشر التي يغفل عنها معظم الناس مشروحان في <code>docs/build.md</code>.</span>
+    </p>
+
+    <div class="cta-row" style="margin-top:1.5rem">
+      <a class="btn btn-primary" href="https://github.com/Abdo-Eid/phonecam/blob/master/CONTRIBUTING.md">
+        <span class="t-en">Read the contributing guide</span><span class="t-ar">اقرأ دليل المساهمة</span>
+      </a>
+      <a class="btn btn-ghost" href="https://github.com/Abdo-Eid/phonecam/blob/master/docs/build.md">
+        <span class="t-en">Build instructions</span><span class="t-ar">تعليمات البناء</span>
+      </a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap footer-inner">
+    <span>
+      <span class="t-en">PhoneCam — GPL-3.0-or-later.</span>
+      <span class="t-ar">PhoneCam — برخصة GPL-3.0 أو أحدث.</span>
+    </span>
+    <span class="topbar-spacer"></span>
+    <a href="https://github.com/Abdo-Eid/phonecam">GitHub</a>
+    <a href="https://github.com/Abdo-Eid/phonecam/blob/master/docs/architecture.md"><span class="t-en">Architecture</span><span class="t-ar">البنية</span></a>
+    <a href="https://github.com/Abdo-Eid/phonecam/blob/master/docs/wire-protocol.md"><span class="t-en">Wire protocol</span><span class="t-ar">بروتوكول النقل</span></a>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var html = document.documentElement;
+  var btn = document.getElementById('langtoggle');
+
+  function setLang(lang) {
+    html.setAttribute('data-lang', lang);
+    html.setAttribute('lang', lang);
+    html.setAttribute('dir', lang === 'ar' ? 'rtl' : 'ltr');
+    try { localStorage.setItem('phonecam-lang', lang); } catch (e) { /* private mode */ }
+  }
+
+  // Restore an explicit choice; otherwise follow the browser's own preference.
+  var saved = null;
+  try { saved = localStorage.getItem('phonecam-lang'); } catch (e) { /* ignore */ }
+  if (saved === 'ar' || saved === 'en') {
+    setLang(saved);
+  } else if ((navigator.language || '').toLowerCase().indexOf('ar') === 0) {
+    setLang('ar');
+  }
+
+  btn.addEventListener('click', function () {
+    setLang(html.getAttribute('data-lang') === 'ar' ? 'en' : 'ar');
+  });
+})();
+</script>
+
+</body>
+</html>
