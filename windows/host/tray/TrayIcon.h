@@ -18,10 +18,15 @@ namespace phonecam::tray {
 
 // One dynamic menu item, between the status line and Exit. onClick empty means
 // display-only/disabled (matches the status line's own existing MF_GRAYED treatment).
+//
+// A non-empty `submenu` turns this item into a submenu parent (Phase 4: lens/zoom/ev/focus/
+// rotation each need a small picker) -- onClick and checked are ignored for a submenu parent,
+// its own children carry those instead.
 struct MenuItem {
     std::string label;
     std::function<void()> onClick;
     bool checked = false;
+    std::vector<MenuItem> submenu;
 };
 
 class TrayIcon {

@@ -23,10 +23,12 @@ if (MSVC)
 endif()
 
 add_subdirectory(common)
+# Before host/: phonecam-host's POST_BUILD step copies phonecam-usbdriver.exe next to itself
+# (see windows/host/CMakeLists.txt) and needs the target to already exist to depend on it.
+add_subdirectory(usbdriver)
 add_subdirectory(host)
 add_subdirectory(svc)
 add_subdirectory(tools)
-add_subdirectory(usbdriver)
 
 # vcam/ is intentionally NOT a CMake target: it's forked from VCamSample
 # (MIT), which builds via its own MSBuild project (PhoneCamVCam.vcxproj +

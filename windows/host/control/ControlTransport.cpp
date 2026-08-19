@@ -62,6 +62,13 @@ struct ControlTransport::Impl {
     // Stop()/dtor can call Disconnect() from another thread at any time.
     std::mutex mutex;
     std::atomic<bool> cancelled{false};
+    // Separate from `mutex` (which guards connect/disconnect of `sock` itself) on purpose: a
+    // send racing a concurrent Disconnect() should fail fast on the INVALID_SOCKET check below,
+    // not block waiting for a lock an unrelated teardown is holding. Needed now that the tray
+    // (Phase 4: lens/zoom/ev/torch/focus menu clicks, on the tray's message-pump thread) is a
+    // second concurrent sender alongside ConsoleControlUi's console-input thread -- interleaved
+    // length-prefix + body writes from two threads would corrupt framing on the wire.
+    std::mutex sendMutex;
 };
 
 ControlTransport::ControlTransport() : impl_(std::make_unique<Impl>()) {
@@ -137,6 +144,8 @@ void ControlTransport::Disconnect() {
 
 bool ControlTransport::Send(const uint8_t* data, size_t size) {
     if (impl_->sock == INVALID_SOCKET) return false;
+    std::lock_guard<std::mutex> sendLock(impl_->sendMutex);
+    if (impl_->sock == INVALID_SOCKET) return false;  // re-check: may have disconnected while waiting for the lock
     uint32_t len = static_cast<uint32_t>(size);
     // x86/x64 is natively little-endian, matching the wire spec -- a plain
     // send of the raw bytes is correct as-is (same reasoning as the video

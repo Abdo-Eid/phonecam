@@ -142,6 +142,18 @@ public:
     uint32_t SendSetBitrate(uint32_t bitrateBps);
     uint32_t SendSetLens(const std::string& cameraId);
 
+    // Phase 4 (tray controls): a cache of the last-seen Capabilities/CurrentSettings messages,
+    // populated inside RunReceiveLoop before the message reaches the caller's handler -- moved
+    // here (rather than duplicating it in the tray, the way ConsoleControlUi has its own private
+    // copy) because this is already the single decode chokepoint every consumer reads from, and
+    // the tray needs it independent of whatever ConsoleControlUi is doing. Thread-safe: written
+    // from the control-receive thread, read from the tray's message-pump thread when it builds
+    // the menu.
+    CapabilityInfo GetLastCapabilities() const;
+    bool HasCapabilities() const;
+    SettingsInfo GetLastSettings() const;
+    bool HasSettings() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

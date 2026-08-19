@@ -1,6 +1,7 @@
 #include "control/ControlChannel.h"
 
 #include <atomic>
+#include <mutex>
 
 #include "control/ControlTransport.h"
 #include "control_generated.h"
@@ -148,6 +149,12 @@ struct ControlChannel::Impl {
     ControlTransport transport;
     std::atomic<uint32_t> nextCmdId{1};
 
+    mutable std::mutex cacheMutex;
+    CapabilityInfo lastCapabilities;
+    bool hasCapabilities = false;
+    SettingsInfo lastSettings;
+    bool hasSettings = false;
+
     uint32_t NextCmdId() { return nextCmdId.fetch_add(1); }
 
     template <typename BuildPayload>
@@ -173,7 +180,17 @@ void ControlChannel::Disconnect() { impl_->transport.Disconnect(); }
 void ControlChannel::RunReceiveLoop(const ControlMessageHandler& onMessage) {
     impl_->transport.RunReceiveLoop([&](const uint8_t* data, size_t size) {
         if (size == 0) return;
-        onMessage(DecodeEnvelope(data, size));
+        const ControlMessage msg = DecodeEnvelope(data, size);
+        if (msg.kind == ControlMsgKind::Capabilities) {
+            std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+            impl_->lastCapabilities = msg.capabilities;
+            impl_->hasCapabilities = true;
+        } else if (msg.kind == ControlMsgKind::Settings) {
+            std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+            impl_->lastSettings = msg.settings;
+            impl_->hasSettings = true;
+        }
+        onMessage(msg);
     });
 }
 
@@ -220,6 +237,26 @@ uint32_t ControlChannel::SendSetLens(const std::string& cameraId) {
     return impl_->SendCommand(pcc::ControlPayload::SetLens, [&](fb::FlatBufferBuilder& fbb) {
         return pcc::CreateSetLensDirect(fbb, cameraId.c_str()).Union();
     });
+}
+
+CapabilityInfo ControlChannel::GetLastCapabilities() const {
+    std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+    return impl_->lastCapabilities;
+}
+
+bool ControlChannel::HasCapabilities() const {
+    std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+    return impl_->hasCapabilities;
+}
+
+SettingsInfo ControlChannel::GetLastSettings() const {
+    std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+    return impl_->lastSettings;
+}
+
+bool ControlChannel::HasSettings() const {
+    std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+    return impl_->hasSettings;
 }
 
 }  // namespace phonecam::control

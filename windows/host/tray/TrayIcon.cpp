@@ -30,6 +30,34 @@ struct TrayIcon::Impl {
     std::vector<std::function<void()>> dynamicCallbacks;
     bool iconAdded = false;
 
+    // Recursively appends `items` into `menu` (a submenu's HMENU, or the top-level popup),
+    // allocating dynamic IDs and pushing callbacks into `dynamicCallbacks` as it goes -- called
+    // fresh from ShowContextMenu() below, same lifetime as the flat case it replaces. Windows
+    // owns/destroys a child HMENU attached via MF_POPUP together with its parent, so callers only
+    // ever need to DestroyMenu() the top-level popup, never these children individually.
+    void AppendItems(HMENU menu, const std::vector<MenuItem>& items) {
+        for (const MenuItem& item : items) {
+            const std::wstring label(item.label.begin(), item.label.end());
+            if (!item.submenu.empty()) {
+                HMENU sub = CreatePopupMenu();
+                AppendItems(sub, item.submenu);
+                AppendMenuW(menu, MF_STRING | MF_POPUP, reinterpret_cast<UINT_PTR>(sub), label.c_str());
+                continue;
+            }
+            UINT flags = MF_STRING;
+            UINT id;
+            if (item.onClick) {
+                id = kMenuIdDynamicBase + static_cast<UINT>(dynamicCallbacks.size());
+                dynamicCallbacks.push_back(item.onClick);
+                if (item.checked) flags |= MF_CHECKED;
+            } else {
+                id = kMenuIdStatus;  // reused: any disabled/display-only item shares its (no-op) ID
+                flags |= MF_GRAYED;
+            }
+            AppendMenuW(menu, flags, id, label.c_str());
+        }
+    }
+
     void RefreshTooltip() {
         if (!iconAdded) return;
         NOTIFYICONDATAW nid{};
@@ -56,19 +84,7 @@ struct TrayIcon::Impl {
             const std::vector<MenuItem> items = itemsProvider();
             if (!items.empty()) {
                 AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-                for (const MenuItem& item : items) {
-                    UINT flags = MF_STRING;
-                    UINT id;
-                    if (item.onClick) {
-                        id = kMenuIdDynamicBase + static_cast<UINT>(dynamicCallbacks.size());
-                        dynamicCallbacks.push_back(item.onClick);
-                        if (item.checked) flags |= MF_CHECKED;
-                    } else {
-                        id = kMenuIdStatus;  // reused: any disabled/display-only item shares its (no-op) ID
-                        flags |= MF_GRAYED;
-                    }
-                    AppendMenuW(menu, flags, id, std::wstring(item.label.begin(), item.label.end()).c_str());
-                }
+                AppendItems(menu, items);
             }
         }
 

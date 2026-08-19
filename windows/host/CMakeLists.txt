@@ -77,3 +77,14 @@ add_custom_command(TARGET phonecam-host POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${LIBUSB_DIR}/bin/libusb-1.0.dll $<TARGET_FILE_DIR:phonecam-host>
 )
+
+# RunUsbDriverHelperElevated (main.cpp) locates phonecam-usbdriver.exe next to the running
+# phonecam-host.exe -- true in the installed layout (PhoneCam.iss puts both in {app}), but in this
+# CMake dev build tree each target lands in its own windows/build/<target>/<config>/ directory.
+# Copy it alongside phonecam-host.exe after every build so the tray's driver-setup/revert items
+# work from a dev build too, not just an installed one.
+add_dependencies(phonecam-host phonecam-usbdriver)
+add_custom_command(TARGET phonecam-host POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:phonecam-usbdriver> $<TARGET_FILE_DIR:phonecam-host>
+)

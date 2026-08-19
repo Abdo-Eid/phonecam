@@ -3,11 +3,13 @@
 #include <shellapi.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "bridge/LiveVideoBridge.h"
@@ -72,6 +74,72 @@ std::vector<std::vector<uint8_t>> SplitAnnexBNalus(const std::vector<uint8_t>& b
 }
 
 uint8_t NaluType(const std::vector<uint8_t>& nalu) { return nalu.size() < 4 ? 0xFF : (nalu[3] & 0x1F); }
+
+// Phase 4 (tray controls): small label tables, matching ConsoleControlUi.cpp's own -- duplicated
+// intentionally rather than shared, same reasoning as that class's own capability-cache
+// duplication (see ControlChannel.h's Phase 4 comment): different consumer, not worth coupling.
+const char* AfModeName(int m) {
+    switch (m) {
+        case 0: return "Off";
+        case 1: return "Auto";
+        case 2: return "Continuous";
+        case 3: return "Macro";
+        case 4: return "Edge Capture";
+        default: return "?";
+    }
+}
+
+const char* FacingName(int f) {
+    switch (f) {
+        case 0: return "Back";
+        case 1: return "Front";
+        case 2: return "External";
+        default: return "?";
+    }
+}
+
+const phonecam::control::LensInfo* FindLens(const phonecam::control::CapabilityInfo& caps,
+                                             const std::string& cameraId) {
+    for (const auto& lens : caps.lenses) {
+        if (lens.cameraId == cameraId) return &lens;
+    }
+    return nullptr;
+}
+
+// A handful of human-recognizable zoom stops, filtered to the current lens's actual supported
+// range -- a tray menu needs discrete picks, not a continuous slider. zoomMin is always included
+// even if it doesn't land exactly on a candidate, so "no zoom" is always offered.
+std::vector<float> ZoomPresets(float zoomMin, float zoomMax) {
+    static constexpr float kCandidates[] = {1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 8.0f, 10.0f};
+    std::vector<float> out;
+    for (float c : kCandidates) {
+        if (c >= zoomMin - 0.01f && c <= zoomMax + 0.01f) out.push_back(c);
+    }
+    if (out.empty() || out.front() > zoomMin + 0.01f) out.insert(out.begin(), zoomMin);
+    return out;
+}
+
+// Same idea for EV compensation, whose native range is already small integer "steps" (not a raw
+// EV value -- see SendSetEv's own doc comment) -- enumerate every step if there are few enough to
+// stay a sane menu size, else fall back to ~7 evenly spaced picks across the full range.
+std::vector<int32_t> EvPresets(int32_t evMin, int32_t evMax) {
+    std::vector<int32_t> out;
+    if (evMax <= evMin) {
+        out.push_back(evMin);
+        return out;
+    }
+    const int32_t span = evMax - evMin;
+    if (span <= 8) {
+        for (int32_t v = evMin; v <= evMax; ++v) out.push_back(v);
+    } else {
+        constexpr int kSteps = 6;
+        for (int i = 0; i <= kSteps; ++i) {
+            const int32_t v = evMin + static_cast<int32_t>(static_cast<int64_t>(span) * i / kSteps);
+            if (out.empty() || out.back() != v) out.push_back(v);
+        }
+    }
+    return out;
+}
 
 // Phase 1 (transport auto-detect): runs `adb devices` and checks for a
 // line ending in a real device state ("...\tdevice"), as opposed to
@@ -434,27 +502,148 @@ int wmain(int argc, wchar_t* argv[]) {
             }).detach();
         };
 
+        // Phase 4 (tray controls): rotation/mirror are pure PC-side rendering settings -- the
+        // phone is never involved, so this local state (read/written only on the tray's own
+        // message-pump thread: itemsProvider and every onClick below all run there, see
+        // TrayIcon.cpp) is the single source of truth, applied to the shared ring so the vcam DLL
+        // picks it up on its next draw. Default 90 clockwise, not 0: the reference mounting for
+        // this project is the phone held vertically, and a landscape sensor frame needs exactly
+        // this rotation to come out normal (see FrameGenerator's rotation math) -- 0 would look
+        // sideways for the common case, matching nobody's actual setup out of the box.
+        phonecam::shm::Rotation currentRotation = phonecam::shm::Rotation::Deg90;
+        bool currentMirror = false;
+        bridge.SetTransform(currentRotation, currentMirror);
+
         // Phase 5: a tray icon so phonecam-host.exe can run backgrounded/minimized instead of
         // requiring a visible console. Status text is a cheap read of atomics/getters already
         // updated by the bridge and control-channel supervise loops above -- no polling thread of
         // its own needed, TrayIcon refreshes on its own timer and on menu-open.
         phonecam::tray::TrayIcon tray;
         tray.SetMenuItems([&]() -> std::vector<phonecam::tray::MenuItem> {
-            std::vector<phonecam::tray::MenuItem> items;
+            using phonecam::tray::MenuItem;
+            std::vector<MenuItem> items;
+
+            // Camera-content controls (lens/zoom/exposure/torch/focus): these are PC->phone
+            // commands over the control channel (still adb-only today -- see AoaVideoTransport's
+            // class doc -- so these send successfully but have no visible effect until the
+            // control channel also runs over AOA). Sourced from the last-seen Capabilities +
+            // CurrentSettings, scoped to whichever lens is currently active -- nothing shown at
+            // all until the phone has actually reported capabilities once, matching the existing
+            // "never show a control the phone doesn't support" rule.
+            if (controlChannel.HasCapabilities()) {
+                const auto caps = controlChannel.GetLastCapabilities();
+                const bool hasSettings = controlChannel.HasSettings();
+                const auto settings = hasSettings ? controlChannel.GetLastSettings() : phonecam::control::SettingsInfo{};
+                const phonecam::control::LensInfo* current =
+                    hasSettings ? FindLens(caps, settings.cameraId) : nullptr;
+                if (!current && !caps.lenses.empty()) current = &caps.lenses[0];
+
+                if (!caps.lenses.empty()) {
+                    MenuItem cameraMenu{"Camera", nullptr, false, {}};
+                    for (const auto& lens : caps.lenses) {
+                        const std::string label = std::string(FacingName(lens.facing)) + " (camera " + lens.cameraId + ")";
+                        const bool checked = hasSettings && settings.cameraId == lens.cameraId;
+                        const std::string cameraId = lens.cameraId;
+                        cameraMenu.submenu.push_back(
+                            {label, [&controlChannel, cameraId]() { controlChannel.SendSetLens(cameraId); }, checked, {}});
+                    }
+                    items.push_back(std::move(cameraMenu));
+                }
+
+                if (current && current->zoomMax > current->zoomMin) {
+                    MenuItem zoomMenu{"Zoom", nullptr, false, {}};
+                    for (float z : ZoomPresets(current->zoomMin, current->zoomMax)) {
+                        char label[16];
+                        std::snprintf(label, sizeof(label), "%.1fx", z);
+                        const bool checked = hasSettings && std::fabs(settings.zoomRatio - z) < 0.05f;
+                        zoomMenu.submenu.push_back(
+                            {label, [&controlChannel, z]() { controlChannel.SendSetZoomRatio(z); }, checked, {}});
+                    }
+                    items.push_back(std::move(zoomMenu));
+                }
+
+                if (current && current->evMax > current->evMin) {
+                    MenuItem evMenu{"Exposure", nullptr, false, {}};
+                    for (int32_t ev : EvPresets(current->evMin, current->evMax)) {
+                        char label[24];
+                        std::snprintf(label, sizeof(label), "EV %+d", ev);
+                        const bool checked = hasSettings && settings.evSteps == ev;
+                        evMenu.submenu.push_back(
+                            {label, [&controlChannel, ev]() { controlChannel.SendSetEv(ev); }, checked, {}});
+                    }
+                    items.push_back(std::move(evMenu));
+                }
+
+                if (current && current->hasTorch) {
+                    const bool torchOn = hasSettings && settings.torchOn;
+                    items.push_back({"Torch", [&controlChannel, torchOn]() { controlChannel.SendSetTorch(!torchOn); },
+                                      torchOn, {}});
+                }
+
+                if (current && !current->afModes.empty()) {
+                    MenuItem focusMenu{"Focus", nullptr, false, {}};
+                    for (int mode : current->afModes) {
+                        const bool checked = hasSettings && settings.focusMode == mode;
+                        focusMenu.submenu.push_back({AfModeName(mode),
+                                                      [&controlChannel, mode]() { controlChannel.SendSetFocusMode(mode); },
+                                                      checked, {}});
+                    }
+                    items.push_back(std::move(focusMenu));
+                }
+            }
+
+            // Rotation/mirror: pure PC-side, always available regardless of phone capabilities.
+            {
+                MenuItem rotationMenu{"Rotation", nullptr, false, {}};
+                static constexpr std::pair<const char*, phonecam::shm::Rotation> kRotations[] = {
+                    {"0", phonecam::shm::Rotation::Deg0},
+                    {"90 clockwise", phonecam::shm::Rotation::Deg90},
+                    {"180", phonecam::shm::Rotation::Deg180},
+                    {"270 clockwise", phonecam::shm::Rotation::Deg270},
+                };
+                for (const auto& [label, rotation] : kRotations) {
+                    rotationMenu.submenu.push_back({label, [&, rotation]() {
+                                                         currentRotation = rotation;
+                                                         bridge.SetTransform(currentRotation, currentMirror);
+                                                     }, currentRotation == rotation, {}});
+                }
+                items.push_back(std::move(rotationMenu));
+            }
+            items.push_back({"Mirror", [&]() {
+                                  currentMirror = !currentMirror;
+                                  bridge.SetTransform(currentRotation, currentMirror);
+                              }, currentMirror, {}});
+
+            // Resolution: read-only display -- there is no PC-side "set resolution" mechanism,
+            // the consuming app (Zoom/OBS/Chrome) picks it via its own device settings (see
+            // docs/architecture.md's Phase 3 section). This just shows what was actually
+            // negotiated, sourced from FrameGenerator publishing it into the ring on every draw.
+            {
+                uint32_t width = 0, height = 0;
+                bridge.GetNegotiatedSize(width, height);
+                char label[64];
+                if (width > 0 && height > 0) {
+                    std::snprintf(label, sizeof(label), "Resolution: %ux%u (set from the app)", width, height);
+                } else {
+                    std::snprintf(label, sizeof(label), "Resolution: not negotiated yet");
+                }
+                items.push_back({label, nullptr, false, {}});
+            }
+
             if (g_driverSetupInFlight.load()) {
-                items.push_back({"USB driver helper running...", nullptr, false});
-                return items;
+                items.push_back({"USB driver helper running...", nullptr, false, {}});
+            } else {
+                // Only offered in AOA mode -- the adb path never needs this driver at all, and
+                // offering it there would be actively misleading (see AoaVideoTransport's own
+                // composite-device guard: installing this while debugging is on is refused anyway).
+                if (useAoa) {
+                    items.push_back({"Set up USB driver for AOA...",
+                                      [&]() { launchHelper(L"--install", "install"); }, false, {}});
+                }
+                items.push_back(
+                    {"Remove USB driver (restore file transfer)", [&]() { launchHelper(L"--revert-all", "revert"); },
+                     false, {}});
             }
-            // Only offered in AOA mode -- the adb path never needs this driver at all, and
-            // offering it there would be actively misleading (see AoaVideoTransport's own
-            // composite-device guard: installing this while debugging is on is refused anyway).
-            if (useAoa) {
-                items.push_back({"Set up USB driver for AOA...",
-                                  [&]() { launchHelper(L"--install", "install"); }, false});
-            }
-            items.push_back(
-                {"Remove USB driver (restore file transfer)", [&]() { launchHelper(L"--revert-all", "revert"); },
-                 false});
             return items;
         });
         const bool trayCreated = tray.Create([&]() -> std::string {
