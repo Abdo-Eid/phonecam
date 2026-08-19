@@ -1,0 +1,37 @@
+libusbK redistributable driver binaries -- vendored for libwdi's embedder
+===========================================================================
+
+What this is: the signed libusbK.sys/.dll and libusb0 compatibility DLLs
+that `third_party/libwdi`'s embedder step bakes into `libwdi.lib` at build
+time (see `third_party/libwdi/NOTICE.txt`). These are the actual driver
+payload libwdi installs on end-user machines via `wdi_install_driver`.
+
+Provenance: extracted from this development machine's own Windows Driver
+Store (`C:\Windows\System32\DriverStore\FileRepository\
+libusbk_generic_device.inf_amd64_<hash>\`), where they had been installed
+by Zadig 2.9 (https://github.com/pbatard/libwdi/releases) during earlier
+manual driver-binding testing this project did (see docs/architecture.md's
+Phase 7 AOA sections). Zadig itself vendors these exact files via the same
+libwdi embedder mechanism -- this is the same signed libusbK package
+libusbK's own project distributes, not a locally-built or modified driver.
+
+Layout (matches libwdi's `embedder_files.h` LIBUSBK_DIR expectations,
+x64-only -- see third_party/libwdi/NOTICE.txt for why x86/arm64 aren't
+present):
+  sys/amd64/libusbK.sys   -- the kernel-mode driver
+  dll/amd64/libusbK.dll   -- the user-mode API DLL (64-bit)
+  dll/amd64/libusb0.dll   -- libusb0 compatibility DLL (64-bit)
+  dll/x86/libusbK.dll     -- 32-bit DLL, bundled inside the amd64 package
+                             for reuse (embedder_files.h requires this even
+                             in an x64-only build; never independently used)
+  dll/x86/libusb0.dll     -- same, for libusb0
+
+License: same as libusbK's own project (BSD-3-Clause per libusbK's usual
+licensing; these binaries carry Microsoft catalog-signing, not a separate
+license file of their own in this extraction -- see
+https://github.com/mcuee/libusbk for upstream source and license text).
+
+Not used at runtime by this repo directly -- only consumed by
+`third_party/libwdi-src` at libwdi.lib build time (that source tree is not
+committed to this repo; it's a build-time-only checkout, see
+third_party/libwdi/NOTICE.txt's "Rebuilding" section).

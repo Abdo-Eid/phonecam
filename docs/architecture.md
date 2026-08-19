@@ -1089,19 +1089,125 @@ The advisor's suggested next check -- retry with Zadig's plain
 on the Note 8, which demonstrably did register) instead of "Install WCID
 Driver" -- was not completed; the user stopped the investigation here.
 
-**Where this leaves the installer design, unresolved:** if only a
-hardware-ID-targeted install can ever work against a device like this
-(the untested-but-likely case), the "no debugging" AOA transport's driver
-requirement is **irreducibly per-phone-model** -- there is no safe generic
-rule that covers unknown Android OEMs, only a maintained VID/PID list
-(matching how Google's own official USB driver package is structured) or
-an on-attach, per-device elevated install triggered the first time a new
-phone connects. Either shape is real, additional design work, not a
-quick finish. **Not pursued further this session -- parked as a known
-open problem**, not a solved one. The existing adb-based transport
-(Phase 3-6, proven, no driver needed) remains the default and only
-fully-working path; `--aoa` remains a working-but-Zadig-dependent
-alternative, exactly as before this investigation.
+**Important: this is an untried next step, not a confirmed dead end.**
+Only one specific install mode was tested and ruled out -- Zadig's
+**"Install WCID Driver"** button, which targets the device's *declared
+compatible ID* (`MS_COMP_MTP` here) rather than its hardware ID. That's a
+meaningfully different operation from plain **"Install Driver"**
+(hardware-ID-targeted: `USB\VID_2717&PID_FF40`), which is the exact
+method that *did* successfully register a driver on the Note 8's
+accessory-mode node (`oem129.inf`, confirmed via `pnputil` earlier in
+this document). **The hardware-ID-targeted install was never attempted
+on the Note 7** -- the investigation stopped one step short of the test
+that was actually most likely to work.
+
+**The concrete next step, cheap to run:** in Zadig, check the "Edit" box
+next to the device name, use the dropdown arrow on the install button to
+choose plain "Install Driver" (not the WCID variant), select libusbK or
+WinUSB, install, replug, then check
+`pnputil /enum-devices /instanceid "USB\VID_2717&PID_FF40\<serial>" /drivers`
+-- if a libusbK/WinUSB entry now appears in the "Matching Drivers" list
+alongside `wpdmtp.inf`, retry `aoa_probe --handshake`. If that succeeds,
+the driver-binding mechanism itself is confirmed to work the same way on
+this device as it did on the Note 8, and the remaining design question
+becomes purely "how does an installer trigger this automatically" (a
+maintained per-OEM VID/PID list, or an on-attach elevated install) --
+not "does this even work at all."
+
+**Not pursued further that session, for lack of time -- parked as an open
+problem with a known next step**, not a dead end.
+
+## Status: Phase 2 driver auto-install, built and verified live end-to-end, no Zadig
+
+Picked back up and solved. Built `phonecam-usbdriver.exe`
+(`windows/usbdriver/`), a separate elevated helper on top of a
+newly-vendored **libwdi** (`third_party/libwdi/`), replacing the manual
+Zadig step entirely -- confirmed live on the Redmi Note 8, USB debugging
+off, with **zero Zadig involvement and exactly one Windows admin prompt**.
+
+**Vendoring libwdi turned out to be its own real sub-problem.** libwdi's
+own repo doesn't include the actual driver binaries its `embedder` build
+step needs to bake in (`third_party/libwdi/NOTICE.txt` has the full story)
+-- the WDK redistributable path was skipped entirely (WinUSB isn't used
+here), and the libusbK binaries were sourced from this machine's own
+Windows Driver Store (`C:\Windows\System32\DriverStore\FileRepository\
+libusbk_generic_device.inf_amd64_*\`), left there by this project's own
+earlier Zadig testing -- not downloaded fresh, not built from scratch.
+Vendored as `third_party/libusbk-redist/`. Building libwdi itself needed
+several real fixes to its upstream MSVC project (documented in
+`third_party/libwdi/NOTICE.txt`): dropping the ARM64 helper (no toolset
+installed, and upstream's project reference was missing
+`ReferenceOutputAssembly=false`, so its build failure blocked the whole
+static-lib target even though nothing needs its output), a broken
+pre-build step (`embedder embedded.h` invoked as a bare command name
+instead of a path, failing with exit 9009), and keeping `WDF_VER` defined
+(needed at runtime for the generated INF's KMDF-version fields) even
+though the WdfCoInstaller redistributable itself isn't embedded -- KMDF
+1.11 has been inbox on Windows 10 1607+, and this project already
+requires Windows 11-era Media Foundation APIs elsewhere.
+
+**The helper (`windows/usbdriver/main.cpp`) does two things in one
+elevated pass, matching the two-device-timing problem this document
+already identified:**
+
+1. **Installs for the phone's currently-present, normal-mode device**
+   (`wdi_create_list` to find it by VID/PID, refuse if `is_composite`
+   [the guard against ever touching a debugging-on/composite device --
+   see below], `wdi_prepare_driver` + `wdi_install_driver`, libusbK).
+2. **Pre-stages all six standardized AOA accessory-mode PIDs**
+   (`0x2D00`-`0x2D05`, always under Google's VID `0x18D1` regardless of
+   the phone's own normal-mode VID) via `wdi_prepare_driver` (one call per
+   PID -- hand-editing one INF's device list would invalidate its
+   per-package catalog signature) + `SetupCopyOEMInfW` to stage into the
+   driver store without a device present. Confirmed this second half is
+   not optional: the first live test (install-only, no pre-staging) sent
+   a real, successful AOA handshake -- `AOA protocol version: 2`, the
+   phone genuinely switched into accessory mode (`PID_2D00`) -- but
+   Windows then showed the re-enumerated device in `CM_PROB_FAILED_INSTALL`
+   (Problem Code 28), since no driver existed for a hardware ID that
+   didn't exist a moment earlier. After adding the pre-stage step, the
+   same test showed `Status: Started`, `Driver Name: oem135.inf`, no
+   problem state, on the very first re-enumeration.
+
+**Composite-device guard, the one thing this must never get wrong:** a
+device with active ADB/MTP sub-interfaces (`is_composite == TRUE`, i.e.
+USB debugging is on) is refused outright, exit code 11. Installing
+libusbK against a composite parent replaces the whole `usbccgp.sys`
+composite driver stack, which is exactly the "Zadig broke my adb" failure
+class this project specifically set out to avoid causing for users.
+Verified live: this Note 8 with debugging on enumerates with a real ADB
+sub-interface node (`is_composite` would be true); with debugging off
+(the only state this helper is meant to run in) it's a single
+non-composite MTP device, matching the same topology already documented
+for the Redmi Note 7 above.
+
+**Verified live, full chain, one command, one UAC prompt:** Note 8,
+debugging off, File Transfer mode -> `phonecam-usbdriver.exe --install
+--vid 18D1 --pid <normal-mode PID>` (elevated) -> `pnputil` confirms
+`Class Name: libusbk devices`, `Driver Name: oem129.inf` on the
+normal-mode device -> `aoa_probe --handshake` succeeds, phone
+re-enumerates as `18D1:2D00` with `Status: Started` (not a Problem state)
+-> phone auto-launches PhoneCam via `accessory_filter.xml`'s intent match
+and shows **"ON AIR"** with zero manual taps -> `phonecam-host.exe --aoa`
+logs `AoaVideoTransport: connected` and `MFH264Decoder: output negotiated
+1920x1080` -> `ffmpeg -f dshow -i "video=PhoneCam (Windows Virtual
+Camera)"` captures real frames (dark-scene content, matching the phone's
+physical surroundings at test time -- confirmed genuine via per-frame
+`signalstats` luma variance, not a flat/corrupted image) all the way
+through the vcam. This is the same proof shape every other transport
+milestone in this document uses, now satisfied for AOA with no Zadig step
+anywhere in the chain.
+
+**Deliberately not built yet:** the host-side UX around this helper
+(tray balloon offering setup, the consent dialog, `ShellExecuteExW`
+elevation wiring, decline/remember state) and the `--revert-all` undo
+path -- the plan's Phase 2 design for these still stands, this pass
+proved the mechanism (`phonecam-usbdriver.exe` itself) works and is
+sound to build the UX around. Also not yet done: wiring this into
+`windows/installer/PhoneCam.iss` and testing on a phone this specific
+dev machine has never touched (the Note 7 remains the right device for
+that, once the composite-guard and pre-staging above are exercised
+against it too).
 
 **`adb` conflicts with `libusb` over USB, but not over Wi-Fi.** `adb`
 holding the phone's ADB interface open (as soon as its server sees the

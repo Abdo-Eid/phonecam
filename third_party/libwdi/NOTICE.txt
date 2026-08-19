@@ -1,0 +1,49 @@
+libwdi -- vendored static library (Windows driver installation)
+=================================================================
+
+Source: https://github.com/pbatard/libwdi (commit at the time of this build:
+see `git log -1` in the upstream repo history around 2026-08; built from a
+shallow clone, exact commit not pinned here -- see "Rebuilding" below).
+
+License: LGPL-2.1-or-later (COPYING-LGPL, alongside this file). libwdi is
+used here as a linked static library, unmodified in its licensing terms;
+this project (GPL-3.0-or-later) links against it, which is permitted under
+LGPL's linking exception.
+
+What's vendored: `include/libwdi.h` + `lib/libwdi.lib` (x64, Release,
+/MT static CRT to match this project's Release runtime setting). No
+source is committed here -- only the library, matching this repo's existing
+`third_party/libusb` vendoring pattern.
+
+Build customizations made for this project (all x64-only, no WDK required):
+- `msvc/config.h`: WinUSB embedding (WDK_DIR) and libusb0 embedding
+  (LIBUSB0_DIR) left undefined -- this project only ever installs libusbK,
+  never WinUSB or plain libusb0. OPT_M32/OPT_ARM disabled (x64 only, matches
+  windows/installer/PhoneCam.iss's ArchitecturesAllowed=x64compatible).
+  WDF_VER kept at 1011 (KMDF 1.11) -- used at runtime to fill the generated
+  INF's KMDF-version fields even with no WdfCoInstaller redistributable
+  embedded, since KMDF 1.11 has been inbox on Windows 10 1607+ and this
+  project already requires Windows 11-era Media Foundation APIs elsewhere.
+- `libwdi/embedder_files.h`: dropped the LIBUSBK_DIR\sys\amd64\WdfCoInstaller
+  entry for the same inbox-KMDF reason above.
+- `libwdi/.msvc/libwdi_static.vcxproj`: removed the `installer_arm64.vcxproj`
+  ProjectReference (this project doesn't ship ARM64, and the ARM64 v143
+  build tools aren't installed on the dev machine this was built on; unlike
+  the x86/x64 references, upstream's arm64 one was missing
+  `ReferenceOutputAssembly=false`, which made its build failure block this
+  project even though nothing here needs its output). Also fixed a
+  pre-existing upstream PreBuildEvent bug where `embedder embedded.h` was
+  invoked as a bare command name instead of a path, which failed to resolve
+  on this machine (exit 9009) -- changed to
+  `"$(ProjectDir)\..\embedder.exe" embedded.h`.
+
+Driver binaries embedded (libusbK.sys/.dll, libusb0.dll -- the actual
+driver payload libwdi bundles and installs): sourced from
+`third_party/libusbk-redist/` in this repo, NOT downloaded fresh -- see
+that directory's own NOTICE.txt for where those came from.
+
+Rebuilding: clone https://github.com/pbatard/libwdi, apply the four
+customizations above, ensure `third_party/libusbk-redist/` is populated,
+then build `libwdi/.msvc/libwdi_static.vcxproj` (or the `libwdi (static)`
+target in `libwdi.sln`) for Release|x64 via MSBuild. Copy the resulting
+`libwdi.lib` and `libwdi/libwdi.h` here.

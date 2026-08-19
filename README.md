@@ -33,7 +33,7 @@ The phone captures and hardware-encodes video, streams it over USB, and a Window
 Two USB transports exist side by side, not one replacing the other:
 
 - **ADB** (the default, fully proven path) — needs Developer Options → USB debugging on, but works reliably today with zero extra setup.
-- **AOA** (Android Open Accessory) — the phone streams with USB debugging *off*, just a one-time "allow accessory" tap. Proven working end-to-end on the reference device, but currently needs a one-time manual driver step ([Zadig](https://zadig.akeo.ie/)) on the PC first — see [Status](#status) below for why that's not yet automatic.
+- **AOA** (Android Open Accessory) — the phone streams with USB debugging *off*, just a one-time "allow accessory" tap. Proven working end-to-end on the reference device. The one-time Windows-side driver step is now handled automatically (one admin prompt, no Zadig) — see [Status](#status) below.
 
 Full design and phased roadmap: [`docs/architecture.md`](docs/architecture.md).
 
@@ -46,11 +46,10 @@ Not yet a finished product — actively developed, most of the core pipeline wor
 - Live camera controls from the PC (zoom, exposure, focus incl. tap-to-focus, torch, lens switch, bitrate) with capability-driven UI (never shows a control the phone doesn't actually support).
 - Adaptive bitrate, thermal-aware, with live stats telemetry.
 - Reconnect/robustness: survives USB replug and the phone backgrounding without restarting either side.
-- AOA transport (no USB debugging needed): proven end-to-end on both Android and Windows, including through the full virtual-camera pipeline — but only after a manual one-time Windows driver step (Zadig) on the PC. Auto-starts on accessory attach, no Start-button tap needed.
+- AOA transport (no USB debugging needed): proven end-to-end on both Android and Windows, including through the full virtual-camera pipeline. Auto-starts on accessory attach, no Start-button tap needed.
+- **The Windows driver step is now automatic — no Zadig, ever.** A small helper (`phonecam-usbdriver.exe`, built on a vendored `libwdi`) installs the needed driver behind a single Windows admin prompt, then pre-stages the driver for the phone's post-handshake re-enumeration too, so the whole thing needs exactly one prompt, not one per step. Verified live end to end on the reference device with USB debugging off. It also refuses to run at all if it detects USB debugging is on (protects the working adb path from ever being disturbed).
 
-**Known open problem, not yet solved:** getting that Windows driver step to happen automatically, silently, at install time, for an unknown phone the installer has never seen before. Investigated this directly — see `docs/architecture.md`'s driver-auto-install section for what was tried and where it's currently blocked. Until this is solved, AOA is a working feature for developers/testers, not yet a smooth end-user path.
-
-**Not built yet:** the installer itself (registers the vcam, bundles what's needed, one UAC prompt), the control channel over AOA (controls currently still require USB debugging even when video streams over AOA), and synced audio.
+**Not built yet:** the host-side UX around that helper (a tray prompt offering setup, and a one-click "remove USB driver" undo — installing it does mean the phone's file-transfer/MTP access is unavailable until reverted, same tradeoff Zadig always had), the installer itself (registers the vcam, bundles what's needed), the control channel over AOA (controls currently still require USB debugging even when video streams over AOA), and synced audio.
 
 See [`docs/architecture.md`](docs/architecture.md) for the full phase-by-phase history, including real bugs found and fixed along the way.
 

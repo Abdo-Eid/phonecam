@@ -14,6 +14,12 @@ Release/
 *.dll
 !third_party/**/*.lib
 !third_party/**/*.dll
+!third_party/**/*.sys
+# third_party/libusbk-redist/dll/x86/ is a real vendored directory (32-bit
+# DLLs libwdi's embedder requires even in an x64-only build), not a stray
+# build-output x86/ folder -- the blanket x86/ ignore above would otherwise
+# swallow it entirely, before the *.dll negation above even gets a chance.
+!third_party/**/x86/
 .vs/
 CMakeFiles/
 CMakeCache.txt
