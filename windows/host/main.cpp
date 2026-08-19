@@ -20,6 +20,7 @@
 #include "log/Log.h"
 #include "transport/AdbTransport.h"
 #include "transport/AoaTransport.h"
+#include "transport/NetTransport.h"
 #include "tray/TrayIcon.h"
 #include "vcam_ctl/VCamControl.h"
 
@@ -403,24 +404,54 @@ int wmain(int argc, wchar_t* argv[]) {
     // comment for why).
     const bool forceAoa = argc > 1 && std::wstring(argv[1]) == L"--aoa";
     const bool forceAdb = argc > 1 && std::wstring(argv[1]) == L"--adb";
-    // Phase 1: with no explicit flag, auto-detect -- prefer adb when a
-    // debugging-enabled phone is actually present (the proven, no-extra-
-    // setup path), fall back to AOA otherwise (which needs the driver from
-    // windows/usbdriver/ to have been set up; if it hasn't, AoaVideoTransport
-    // ::Connect() just fails and retries, same as adb failing to find a
-    // phone streaming -- see LiveVideoBridge::Run()'s existing backoff).
-    const bool useAoa = forceAoa || (!forceAdb && !useTestPattern && !DetectAdbDevicePresent());
-    if (!forceAoa && !forceAdb && !useTestPattern) {
-        phonecam::log::Info(useAoa ? "No debugging-enabled phone detected -- using AOA"
-                                    : "Debugging-enabled phone detected -- using adb");
+    // Phase 8: --net [host]. With no host, the tethered phone is discovered as the RNDIS
+    // adapter's gateway; with one, it targets that address directly (Wi-Fi, or bypassing
+    // discovery). See transport/NetTransport.h.
+    const bool forceNet = argc > 1 && std::wstring(argv[1]) == L"--net";
+    std::string netHostOverride;
+    if (forceNet && argc > 2) {
+        // A host address here is an IPv4 dotted quad -- ASCII by definition -- so a plain
+        // per-character narrowing is correct rather than lossy. Written explicitly instead of
+        // string::assign(begin, end) purely so it doesn't trip /W4's narrowing warning.
+        for (const wchar_t* p = argv[2]; *p; ++p) {
+            netHostOverride.push_back(static_cast<char>(*p & 0x7F));
+        }
+    }
+
+    // Phase 8: auto-detect now prefers the network path above everything else when a
+    // USB-tethered phone is actually present. It's strictly the best of the three -- USB
+    // latency (3-5ms measured), Windows' own inbox RNDIS driver so nothing to install and no
+    // UAC, nothing displaced (unlike AOA, which must replace the MTP driver), and it's the only
+    // no-debugging path that carries the *control* channel too, not just video.
+    std::string netHost = netHostOverride;
+    if (!forceAoa && !forceAdb && !useTestPattern && netHost.empty()) {
+        netHost = phonecam::transport::DiscoverTetheredPhoneAddress();
+    }
+    const bool useNet = forceNet || (!forceAoa && !forceAdb && !useTestPattern && !netHost.empty());
+
+    // Phase 1: with no explicit flag and no tethered phone, fall back to preferring adb when a
+    // debugging-enabled phone is present (the proven, no-extra-setup path), then AOA (which
+    // needs the driver from windows/usbdriver/ to have been set up; if it hasn't,
+    // AoaVideoTransport::Connect() just fails and retries, same as adb failing to find a phone
+    // streaming -- see LiveVideoBridge::Run()'s existing backoff).
+    const bool useAoa = forceAoa || (!forceAdb && !useNet && !useTestPattern && !DetectAdbDevicePresent());
+    if (!forceAoa && !forceAdb && !forceNet && !useTestPattern) {
+        if (useNet) {
+            phonecam::log::Info("USB-tethered phone detected at " + netHost + " -- using the network transport");
+        } else {
+            phonecam::log::Info(useAoa ? "No tethered or debugging-enabled phone detected -- using AOA"
+                                        : "Debugging-enabled phone detected -- using adb");
+        }
     }
 
     phonecam::bridge::TestPatternProducer producer;
     phonecam::bridge::LiveVideoBridge bridge(
-        useAoa ? std::unique_ptr<phonecam::transport::VideoTransport>(
-                     std::make_unique<phonecam::transport::AoaVideoTransport>())
-               : std::unique_ptr<phonecam::transport::VideoTransport>(
-                     std::make_unique<phonecam::transport::AdbVideoTransport>()));
+        useNet ? std::unique_ptr<phonecam::transport::VideoTransport>(
+                     std::make_unique<phonecam::transport::NetVideoTransport>(netHostOverride))
+        : useAoa ? std::unique_ptr<phonecam::transport::VideoTransport>(
+                       std::make_unique<phonecam::transport::AoaVideoTransport>())
+                 : std::unique_ptr<phonecam::transport::VideoTransport>(
+                       std::make_unique<phonecam::transport::AdbVideoTransport>()));
     if (useTestPattern) {
         if (!producer.Start(1280, 960, 30)) {
             phonecam::log::Error("TestPatternProducer failed to start");
@@ -459,7 +490,19 @@ int wmain(int argc, wchar_t* argv[]) {
     // whole new adb.exe process per attempt) launched many times a second.
     std::thread controlSuperviseThread([&]() {
         while (controlRunning.load()) {
-            if (controlChannel.Connect()) {
+            // Phase 8: on the network transport the control channel goes straight to the phone,
+            // no adb involved. Rediscovered per attempt (not captured once) so a replug that
+            // brings the RNDIS link back at a different address still reconnects. Empty host on
+            // every other transport == the unchanged adb-forward path.
+            const std::string controlHost =
+                useNet ? (netHostOverride.empty() ? phonecam::transport::DiscoverTetheredPhoneAddress()
+                                                  : netHostOverride)
+                       : std::string{};
+            if (useNet && controlHost.empty()) {
+                for (int waitedMs = 0; waitedMs < 2000 && controlRunning.load(); waitedMs += 200) Sleep(200);
+                continue;
+            }
+            if (controlChannel.Connect(27184, controlHost)) {
                 controlConnected.store(true);
                 // Every (re)connect implies the video side may also just have
                 // reconnected onto a fresh encoder session (new SPS/PPS, no

@@ -121,7 +121,9 @@ public:
     ControlChannel(const ControlChannel&) = delete;
     ControlChannel& operator=(const ControlChannel&) = delete;
 
-    bool Connect(uint16_t port = 27184);
+    // host empty == the adb-forward path (unchanged); host set == connect straight to that
+    // address, no adb (Phase 8: USB tethering / Wi-Fi). See ControlTransport::Connect.
+    bool Connect(uint16_t port = 27184, const std::string& host = {});
     void Disconnect();
 
     // Blocks until disconnect; invokes onMessage for each decoded envelope.

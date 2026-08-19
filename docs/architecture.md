@@ -995,6 +995,15 @@ phone-PC-over-USB problem ([Genymobile/gnirehtet](https://github.com/Genymobile/
 deliberately routes over adb instead for that reason. Would also mean
 building a second full transport, not a small substitution. Not pursued.
 
+> **Superseded in Phase 8 -- this rejection was wrong, and both halves of its
+> reasoning failed.** "A second full transport" stopped being true the moment
+> the AOA work added `CaptureController.start(videoSink:)` and the
+> `VideoTransport` interface: a TCP transport turned out to be the *smallest*
+> of the three, not an extra one. And the carrier-gating concern was never
+> actually tested against the reference device -- when finally checked it took
+> thirty seconds, and the toggle was simply there. See "Phase 8" at the end of
+> this document.
+
 **Product-shipping note, decided but not yet implemented:** end users
 must never be asked to run Zadig themselves. The real fix belongs in the
 Windows installer -- silently installing a `libwdi`-driven driver binding
@@ -1057,7 +1066,8 @@ fix** (web research + advisor, this session):
   existing project solving nearly this exact phone-PC-over-USB problem --
   deliberately routes over adb instead of raw tethering for that reason.
   Rejected: would also mean building a second full transport, not a
-  small substitution.
+  small substitution. **(Superseded in Phase 8 -- this became the primary
+  transport. See the note above and the Phase 8 section.)**
 
 **Then hit a real, unresolved blocker trying the libwdi/Zadig fix
 itself on the clean Note 7.** Unlike the Note 8 (which exposes several
@@ -1885,6 +1895,15 @@ stop investing in this path for now.** AOA users get video (+ rotation/mirror/re
 fully PC-side) with camera-content controls left at their auto defaults for the session; anyone
 who needs live zoom/exposure/torch/focus/lens control today should use the adb path instead.
 
+> **Resolved in Phase 8, by a route neither option above anticipated.** Both proposed fixes
+> assumed AOA was the transport that had to be worked around -- either by extending it (an AOA
+> control channel) or by working around its absence (a phone-side controls screen). Neither was
+> built, and neither is needed: over USB tethering the control channel is *just TCP to the phone*,
+> exactly like the video channel, so all five controls came back for free with no protocol work at
+> all. Verified live: `Capabilities: device=Redmi Note 8 android=11 lenses=2` arriving with USB
+> debugging off, and all seven tray controls populated. The gap this section describes only ever
+> existed because AOA was assumed to be the only no-debugging path.
+
 **Default rotation is 90 clockwise, not 0** -- the reference mounting for this whole project is
 the phone held vertically, and a landscape sensor frame needs exactly this rotation to look
 normal; 0 would come out sideways for the common case. Applied automatically at startup
@@ -1924,4 +1943,107 @@ and skipping straight to `OpenAccessoryInterface()`.
 consecutive-timeout counter that gives up and returns after some threshold, rather than looping
 `LIBUSB_ERROR_TIMEOUT` forever) so the existing reconnect loop can recover without a manual
 process restart. Real, reproducible, but out of scope for tonight -- noted here rather than
-silently worked around with no trace.
+silently worked around with no trace. **(Phase 8 makes this much less urgent: AOA is no longer
+the path a normal user hits. Still a real bug in that path.)**
+
+## Phase 8: USB tethering as the primary transport -- no driver, no debugging, controls included
+
+The whole AOA driver apparatus exists to solve one problem: **AOA needs raw USB control transfers**
+(`GET_PROTOCOL`, `SEND_STRING`, `ACCESSORY_START`), and no Windows inbox driver exposes raw USB
+access. So one has to be installed, which displaces the MTP driver, which is where the entire
+libwdi / libusbK / self-signed-cert / UAC / revert saga comes from -- plus the AOA reconnect bug
+above, plus the fact that AOA carries video only, leaving all five camera controls unreachable.
+
+USB tethering removes the premise instead of solving the problem. Enabling it makes the phone
+present a **network interface**; Windows binds its own inbox RNDIS driver automatically; and the
+transport reduces to a plain TCP socket. No raw USB access anywhere in the design, so there is
+nothing to install, nothing to elevate, and nothing displaced.
+
+### Why the previous rejection was wrong
+
+Both halves of the earlier reasoning (see the two superseded notes above) failed on contact:
+
+- **"A second full transport"** -- untrue by the time it was re-examined. The AOA work had already
+  added the two seams a TCP transport needs: `CaptureController.start(videoSink: OutputStream?)`
+  on the phone side, and the `VideoTransport` interface (three virtual methods) on the host side.
+  `AdbVideoTransport` was *already* a TCP client; the delta is "drop `RunAdbForward`, make the host
+  configurable." It is the smallest of the three transports, not an extra one.
+- **"Carrier/SIM-gated on many devices"** -- possibly true in general, but never actually checked
+  on the reference device. Checking took thirty seconds and the toggle was simply there. The
+  gnirehtet precedent was also being misread: entitlement checks gate the tethering *toggle*, not
+  the traffic over it, so "we don't need internet" would not have bought an exemption -- but that
+  was moot, because the toggle wasn't gated at all.
+
+The general lesson worth keeping: an option was rejected on two arguments, one of which silently
+expired as the codebase changed and the other of which was never tested. Neither was revisited for
+several phases.
+
+### Design
+
+**Both channels are TCP, so both work.** This is the part that matters most and was not anticipated:
+`ControlTransport` only ever used `adb forward` to obtain a *route* to the phone's abstract socket
+-- the channel itself was always plain TCP. Point it at the phone's tethered address and the
+control channel works with USB debugging off, which AOA could never do. All five camera controls
+(lens/zoom/exposure/torch/focus) came back with zero protocol work.
+
+**The phone listens on both socket types simultaneously.** `VideoSocketServer` and
+`ControlSocketServer` now bind their existing `LocalServerSocket` (the adb path) *and* a
+`java.net.ServerSocket` (the TCP path), and `accept()` alternates polling both, returning whichever
+connects first. This is deliberate: the user never picks a transport mode, and the app needs no
+toggle in its UI. Each bind is best-effort -- failing one still leaves the other serving, and only
+failing both is fatal. Requires the `INTERNET` permission (normal, not dangerous; granted at
+install, no runtime prompt) since Android gates `ServerSocket` binding behind it.
+
+**Discovery is deterministic, not mDNS.** Over tethering the phone *is* the PC's default gateway on
+that link, so `DiscoverTetheredPhoneAddress()` is "enumerate adapters via `GetAdaptersAddresses`,
+find the one whose description contains NDIS or NCM, read its gateway." Matching on the driver
+description rather than VID/PID is intentional -- the whole point of a standard class driver is
+that it works across phone vendors. An explicit host can still be passed (`--net <host>`) to target
+Wi-Fi or bypass discovery.
+
+**Discovery re-runs on every connect attempt, never cached.** This turned out to be load-bearing,
+not defensive: the phone was observed at **three different addresses in one session**
+(192.168.15.197 -> 192.168.59.139 -> 192.168.36.217) because every USB gadget reconfiguration hands
+out a fresh subnet. A cached address would break on essentially every replug.
+
+**Auto-detect order is now network -> adb -> AOA.** Network first because it is strictly better than
+both: USB latency, no driver, nothing displaced, and control included. AOA stays as the last-resort
+fallback for a device where tethering *is* carrier-gated, since it also needs no Developer Options.
+
+### Verified live, end to end, USB debugging off
+
+- Windows bound "Remote NDIS Compatible Device" automatically -- no install, no UAC, no prompt.
+- Phone reachable at **2-5ms** round trip. USB latency, not Wi-Fi latency.
+- `USB-tethered phone detected at <addr> -- using the network transport` chosen with no flags, in
+  preference to adb even while debugging happened to still be on.
+- Video and control both connected; `Capabilities: device=Redmi Note 8 android=11 lenses=2`.
+- `adb forward --list` **empty**, proving the control channel went direct rather than via adb.
+- 1920x1080 and 1280x720 both negotiated and pulled as real frames; default 90 rotation applied.
+- All seven tray controls populated; status line `streaming (video + control)`.
+- Driver state confirmed clean throughout: zero libusbK devices, zero libwdi certificates, and no
+  MTP/storage device at all -- tethering *replaces* the USB function, so the "File Transfer / No
+  data transfer" choice doesn't even exist while it's on. Toggling tethering off restores
+  everything instantly, with no admin step (contrast the AOA driver, which persisted across replug
+  until an explicit elevated revert).
+- **Recovered unattended from every disruption**, including USB debugging being toggled off
+  mid-session and the phone's address changing underneath it -- both channels reconnected with no
+  process restart. Directly contrasts the AOA path, which spent the same session getting silently
+  wedged and needing manual restarts.
+
+### What this makes redundant
+
+`phonecam-usbdriver.exe`, libwdi, the vendored libusbK redistributables, the self-signed
+certificate handling, the elevation flow, and the whole `--revert-all` mechanism are all dead weight
+in the path a normal user now takes. Deleting them would be a large simplification. Deliberately
+*not* done yet: AOA remains the fallback for carrier-gated devices, and removing a working
+fallback on the strength of one device's behavior would be premature.
+
+### Still true / still open
+
+- The DirectShow portrait-corruption bug (Phase 3) is unaffected -- it's downstream of the
+  transport entirely, in Windows' own `VCAMDS` bridge.
+- Tethering must be re-enabled per session (it does not survive unplug), same order of effort as
+  AOA's accessory prompt or picking File Transfer. The phone app auto-starts capture on open, so
+  the user's whole flow is: enable tethering, open the app.
+- Wi-Fi falls out of this nearly free (`--net <host>` already targets an arbitrary address); it
+  needs a discovery story and would trade USB latency for Wi-Fi jitter and battery drain. Not built.

@@ -174,7 +174,9 @@ struct ControlChannel::Impl {
 ControlChannel::ControlChannel() : impl_(std::make_unique<Impl>()) {}
 ControlChannel::~ControlChannel() = default;
 
-bool ControlChannel::Connect(uint16_t port) { return impl_->transport.Connect(port); }
+bool ControlChannel::Connect(uint16_t port, const std::string& host) {
+    return impl_->transport.Connect(port, host);
+}
 void ControlChannel::Disconnect() { impl_->transport.Disconnect(); }
 
 void ControlChannel::RunReceiveLoop(const ControlMessageHandler& onMessage) {

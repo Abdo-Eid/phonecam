@@ -12,6 +12,13 @@
          to make optional rather than assumed). -->
     <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
 
+    <!-- Phase 8: the video/control sockets also listen on TCP, so a PC reaches them over USB
+         tethering (RNDIS) or Wi-Fi with no adb and no driver install. Android gates ServerSocket
+         binding behind INTERNET, a normal (non-dangerous) permission granted at install with no
+         runtime prompt. Nothing here ever talks to the internet; the listener is local-link
+         only. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Phase 5: CaptureService keeps capture running while the app is backgrounded or the
          screen is off, which a plain Activity-owned controller can't survive. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

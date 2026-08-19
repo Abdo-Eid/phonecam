@@ -43,6 +43,8 @@ add_executable(phonecam-host WIN32
     transport/AdbTransport.cpp
     transport/AoaTransport.h
     transport/AoaTransport.cpp
+    transport/NetTransport.h
+    transport/NetTransport.cpp
     control/ControlTransport.h
     control/ControlTransport.cpp
     control/ControlChannel.h

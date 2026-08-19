@@ -87,9 +87,11 @@ ControlTransport::~ControlTransport() {
     }
 }
 
-bool ControlTransport::Connect(uint16_t port) {
+bool ControlTransport::Connect(uint16_t port, const std::string& host) {
     impl_->cancelled.store(false);
-    if (!RunAdbForward(port)) {
+    // Direct-host mode (tethering/Wi-Fi) needs no adb at all -- that call is purely how the
+    // localhost path gets a route to the phone's abstract socket in the first place.
+    if (host.empty() && !RunAdbForward(port)) {
         return false;
     }
     if (impl_->cancelled.load()) return false;
@@ -103,20 +105,34 @@ bool ControlTransport::Connect(uint16_t port) {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (inet_pton(AF_INET, host.empty() ? "127.0.0.1" : host.c_str(), &addr.sin_addr) != 1) {
+        phonecam::log::Error("ControlTransport: bad host address");
+        closesocket(s);
+        return false;
+    }
 
+    // Retry only on the adb path: there, `adb forward` can return before the phone-side listener
+    // is accepting. A direct connect that's refused just means the phone app isn't listening yet,
+    // which the caller's own reconnect backoff already handles -- retrying here too would hold
+    // this call for 5s per attempt and make Disconnect() sluggish.
+    const int maxAttempts = host.empty() ? 20 : 1;
     bool connected = false;
-    for (int attempt = 0; attempt < 20 && !impl_->cancelled.load(); ++attempt) {
+    for (int attempt = 0; attempt < maxAttempts && !impl_->cancelled.load(); ++attempt) {
         if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
             connected = true;
             break;
         }
-        Sleep(250);
+        if (attempt + 1 < maxAttempts) Sleep(250);
     }
     if (!connected) {
         closesocket(s);
         return false;
     }
+
+    // Control messages are small and latency-sensitive (a tray click should apply now, not when
+    // Nagle decides enough bytes have accumulated) -- matches the phone side's own tcpNoDelay.
+    BOOL noDelay = TRUE;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->cancelled.load()) {

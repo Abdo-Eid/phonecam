@@ -14,7 +14,7 @@ So PhoneCam plays that same architecture straight, and competes on what the paid
 
 - **All camera controls free** — exposure, focus (incl. tap-to-focus), zoom, torch, white balance, lens switch — driven live from the PC.
 - **Synced audio** over the same USB cable (native Android UVC webcam mode is video-only).
-- **A friendlier USB path** — Android Open Accessory (AOA) instead of forcing users through Developer Options → USB debugging.
+- **A genuinely zero-setup USB path** — USB tethering instead of forcing users through Developer Options → USB debugging *or* a driver install. Flip one toggle, open the app. Nothing is installed on Windows, nothing needs admin, and nothing on the phone is displaced.
 - **Genuinely low latency** — hardware H.264, zero-copy capture, low-latency decode; targeting sub-150ms glass-to-glass.
 - **No watermark, no paywall, no subscription.**
 
@@ -22,18 +22,21 @@ So PhoneCam plays that same architecture straight, and competes on what the paid
 
 ```
 Android app                     USB                  Windows host              Virtual camera
-Camera2 → MediaCodec   ──►  ADB-forward   ──►   Media Foundation    ──►   MFCreateVirtualCamera
-(H.264, zero-copy)          or AOA             H.264 decode              seen by ALL apps
+Camera2 → MediaCodec   ──►  USB tethering  ──►   Media Foundation    ──►   MFCreateVirtualCamera
+(H.264, zero-copy)          / ADB / AOA          H.264 decode              seen by ALL apps
      ▲                                                 │
      └──────────────── control channel (bidirectional) ┘
 ```
 
 The phone captures and hardware-encodes video, streams it over USB, and a Windows host process decodes it and feeds a registered [`MFCreateVirtualCamera`](https://learn.microsoft.com/en-us/windows/win32/api/mfvirtualcamera/) media source — which Windows' Frame Server serves to both Media Foundation apps (Chrome, Windows Camera, new Teams) and DirectShow apps (Zoom, classic OBS) at once. A bidirectional control channel carries camera commands (PC → phone) and capabilities/telemetry (phone → PC).
 
-Two USB transports exist side by side, not one replacing the other:
+Three USB transports exist side by side, auto-detected at startup in this order:
 
-- **ADB** (the default, fully proven path) — needs Developer Options → USB debugging on, but works reliably today with zero extra setup.
-- **AOA** (Android Open Accessory) — the phone streams with USB debugging *off*, just a one-time "allow accessory" tap. Proven working end-to-end on the reference device. The one-time Windows-side driver step is now handled automatically (one admin prompt, no Zadig) — see [Status](#status) below.
+- **USB tethering** (the default when available) — flip the phone's USB tethering toggle and the phone presents a network interface, which Windows binds with its own built-in driver. Both video *and* camera controls run over it, with no Developer Options, **no driver to install, and nothing else on the phone displaced**. Measured at 2-5ms round-trip: USB latency, not Wi-Fi latency. This is the path to use.
+- **ADB** — needs Developer Options → USB debugging on. The original, fully proven path; still the fallback when tethering isn't available but debugging is.
+- **AOA** (Android Open Accessory) — no Developer Options either, but it needs a Windows driver bound to the phone (handled automatically, one admin prompt, no Zadig) which makes file transfer unavailable until reverted, and it carries video only. Kept as the last resort for devices where the carrier gates USB tethering.
+
+Nothing about this is wireless — tethering is a USB cable carrying a network protocol, which is exactly why it keeps USB's latency while needing none of USB's driver machinery.
 
 Full design and phased roadmap: [`docs/architecture.md`](docs/architecture.md).
 
@@ -46,16 +49,18 @@ Not yet a finished product — actively developed, most of the core pipeline wor
 - Live camera controls from the PC (zoom, exposure, focus incl. tap-to-focus, torch, lens switch, bitrate) with capability-driven UI (never shows a control the phone doesn't actually support).
 - Adaptive bitrate, thermal-aware, with live stats telemetry.
 - Reconnect/robustness: survives USB replug and the phone backgrounding without restarting either side.
-- AOA transport (no USB debugging needed): proven end-to-end on both Android and Windows, including through the full virtual-camera pipeline. Auto-starts on accessory attach, no Start-button tap needed.
-- **No debugging, no Zadig, no manual anything.** `phonecam-host.exe` auto-detects whether a debugging-enabled phone is present and prefers it (the proven adb path); if not, it falls back to AOA. The Windows driver step AOA needs is one click in the tray icon's menu ("Set up USB driver for AOA...") behind a single Windows admin prompt — no Zadig, ever. A matching "Remove USB driver" item fully undoes it (installing it does mean the phone's file-transfer/MTP access is unavailable until reverted, same tradeoff Zadig always had — the undo is real and tested, not just implied). Verified live, start to finish: click the tray item, approve the prompt, and the already-running host picks up the newly-available driver on its own within a couple of seconds and starts streaming — no restart, no second click.
+- **USB tethering transport — the one to use.** No Developer Options, no driver install, no admin prompt, and nothing else on the phone displaced. Flip the phone's USB tethering toggle and open the app; that's the entire setup. Windows binds its own built-in RNDIS driver automatically, and the host discovers the phone deterministically (it's the tethered link's gateway — no IP to type, no pairing). Measured at 2-5ms round-trip. Verified live with USB debugging off, end to end: video *and* controls, 1080p and 720p, with `adb forward --list` empty proving nothing routed through adb.
+- **Camera controls work without USB debugging** for the first time, over that same tethered link — the control channel was always just TCP; it only ever used adb to get a route. All seven tray controls populate from the phone's real reported capabilities.
+- **Recovers unattended.** Observed following the phone across three different tethered addresses in one session (every USB reconfiguration hands out a new subnet) and surviving USB debugging being toggled off mid-stream — both channels reconnected with no restart, because discovery re-runs per attempt rather than caching.
+- AOA transport (also no USB debugging): proven end-to-end, kept as the fallback for devices where a carrier gates USB tethering. Its Windows driver step is one click in the tray behind a single admin prompt — no Zadig, ever — with a matching "Remove USB driver" that fully undoes it. Note the tradeoff tethering avoids entirely: binding that driver makes the phone's file transfer unavailable until reverted, and AOA carries video only, so camera controls don't work over it.
 
 - The virtual camera now genuinely advertises 4 resolutions (1920x1080, 1280x720, and true portrait 1080x1920/720x1280) — the consuming app picks one, same as any real UVC webcam. Confirmed via `ffmpeg -f dshow -list_options` and independently via a native Media Foundation probe.
 - Rotation/mirror (0°/90°/180°/270° + mirror), applied PC-side, live from the tray — defaults to 90° clockwise (the reference mounting is the phone held vertically; a landscape sensor frame needs that rotation to look normal). Verified live against the running virtual camera, including the default applying automatically with no tray interaction needed.
 - **Known platform limitation, not yet worked around:** the two portrait sizes render correctly in native Media Foundation apps (Chrome, Windows Camera, modern capture backends) but are corrupted by a confirmed bug in Windows' own DirectShow compatibility bridge (`VCAMDS`) — this affects DirectShow-based apps, which includes Zoom's classic Windows client and older/classic OBS. Landscape sizes are unaffected everywhere. See `docs/architecture.md`'s Phase 3 section for the full diagnosis.
-- Full tray controls: camera/lens switch, zoom, exposure, torch, focus mode, plus the rotation/mirror above and a read-only resolution display — all real submenus, not stubs. Lens/zoom/exposure/torch/focus only actually reach the phone over the adb control channel (unaffected by which video transport is active) — over AOA their submenus just don't appear at all, matching the "never show a control the phone doesn't support" rule.
-- **Known gap, paused on purpose:** on AOA, those five controls (lens/zoom/exposure/torch/focus) aren't reachable from either side — not the tray (blocked without the adb control channel) and, it turns out, not the phone app either (it has no UI for any of them, just Start/Cancel/Stop). The smallest real fix — a one-time controls screen in the phone app — is identified but not built; decided to stop investing in this path for now. If you need live control over these, use the adb path (debugging on); AOA gets video + rotation/mirror/resolution with camera settings left at their defaults for the session.
+- Full tray controls: camera/lens switch, zoom, exposure, torch, focus mode, plus the rotation/mirror above and a read-only resolution display — all real submenus, not stubs, populated from the phone's own reported capabilities (a control never appears unless the phone actually supports it). Resolution is display-only by design: the consuming app picks it, exactly like a real webcam, so you set it in OBS/Zoom/Chrome's own device settings.
+- Camera controls need either USB tethering or ADB — they don't work over AOA, which carries video only.
 
-**Not built yet:** a proactive nudge for first-time users (today the tray items are there to click, but nothing prompts you toward them automatically), the installer itself (registers the vcam, bundles what's needed — including the USB driver helper), and synced audio.
+**Not built yet:** a proactive nudge for first-time users (today the tray items are there to click, but nothing prompts you toward them automatically), the installer itself (registers the vcam, bundles what's needed — including the USB driver helper), Wi-Fi as a transport (the network transport already accepts an explicit address, but there's no discovery or UI for it), and synced audio.
 
 See [`docs/architecture.md`](docs/architecture.md) for the full phase-by-phase history, including real bugs found and fixed along the way.
 
