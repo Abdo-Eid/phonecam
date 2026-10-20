@@ -122,6 +122,11 @@ class ControlSocketServer(
           // Control messages are small and latency-sensitive (a tray click should apply now, not
           // whenever Nagle decides enough bytes have accumulated).
           socket.tcpNoDelay = true
+          // A read timeout, so a peer that connects and then says nothing cannot hold the
+          // session (and the phone's only control listener) forever. The control channel's
+          // receive loop treats the timeout as "nothing yet" and keeps waiting; the pairing
+          // handshake is what gives up on it.
+          socket.soTimeout = READ_TIMEOUT_MS
           tcpClient = socket
           lastAcceptedAddress = socket.inetAddress?.hostAddress
           Log.i(TAG, "$name: accepted over TCP from ${socket.inetAddress?.hostAddress}")
@@ -177,5 +182,8 @@ class ControlSocketServer(
     const val MAX_BIND_ATTEMPTS = 30
     const val BIND_RETRY_DELAY_MS = 100L
     const val POLL_TIMEOUT_MS = 200
+
+    // How long a read waits before giving up and letting the caller re-check its state.
+    const val READ_TIMEOUT_MS = 1000
   }
 }

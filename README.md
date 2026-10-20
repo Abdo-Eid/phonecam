@@ -36,7 +36,17 @@ Three USB transports exist side by side, auto-detected at startup in this order:
 - **ADB** — needs Developer Options → USB debugging on. The original, fully proven path; still the fallback when tethering isn't available but debugging is.
 - **AOA** (Android Open Accessory) — no Developer Options either, but it needs a Windows driver bound to the phone (handled automatically, one admin prompt, no Zadig) which makes file transfer unavailable until reverted, and it carries video only. Kept as the last resort for devices where the carrier gates USB tethering.
 
-A **wireless** transport also exists: `phonecam-host --rtp <phone-ip>` streams the camera as RTP/H.264 over UDP to the PC's port 27185, with the control channel over TCP to the same address. Put the phone on the same Wi-Fi (or on the PC's own hotspot) and no cable, driver, or Developer Options is involved. It is opt-in because the phone's address is typed on the command line for now — there's no discovery yet.
+A **wireless** transport also exists: `phonecam-host --rtp` finds the phone by itself (the phone answers a discovery probe), streams the camera as RTP/H.264 over UDP to the PC's port 27185, and keeps the control channel over TCP to the same address. Put the phone on the same Wi-Fi (or on the PC's own hotspot) and no cable, driver, or Developer Options is involved. `--wifi` does the same over the phone's framed TCP socket instead. Over a network the phone only talks to a PC that knows its pairing code, which the app displays.
+
+Measured on the reference phone (Redmi Note 8, Android 11), with the phone on the laptop's Windows Mobile Hotspot — one radio hop, not two:
+
+| Transport | Media latency (capture → decoded on the PC) |
+|---|---|
+| USB (adb) | 1–2 ms |
+| Wi-Fi, RTP over UDP | 2–4 ms |
+| Wi-Fi, framed TCP | 4–6 ms |
+
+That is the pipeline's cost, not what a viewer perceives: the display adds up to a frame interval (≈16 ms at 60 Hz) on top.
 
 Full design and phased roadmap: [`docs/architecture.md`](docs/architecture.md).
 
@@ -60,7 +70,7 @@ Not yet a finished product — actively developed, most of the core pipeline wor
 - Full tray controls: camera/lens switch, zoom, exposure, torch, focus mode, plus the rotation/mirror above and a read-only resolution display — all real submenus, not stubs, populated from the phone's own reported capabilities (a control never appears unless the phone actually supports it). Resolution is display-only by design: the consuming app picks it, exactly like a real webcam, so you set it in OBS/Zoom/Chrome's own device settings.
 - Camera controls need either USB tethering or ADB — they don't work over AOA, which carries video only.
 
-**Not built yet:** a proactive nudge for first-time users (today the tray items are there to click, but nothing prompts you toward them automatically), discovery for the wireless transport (the phone's address is typed on the command line for now), latency measurement for it, authentication for it (a wireless camera stream is currently open to anyone on the link), and synced audio.
+**Not built yet:** a proactive nudge for first-time users (today the tray items are there to click, but nothing prompts you toward them automatically), hotspot setup automation (the PC can use one, but it doesn't create it), and synced audio.
 
 See [`docs/architecture.md`](docs/architecture.md) for the full phase-by-phase history, including real bugs found and fixed along the way.
 

@@ -98,6 +98,21 @@ table LensChanged { camera_id: string; }
 table OrientationChanged { degrees: uint16; }        // 0/90/180/270, sensor-relative
 table Error { code: uint16; message: string; }
 
+// ---- session authentication ----
+
+// The phone challenges, the PC proves it knows the shared pairing code. A
+// challenge/response (rather than sending the code) keeps the code off the
+// wire, so someone watching the traffic can't harvest it.
+//
+// Only network sessions are challenged: a session over the adb-forwarded
+// abstract socket is a local USB link, which the phone already trusts, and
+// requiring a code there would be friction for no gain.
+table AuthChallenge { nonce: string; }
+table AuthResponse {
+  nonce: string;         // the PC's own nonce, so both sides contribute entropy
+  hmac: string;          // hex HMAC-SHA256(code, phone_nonce || pc_nonce)
+}
+
 // ---- envelope ----
 
 union ControlPayload {
@@ -112,8 +127,12 @@ union ControlPayload {
 
   // phone -> PC
   phonecam.wire.CapabilityDescriptor,
+  AuthChallenge,
   Ack, CurrentSettings, Stats,
   AfStateChanged, AeStateChanged, LensChanged, OrientationChanged, Error,
+
+  // PC -> phone
+  AuthResponse,
 }
 
 // Every control-channel message on the wire is one length-prefixed ControlEnvelope

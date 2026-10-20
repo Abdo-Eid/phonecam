@@ -45,6 +45,8 @@ add_executable(phonecam-host WIN32
     transport/AoaTransport.cpp
     transport/NetTransport.h
     transport/NetTransport.cpp
+    transport/Discovery.h
+    transport/Discovery.cpp
     transport/RtpVideoTransport.h
     transport/RtpVideoTransport.cpp
     control/ControlTransport.h
@@ -70,7 +72,7 @@ target_include_directories(phonecam-host PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/flatbuffers/include
     ${LIBUSB_DIR}/include
 )
-target_link_libraries(phonecam-host PRIVATE phonecam_common mfplat mfuuid ole32 ws2_32 shell32
+target_link_libraries(phonecam-host PRIVATE phonecam_common mfplat mfuuid ole32 ws2_32 shell32 bcrypt
     ${LIBUSB_DIR}/lib/libusb-1.0.lib)
 target_compile_features(phonecam-host PRIVATE cxx_std_20)
 target_link_options(phonecam-host PRIVATE "/ENTRY:wmainCRTStartup")

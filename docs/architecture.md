@@ -2145,3 +2145,131 @@ written yet -- the claim "it's faster than USB" is *not* verified, only
 "it works"), and any authentication. That last one is the important caveat:
 a wireless camera stream is currently unauthenticated, so anyone on the link
 can watch the feed and drive the camera controls.
+
+## Discovery, measured latency, and pairing: finishing the wireless path
+
+The wireless transport above needed three things before it could be called usable:
+a way to *find* the phone, a way to *measure* what it costs, and a way to keep
+strangers out.
+
+### Discovery: the PC asks, the phone answers
+
+Making the user type the phone's IP was the one thing that made the wireless
+path feel like a developer tool. Now the PC broadcasts a probe and the phone
+answers with its address, ports and protocol version.
+
+It is request/response rather than a beacon, deliberately: the PC asks only when
+it needs an address, so a phone that isn't being used costs nothing on the
+network, and the phone doesn't have to be advertising its address continuously.
+
+**One real bug, worth remembering because it is so easy to write:** the per-adapter
+broadcast address was computed with `ntohl()` applied to the *mask* as well as to
+the address. The mask is built from the prefix length in host order — byte-swapping
+it produced addresses like `255.168.1.45` instead of `192.168.1.255`, and every
+probe went nowhere. The symptom was "discovery silently finds nothing" while the
+phone was right there answering probes sent by hand.
+
+The phone's address is taken from the reply's source address rather than from the
+payload, so a phone cannot claim to be somewhere it isn't.
+
+### Latency: measured, not assumed
+
+`LiveVideoBridge` now measures the media latency: the time from a frame's capture
+timestamp (carried on the wire by every transport) to the moment the decoded frame
+reaches the ring. Reported as a **median over a recent window**, because a mean is
+dominated by the occasional keyframe or reconnect and says nothing about what the
+stream feels like.
+
+Two details made the first attempt produce nonsense, and both are general:
+
+- **The two clocks are different domains.** The phone counts microseconds from
+  its own boot; the PC counts from an arbitrary epoch. Subtracting them directly
+  gave either a negative number or a meaningless one. The measurement is therefore
+  taken *relative to a reference* established from the first frame: the constant
+  offset between the clocks cancels, and only the elapsed time is compared.
+- **The first frames are the pipeline warming up** (the decoder negotiating its
+  output format, the first keyframe being the expensive one), and the reference
+  frame itself measures as exactly zero by construction. The first ten frames
+  after the reference are skipped.
+
+Measured on the reference phone, with the phone on the laptop's Windows Mobile
+Hotspot (one radio hop, not two):
+
+| Transport | Median media latency |
+|---|---|
+| USB (adb) | 1–2 ms |
+| Wi-Fi, RTP over UDP | 2–4 ms |
+| Wi-Fi, framed TCP | 4–6 ms |
+
+This is the pipeline's cost — camera, encoder, transport, decode. The display adds
+up to a frame interval on top of it, and that is the consumer's business.
+
+### Pairing: the phone challenges, the PC proves
+
+Over a network, anyone on the link can reach the phone's control port. The phone
+now challenges with a fresh nonce and the PC answers with an HMAC over both
+nonces, keyed by the pairing code the app displays. The code never crosses the
+wire, and a recorded handshake cannot be replayed.
+
+**Only network sessions are challenged.** A session over the adb-forwarded
+abstract socket is the local USB link, which the phone already trusts; asking for
+a code there would be friction for no gain.
+
+**What this protects, and what it doesn't:** access. An unauthorized client can
+no longer connect, take the feed, or move the camera. The video stream itself is
+not encrypted by this, and doesn't need to be — the Wi-Fi link's own encryption
+(WPA2) already protects the traffic from anyone who is merely on the same network
+but not part of the link.
+
+### The pairing handshake: two ways to get HMAC wrong
+
+The PC's side of the handshake is BCrypt's HMAC-SHA256, and it took two attempts to
+get right — both of them produced *a* value, just not the right one, which is
+the worst kind of failure for a handshake (it looks like a wrong code, not a
+bug):
+
+1. **The provider name.** With `BCRYPT_ALG_HANDLE_HMAC_FLAG`, the provider is
+   the plain hash algorithm and the flag is what turns it into an HMAC
+   provider. Naming it `HMAC_SHA256` fails to open — and this SDK's `bcrypt.h`
+   doesn't even define that macro, which is a hint worth following rather than
+   working around.
+2. **Where the key goes.** The secret belongs in `BCryptCreateHash`'s key
+   parameter. Passing it to `BCryptHashData` instead (as the first "message")
+   makes the key part of the hashed data, which is not HMAC at all.
+
+Both were caught by adding `--test-auth`, which prints the HMAC the host would
+send so it can be compared against an independent implementation (.NET's
+`HMACSHA256`) without needing the phone in the loop. Worth keeping: it turns
+"the two sides disagree" into a one-command check.
+
+### The phone's camera needs the app to be allowed to open it
+
+A real limitation found while testing, and the reason the phone's service now
+becomes a camera foreground service as soon as the app opens rather than only
+while a capture is running:
+
+Android only lets an app open the camera while it is in the foreground, and a
+PC-driven session can arrive when the phone's screen is off — exactly when a
+webcam app has to keep working. The first version refused the camera with
+`CAMERA_DISABLED ... cannot open camera from background`. Promoting the service
+to a foreground camera service at app-open time fixes it: the session then starts
+whether or not the app is on screen.
+
+### The PC keeps asking
+
+The phone can refuse a session for reasons the PC never sees (the camera was
+taken by another app, the app was in the background at that moment). So the host
+re-asks every few seconds while the control channel is up but no frames are
+arriving, and the phone ignores a request for the mode it is already running.
+The result: the session starts by itself as soon as the phone is able to.
+
+### Still open
+
+- The PC can *use* a Windows hotspot but does not create one, and there is no
+  way to set the phone's Wi-Fi from the PC (the phone has to join the network
+  itself).
+- The pairing code has to be copied from the phone to the PC by hand. The PC
+  could learn it over the local USB link instead — the phone trusts that link
+  already — but that isn't built.
+- The media latency measurement stops at the ring; measuring what a viewer
+  actually perceives (the display) would need a visible timer on the phone.

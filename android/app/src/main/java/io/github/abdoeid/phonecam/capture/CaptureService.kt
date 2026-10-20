@@ -20,8 +20,10 @@ import io.github.abdoeid.phonecam.MainActivity
 import io.github.abdoeid.phonecam.R
 import io.github.abdoeid.phonecam.control.ControlChannel
 import io.github.abdoeid.phonecam.control.ControlCommandListener
+import io.github.abdoeid.phonecam.control.PairingCode
 import io.github.abdoeid.phonecam.rtp.RtpVideoSink
 import io.github.abdoeid.phonecam.transport.AoaTransport
+import io.github.abdoeid.phonecam.transport.DiscoveryResponder
 import io.github.abdoeid.phonecam.transport.OutputStreamVideoSink
 import java.io.IOException
 import java.net.InetAddress
@@ -48,6 +50,23 @@ class CaptureService : Service() {
   private var controlChannel: ControlChannel? = null
   private var controlThread: Thread? = null
   private val controlRunning = AtomicBoolean(false)
+
+  // Answers the PC's "is there a PhoneCam here?" probe, so a wireless session doesn't
+  // need the phone's address typed on the PC. Runs for as long as this service does --
+  // the same lifetime the control channel has, so anything that can control the phone can
+  // also find it.
+  private var discoveryResponder: DiscoveryResponder? = null
+
+  // True while the current capture session exists because the PC asked for it (StartVideo), as
+  // opposed to the user tapping Start on the phone. It decides two things: whether the PC may
+  // replace the session, and whether the session should end when the PC's control channel drops.
+  @Volatile
+  private var sessionStartedByPc = false
+
+  // The transport the current session is running on (VideoTransportMode), so a repeated
+  // request for the same mode doesn't restart it.
+  @Volatile
+  private var sessionMode = -1
 
   // Owned here, not by MainActivity (see its class doc's AOA note): ACTION_START_AOA gives
   // this the same foreground-service/wake-lock/error-handling treatment ACTION_START already gets,
@@ -86,6 +105,21 @@ class CaptureService : Service() {
     controller = CaptureController(this)
     createNotificationChannel()
     startControlChannel()
+    startDiscovery()
+    // Promoted to a foreground service for as long as this service exists, not just while a
+    // capture is running. Android only lets an app open the camera while it is in the
+    // foreground, and a PC-driven session can arrive when the phone's screen is off and the
+    // app is in the background -- which is exactly when a webcam app has to keep working.
+    // (Confirmed live: the camera open was refused with CAMERA_DISABLED "cannot open camera
+    // from background" when the PC started a session with the phone locked.)
+    startForegroundInternal()
+  }
+
+  /** Brings up the discovery responder (see [DiscoveryResponder] for why it exists). */
+  private fun startDiscovery() {
+    val responder = DiscoveryResponder(CONTROL_PORT, VIDEO_PORT)
+    discoveryResponder = responder
+    responder.start()
   }
 
   /**
@@ -98,9 +132,22 @@ class CaptureService : Service() {
   private fun startControlChannel() {
     val channel = ControlChannel(this, controlListener)
     controlChannel = channel
+    // The pairing code the PC has to prove it knows. A session over the local USB link is
+    // trusted without one; a network session has to answer the challenge.
+    channel.pairingCode = PairingCode(this).code
     // The controller pushes state changes (CurrentSettings/Stats/LensChanged) back to the PC
     // through this channel, so it needs the reference.
     controller.bindControlChannel(channel)
+    // When the PC's control connection ends, a session that only existed because the PC asked
+    // for it ends with it. Without this, a wireless session would outlive the PC: a UDP sink
+    // never fails on its own, so the phone would keep the camera open, streaming into the void,
+    // and refuse to start a new session ("already streaming").
+    channel.onSessionEnded = {
+      if (sessionStartedByPc) {
+        Log.i(TAG, "the PC disconnected -- stopping the session it asked for")
+        stopCaptureInternal()
+      }
+    }
     controlRunning.set(true)
     controlThread =
       Thread(
@@ -173,13 +220,23 @@ class CaptureService : Service() {
    */
   private fun startSession(mode: Int, width: Int, height: Int, fps: Int, bitrateBps: Int, rtpPort: Int): Byte {
     if (controller.state != CaptureState.IDLE) {
-      // Already streaming on another transport. Two video paths at once would mean two
-      // encoders fighting over the camera, so the existing one wins and the PC is told.
-      Log.w(TAG, "StartVideo ignored: the phone is already streaming")
-      return AckResult.Busy
+      if (sessionStartedByPc && sessionMode == mode) {
+        // Already running exactly what was asked for. The PC re-asks periodically (it can't
+        // always see that frames are arriving), and that must not restart the session.
+        Log.i(TAG, "the session is already running in this mode")
+        return AckResult.Ok
+      }
+      // Something else is streaming. The PC is asking for a specific transport, so it
+      // wins: the existing session is dropped and the new one starts. (The old session is
+      // often just the UI's error-retry waiting for a video connection that isn't coming --
+      // it would otherwise block every later request.)
+      Log.i(TAG, "replacing the current session (${controller.state}) with the PC's request")
+      stopCaptureInternal()
     }
     stopRequested.set(false)
     lastError = null
+    sessionStartedByPc = true
+    sessionMode = mode
     return try {
       if (mode == VideoTransportMode.Rtp.toInt()) {
         val peer = controlChannel?.peerAddress
@@ -201,6 +258,7 @@ class CaptureService : Service() {
         controller.start(width, height, fps, bitrateBps, ::onCaptureError)
         Log.i(TAG, "framed-TCP session started, waiting for the PC to connect")
       }
+      updateNotification(streaming = true)
       AckResult.Ok
     } catch (e: Exception) {
       Log.e(TAG, "failed to start the session", e)
@@ -298,16 +356,26 @@ class CaptureService : Service() {
   }
 
   private fun stopCaptureInternal() {
+    val wasPcDriven = sessionStartedByPc
     controller.stop()
     aoaTransport?.close()
     aoaTransport = null
+    sessionStartedByPc = false
+    sessionMode = -1
     releaseWakeLock()
-    stopForeground(STOP_FOREGROUND_REMOVE)
-    stopSelf()
+    // The service stays a foreground service (the notification goes back to "ready"): that
+    // is what keeps the camera openable for the next session, even with the screen off.
+    updateNotification(streaming = false)
+    // Only a session the user started on the phone ends the service itself. A PC-driven
+    // session must not: the control channel and the discovery responder have to stay up so
+    // the PC can start the next one.
+    if (!wasPcDriven) {
+      stopSelf()
+    }
   }
 
   private fun startForegroundInternal() {
-    val notification = buildNotification()
+    val notification = buildNotification(streaming = controller.state == CaptureState.STREAMING)
     try {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
         startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
@@ -322,13 +390,23 @@ class CaptureService : Service() {
     }
   }
 
-  private fun buildNotification(): Notification {
+  /** Refreshes the notification's text -- "ready" while idle, "streaming" while capturing. */
+  private fun updateNotification(streaming: Boolean) {
+    try {
+      val manager = getSystemService(NotificationManager::class.java)
+      manager.notify(NOTIFICATION_ID, buildNotification(streaming))
+    } catch (e: Exception) {
+      Log.w(TAG, "could not update the notification", e)
+    }
+  }
+
+  private fun buildNotification(streaming: Boolean): Notification {
     val openIntent =
       PendingIntent.getActivity(
         this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
       )
     return NotificationCompat.Builder(this, CHANNEL_ID)
-      .setContentTitle("PhoneCam is streaming")
+      .setContentTitle(if (streaming) "PhoneCam is streaming" else "PhoneCam is ready")
       .setContentText("Tap to return to the app")
       .setSmallIcon(R.mipmap.ic_launcher)
       .setContentIntent(openIntent)
@@ -367,6 +445,8 @@ class CaptureService : Service() {
     }
     controlThread = null
     controlChannel = null
+    discoveryResponder?.stop()
+    discoveryResponder = null
     controller.stop()
     aoaTransport?.close()
     aoaTransport = null
@@ -377,6 +457,12 @@ class CaptureService : Service() {
   companion object {
     private const val TAG = "CaptureService"
     private const val CONTROL_RETRY_DELAY_MS = 2000L
+
+    // The ports the phone listens on, reported to the PC by the discovery responder.
+    // Must match windows/host/control/ControlTransport.cpp (27184) and
+    // windows/host/transport/AdbTransport.cpp (27183).
+    private const val CONTROL_PORT = 27184
+    private const val VIDEO_PORT = 27183
     const val ACTION_START = "io.github.abdoeid.phonecam.action.START"
     const val ACTION_START_AOA = "io.github.abdoeid.phonecam.action.START_AOA"
     const val ACTION_STOP = "io.github.abdoeid.phonecam.action.STOP"

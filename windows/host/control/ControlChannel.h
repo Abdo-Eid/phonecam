@@ -18,6 +18,12 @@
 
 namespace phonecam::control {
 
+// The pairing handshake's proof: HMAC-SHA256(code, phone_nonce || pc_nonce), hex-encoded.
+// Exposed (rather than kept private to the channel) so the host's --test-auth mode can
+// check it against an independent implementation.
+std::string ComputeAuthHmac(const std::string& code, const std::string& phoneNonce,
+                             const std::string& pcNonce);
+
 struct LensInfo {
     std::string cameraId;
     int facing = 0;  // phonecam.wire.LensFacing: 0=Back 1=Front 2=External
@@ -46,6 +52,11 @@ struct AckInfo {
     uint32_t cmdId = 0;
     int result = 0;  // phonecam.control.AckResult
     std::string message;
+};
+
+// The phone's challenge: a fresh nonce the PC has to include, keyed, in its answer.
+struct AuthChallengeInfo {
+    std::string nonce;
 };
 
 struct SettingsInfo {
@@ -87,6 +98,7 @@ struct ErrorInfo {
 
 enum class ControlMsgKind {
     Capabilities,
+    AuthChallenge,
     Ack,
     Settings,
     Stats,
@@ -101,6 +113,7 @@ enum class ControlMsgKind {
 struct ControlMessage {
     ControlMsgKind kind = ControlMsgKind::Unknown;
     CapabilityInfo capabilities;
+    AuthChallengeInfo authChallenge;
     AckInfo ack;
     SettingsInfo settings;
     StatsInfo stats;
@@ -125,6 +138,14 @@ public:
     // address, no adb (USB tethering / Wi-Fi). See ControlTransport::Connect.
     bool Connect(uint16_t port = 27184, const std::string& host = {});
     void Disconnect();
+
+    // The pairing code this host answers the phone's challenge with. Over a network
+    // link the phone will not accept commands until the PC proves it knows this
+    // code; over the local USB link the phone trusts the connection without one.
+    //
+    // An empty code means "no code configured": the host then cannot answer a
+    // challenge, and a phone that asks for one will refuse the session.
+    void SetPairingCode(std::string code);
 
     // Blocks until disconnect; invokes onMessage for each decoded envelope.
     void RunReceiveLoop(const ControlMessageHandler& onMessage);

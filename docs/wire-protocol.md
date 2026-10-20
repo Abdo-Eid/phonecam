@@ -129,6 +129,55 @@ PC's address from the control connection itself (see
 [`control-protocol.md`](control-protocol.md)'s `StartVideo`), so there is no
 address to type on the phone and no discovery protocol to speak of.
 
+## Discovery (finding the phone on a network)
+
+The wireless transports need the phone's address. Rather than making the user type
+an IP, the PC asks for it: it broadcasts a probe and the phone answers.
+
+Request/response, not a beacon: the PC asks only when it needs an address, so a
+phone that isn't being used costs nothing on the network.
+
+```
+PC  -> phone:  "PHONECAM_DISCOVER\n"          (UDP broadcast, port 27186)
+phone -> PC:   "PHONECAM_HERE <version> <control-port> <video-port>\n"
+```
+
+The phone's address is taken from the reply's *source address*, not from the
+payload — a phone can't claim to be somewhere it isn't. The probe goes to the
+limited broadcast (255.255.255.255) and to every adapter's directed broadcast
+(192.168.137.255 on a hotspot, for instance); both are needed, because which one
+reaches the peer depends on the adapter.
+
+The reply carries the control and video ports and the protocol version, so the PC
+doesn't hardcode them and can tell a mismatched pair apart from a working one.
+
+## Session authentication (pairing)
+
+Over a network, anyone on the link can reach the phone's control port. The phone
+therefore challenges, and the PC proves it knows the shared **pairing code**:
+
+```
+phone -> PC:  AuthChallenge { nonce }         (a fresh random nonce)
+PC  -> phone: AuthResponse { nonce, hmac }     hmac = HMAC-SHA256(code, phone_nonce || pc_nonce)
+```
+
+Both nonces are fresh per session, so a recorded exchange cannot be replayed, and
+the code itself never crosses the wire — only a keyed hash of it.
+
+The phone shows its pairing code in the app; the PC is given it with
+`--secret <code>` (or the `PHONECAM_SECRET` environment variable, which keeps it
+out of the process list).
+
+**Only network sessions are challenged.** A session over the adb-forwarded
+abstract socket is the local USB link, which the phone already trusts, and
+asking for a code there would be friction for no gain.
+
+**What this protects, and what it doesn't.** It protects *access*: an
+unauthorized client cannot connect, take the video feed, or move the camera. The
+video stream itself is not encrypted by this — it doesn't need to be, because the
+Wi-Fi link's own encryption (WPA2) already protects the traffic from anyone who
+is merely on the same network but not part of the link.
+
 ## Versioning
 
 `CapabilityDescriptor.protocol_version` and any future breaking change bump a

@@ -90,6 +90,7 @@ std::string DiscoverTetheredPhoneAddress() {
 
 struct NetVideoTransport::Impl {
     std::string host;  // empty == rediscover per Connect()
+    std::function<std::string()> hostProvider;  // when set, replaces the tethered-phone discovery
     SOCKET sock = INVALID_SOCKET;
     bool wsaOk = false;
     // Guards sock, and the cancelled flag lets a Disconnect() arriving mid-Connect() win rather
@@ -120,7 +121,12 @@ bool NetVideoTransport::Connect() {
     if (!impl_->wsaOk) return false;
     impl_->cancelled.store(false);
 
-    const std::string host = impl_->host.empty() ? DiscoverTetheredPhoneAddress() : impl_->host;
+    // The provider is consulted per attempt: it may have found the phone since the last try
+    // (discovery runs in the background), and it may not have -- in which case this attempt
+    // simply fails and the reconnect loop tries again.
+    const std::string host = !impl_->host.empty()  ? impl_->host
+                          : impl_->hostProvider     ? impl_->hostProvider()
+                                                   : DiscoverTetheredPhoneAddress();
     if (host.empty()) {
         // No tethered phone right now. Non-fatal and expected (tethering off, or unplugged) --
         // the supervise loop retries, same as adb failing to find a streaming phone.
@@ -167,6 +173,10 @@ bool NetVideoTransport::Connect() {
     impl_->sock = s;
     phonecam::log::Info(std::format("NetVideoTransport: connected to {}:{}", host, kPort));
     return true;
+}
+
+void NetVideoTransport::SetHostProvider(std::function<std::string()> provider) {
+    impl_->hostProvider = std::move(provider);
 }
 
 void NetVideoTransport::Disconnect() {

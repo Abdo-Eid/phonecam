@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 #include "decode/MFH264Decoder.h"
@@ -41,6 +42,28 @@ public:
     // connection is actually up, not while the supervise loop is retrying.
     bool IsConnected() const { return connected_.load(); }
 
+    // How many frames have been decoded and handed to the ring since the bridge started.
+    // Used to tell "the session is up but nothing is arriving" from "the session is fine" --
+    // the two need different reactions (re-ask the phone / leave it alone).
+    uint64_t FramesDecoded() const { return framesDecoded_.load(); }
+
+    // Measured end-to-end media latency, in milliseconds: the time from the frame's
+    // capture timestamp (carried on the wire by every transport) to the moment the
+    // decoded frame was handed to the ring. It covers the camera pipeline, the
+    // encoder, the transport and the decode -- but not the display, which is the
+    // consumer's business.
+    //
+    // The median of a recent window is reported rather than the mean: a single
+    // stalled frame (a keyframe, a reconnect) would otherwise dominate the average
+    // and hide what the stream actually feels like.
+    struct Latency {
+        double medianMs = 0;
+        double minMs = 0;
+        double maxMs = 0;
+        uint64_t samples = 0;
+    };
+    Latency GetLatency() const;
+
     // Thin forwarders so main.cpp/the tray can reach the ring's standing settings
     // without touching the private ring_ member directly. SetTransform is a no-op (returns false)
     // until Start() has opened the ring; GetNegotiatedSize reports 0,0 the same way until the vcam
@@ -51,6 +74,7 @@ public:
 private:
     void Run();
     bool WaitBeforeRetry();
+    void RecordLatency(uint64_t phoneTimestampUs, uint64_t pcNowUs);
 
     phonecam::shm::SharedFrameRing ring_;
     std::unique_ptr<phonecam::transport::VideoTransport> transport_;
@@ -58,6 +82,25 @@ private:
     std::thread thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> connected_{false};
+    std::atomic<uint64_t> framesDecoded_{0};
+
+    // Latency accounting, written by the receive thread and read by whoever asks.
+    // The reference pair is what makes the measurement possible across two unrelated
+    // clock domains: it holds the first frame's timestamp on each side, and the constant
+    // offset between them cancels out of every later sample.
+    //
+    // The samples live in a small ring buffer so the reported figure describes the
+    // recent past (what the stream feels like now) rather than the whole session.
+    static constexpr size_t kLatencyWindow = 120;  // ~4s at 30fps
+    mutable std::mutex latencyMutex_;
+    double latencySamples_[kLatencyWindow] = {};
+    size_t latencySampleCount_ = 0;
+    size_t latencySampleIndex_ = 0;
+    uint64_t latencyTotalSamples_ = 0;
+    bool latencyReferenceSet_ = false;
+    uint64_t latencyReferencePhoneUs_ = 0;
+    uint64_t latencyReferencePcUs_ = 0;
+    uint64_t latencyFramesSinceReference_ = 0;
 };
 
 }  // namespace phonecam::bridge

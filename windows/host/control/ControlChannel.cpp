@@ -1,7 +1,11 @@
 #include "control/ControlChannel.h"
 
+#include <windows.h>
+#include <bcrypt.h>
+
 #include <atomic>
 #include <mutex>
+#include <vector>
 
 #include "control/ControlTransport.h"
 #include "control_generated.h"
@@ -26,7 +30,72 @@ namespace {
 // number turns that into a legible error instead.
 //
 // Bump this whenever proto/control.fbs's ControlPayload union changes shape.
-constexpr uint16_t kSupportedProtocolVersion = 2;
+constexpr uint16_t kSupportedProtocolVersion = 3;
+
+// A fresh random nonce, hex-encoded. Used on the PC side of the pairing handshake.
+std::string RandomHexNonce() {
+    std::vector<uint8_t> bytes(16);
+    if (BCryptGenRandom(nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+        return "phonecam-host";  // the RNG failed: the phone's nonce still carries the session
+    }
+    static const char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2);
+    for (const uint8_t byte : bytes) {
+        out.push_back(kHex[byte >> 4]);
+        out.push_back(kHex[byte & 0x0F]);
+    }
+    return out;
+}
+
+// HMAC-SHA256 of the message, hex-encoded. Used to answer the phone's pairing
+// challenge: the code itself never crosses the wire, only a keyed hash of two
+// fresh nonces, so a recorded exchange cannot be replayed and the code cannot
+// be harvested by watching the traffic.
+std::string ComputeHmacSha256Hex(const std::string& key, const std::string& message) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    std::string result;
+
+    // The provider is the plain hash algorithm ("SHA256") and the HMAC flag is what turns it
+    // into an HMAC provider -- naming it "HMAC_SHA256" here fails to open, and the failure
+    // has to be visible rather than looking like a wrong code.
+    if (BCryptOpenAlgorithmProvider(&algorithm, L"SHA256", nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) != 0) {
+        phonecam::log::Error("ControlChannel: could not open the HMAC provider");
+        return result;
+    }
+    DWORD objectLength = 0;
+    DWORD resultLength = 0;
+    if (BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objectLength),
+                          sizeof(objectLength), &resultLength, 0) != 0) {
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+        return result;
+    }
+    std::vector<uint8_t> hashObject(objectLength);
+    // The pairing code is the HMAC's secret, so it goes to BCryptCreateHash as the key --
+    // hashing it as data instead would make it part of the message (and produce a value
+    // that isn't HMAC at all).
+    if (BCryptCreateHash(algorithm, &hash, hashObject.data(), objectLength,
+                         reinterpret_cast<PUCHAR>(const_cast<char*>(key.data())),
+                         static_cast<ULONG>(key.size()), 0) == 0) {
+        if (BCryptHashData(hash, reinterpret_cast<PUCHAR>(const_cast<char*>(message.data())),
+                           static_cast<ULONG>(message.size()), 0) == 0) {
+            std::vector<uint8_t> mac(32);
+            if (BCryptFinishHash(hash, mac.data(), static_cast<ULONG>(mac.size()), 0) == 0) {
+                static const char kHex[] = "0123456789abcdef";
+                result.reserve(mac.size() * 2);
+                for (const uint8_t byte : mac) {
+                    result.push_back(kHex[byte >> 4]);
+                    result.push_back(kHex[byte & 0x0F]);
+                }
+            }
+        }
+        BCryptDestroyHash(hash);
+    }
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return result;
+}
 
 CapabilityInfo DecodeCapabilities(const pcw::CapabilityDescriptor* d) {
     CapabilityInfo out;
@@ -86,6 +155,12 @@ ControlMessage DecodeEnvelope(const uint8_t* data, size_t size) {
             msg.kind = ControlMsgKind::Capabilities;
             msg.capabilities = DecodeCapabilities(envelope->payload_as_phonecam_wire_CapabilityDescriptor());
             break;
+        case pcc::ControlPayload::AuthChallenge: {
+            const auto* challenge = envelope->payload_as_AuthChallenge();
+            msg.kind = ControlMsgKind::AuthChallenge;
+            if (challenge->nonce()) msg.authChallenge.nonce = challenge->nonce()->str();
+            break;
+        }
         case pcc::ControlPayload::Ack: {
             const auto* ack = envelope->payload_as_Ack();
             msg.kind = ControlMsgKind::Ack;
@@ -166,6 +241,8 @@ ControlMessage DecodeEnvelope(const uint8_t* data, size_t size) {
 struct ControlChannel::Impl {
     ControlTransport transport;
     std::atomic<uint32_t> nextCmdId{1};
+    // The pairing code, when one is configured (see SetPairingCode).
+    std::string pairingCode;
 
     mutable std::mutex cacheMutex;
     CapabilityInfo lastCapabilities;
@@ -189,18 +266,50 @@ struct ControlChannel::Impl {
     }
 };
 
-ControlChannel::ControlChannel() : impl_(std::make_unique<Impl>()) {}
-ControlChannel::~ControlChannel() = default;
+std::string ComputeAuthHmac(const std::string& code, const std::string& phoneNonce,
+                             const std::string& pcNonce) {
+    return ComputeHmacSha256Hex(code, phoneNonce + "|" + pcNonce);
+}
+
+ControlChannel::ControlChannel() : impl_(std::make_unique<Impl>()) {}ControlChannel::~ControlChannel() = default;
 
 bool ControlChannel::Connect(uint16_t port, const std::string& host) {
     return impl_->transport.Connect(port, host);
 }
 void ControlChannel::Disconnect() { impl_->transport.Disconnect(); }
 
+void ControlChannel::SetPairingCode(std::string code) { impl_->pairingCode = std::move(code); }
+
 void ControlChannel::RunReceiveLoop(const ControlMessageHandler& onMessage) {
     impl_->transport.RunReceiveLoop([&](const uint8_t* data, size_t size) {
         if (size == 0) return;
         const ControlMessage msg = DecodeEnvelope(data, size);
+        if (msg.kind == ControlMsgKind::AuthChallenge) {
+            // The phone is asking us to prove we know the pairing code. Answered here rather
+            // than in the UI: it is a handshake, not something a human should have to answer.
+            if (impl_->pairingCode.empty()) {
+                phonecam::log::Error("ControlChannel: the phone asked for a pairing code and none is "
+                                     "configured -- pass --secret <code> (the phone shows it in its app)");
+            } else {
+                // A fresh nonce per challenge, so the answer can't be replayed and both
+                // sides contribute entropy.
+                const std::string pcNonce = RandomHexNonce();
+                const std::string hmac = ComputeAuthHmac(impl_->pairingCode, msg.authChallenge.nonce, pcNonce);
+                const uint32_t cmdId = impl_->NextCmdId();
+                fb::FlatBufferBuilder fbb;
+                const fb::Offset<void> payload =
+                    pcc::CreateAuthResponse(fbb, fbb.CreateString(pcNonce.c_str()),
+                                            fbb.CreateString(hmac.c_str()))
+                        .Union();
+                const auto envelope =
+                    pcc::CreateControlEnvelope(fbb, cmdId, pcc::ControlPayload::AuthResponse, payload);
+                pcc::FinishControlEnvelopeBuffer(fbb, envelope);
+                if (impl_->transport.Send(fbb.GetBufferPointer(), fbb.GetSize())) {
+                    phonecam::log::Info("ControlChannel: answered the pairing challenge");
+                }
+            }
+            return;  // the UI has nothing to do with a challenge
+        }
         if (msg.kind == ControlMsgKind::Capabilities) {
             std::lock_guard<std::mutex> lock(impl_->cacheMutex);
             impl_->lastCapabilities = msg.capabilities;

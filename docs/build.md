@@ -102,6 +102,39 @@ other — same Wi-Fi, or the phone joined to the PC's own Windows Mobile Hotspot
 Windows' firewall blocks inbound connections on a "Public" network profile, so
 allow `phonecam-host.exe` (or open the ports) when running over Wi-Fi.
 
+## Wireless transport (RTP over UDP, or framed TCP over Wi-Fi)
+
+```
+windows\build\host\Debug\phonecam-host.exe --rtp            # find the phone, stream RTP
+windows\build\host\Debug\phonecam-host.exe --rtp 192.168.1.5 # explicit address
+windows\build\host\Debug\phonecam-host.exe --wifi            # framed TCP instead of RTP
+windows\build\host\Debug\phonecam-host.exe --rtp --secret ABCD-EFGH-IJKL
+```
+
+With no address, the phone is found by discovery (it answers a broadcast probe),
+so nothing has to be typed. `--wifi` uses the phone's framed TCP video socket
+instead of RTP — useful where UDP is blocked, at the cost of TCP's retransmit
+spikes.
+
+Over a network the phone only accepts a PC that knows its **pairing code** (shown
+in the phone's app). Pass it with `--secret` or the `PHONECAM_SECRET` environment
+variable. Over the local USB link no code is needed.
+
+Windows' firewall blocks inbound connections on a "Public" network profile, so
+allow `phonecam-host.exe` (or open the ports) when running over Wi-Fi.
+
+## Checking the pairing handshake without the phone
+
+```
+windows\build\host\Debug\phonecam-host.exe --test-auth <code> <phone-nonce> <pc-nonce>
+```
+
+Prints the HMAC the host would answer a pairing challenge with, so it can be
+compared against an independent implementation (e.g. .NET's `HMACSHA256` over
+`"<phone-nonce>|<pc-nonce>"` keyed with the code). It exists because the two
+sides of the handshake must agree byte-for-byte, and a disagreement otherwise
+looks exactly like a wrong pairing code.
+
 ## Verifying the virtual camera reaches DirectShow apps, not just Media Foundation ones
 
 ```

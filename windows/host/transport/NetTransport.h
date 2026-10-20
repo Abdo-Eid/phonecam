@@ -20,6 +20,7 @@
 // unit or windows.h's default winsock.h pull-in conflicts with it.
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -43,6 +44,12 @@ public:
 
     NetVideoTransport(const NetVideoTransport&) = delete;
     NetVideoTransport& operator=(const NetVideoTransport&) = delete;
+
+    // Overrides how the address is found, for the case where the phone isn't on a tethering
+    // link but on Wi-Fi: the provider is consulted on every Connect() (so it can answer with an
+    // address discovered a moment ago) and may return an empty string to say "not yet".
+    // Without one, the tethered-phone discovery is used.
+    void SetHostProvider(std::function<std::string()> provider);
 
     bool Connect() override;
     void Disconnect() override;

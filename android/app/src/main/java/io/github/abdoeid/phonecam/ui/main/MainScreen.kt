@@ -19,6 +19,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -65,6 +66,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
+import io.github.abdoeid.phonecam.control.PairingCode
 import io.github.abdoeid.phonecam.theme.Dim
 import io.github.abdoeid.phonecam.theme.Ink
 import io.github.abdoeid.phonecam.theme.NoSignalBlue
@@ -95,6 +97,12 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
     }
   }
 
+  // The pairing code: what a PC has to be given before it may drive this camera over a
+  // network link. Shown here because the PC asks for it, and there is no other way to get
+  // it onto the other machine.
+  val pairing = remember { PairingCode(context) }
+  var pairingCode by remember { mutableStateOf(pairing.code) }
+
   LaunchedEffect(state) {
     if (state is CaptureUiState.Error) {
       delay(1500)
@@ -118,6 +126,11 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
 
     Spacer(Modifier.weight(1f))
 
+    PairingCodeRow(
+      code = pairingCode,
+      onRegenerate = { pairingCode = pairing.regenerate() },
+    )
+
     Text(
       "connects automatically when phonecam.exe is running on your pc",
       style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
@@ -126,6 +139,39 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
     )
   }
 }
+
+// The pairing code, grouped for reading. A PC needs it to be allowed to drive this camera
+// over a network link; over USB the connection is trusted without one.
+@Composable
+private fun PairingCodeRow(code: String, onRegenerate: () -> Unit) {
+  Row(
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(10.dp),
+    modifier = Modifier.padding(bottom = 14.dp),
+  ) {
+    Text(
+      "PAIRING CODE",
+      style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 10.sp),
+      color = Dim,
+    )
+    Text(
+      formatPairingCode(code),
+      style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
+      color = Paper,
+    )
+    Text(
+      "NEW",
+      style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 10.sp),
+      color = NoSignalBlue,
+      modifier = Modifier.clickable(onClick = onRegenerate),
+    )
+  }
+}
+
+// "ABCD-EFGH-IJKL" -- the code is 12 characters, split into three groups so it can be read
+// out loud over a phone call without confusion.
+private fun formatPairingCode(code: String): String =
+  code.chunked(4).joinToString("-")
 
 // Wordmark + a live status dot -- a device nameplate, not an app-icon badge. The dot is the
 // same accent StatusVisual would give the current state, so the header itself hints at state
