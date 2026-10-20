@@ -147,6 +147,12 @@ public:
     // challenge, and a phone that asks for one will refuse the session.
     void SetPairingCode(std::string code);
 
+    // Called when the session is ready for commands -- i.e. when the phone has sent
+    // its capabilities, which it only does after a successful authentication. Commands
+    // sent before that are rejected by the phone, so anything that wants to start a
+    // session should wait for this rather than for the connection itself.
+    void SetSessionReadyHandler(std::function<void()> handler);
+
     // Blocks until disconnect; invokes onMessage for each decoded envelope.
     void RunReceiveLoop(const ControlMessageHandler& onMessage);
 

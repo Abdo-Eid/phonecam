@@ -551,6 +551,26 @@ int wmain(int argc, wchar_t* argv[]) {
     if (!pairingCode.empty()) {
         controlChannel.SetPairingCode(pairingCode);
     }
+    // Asked for as soon as the phone's session is ready -- which is after the pairing
+    // handshake has succeeded, so the request isn't rejected for being premature.
+    //
+    // This is also the wake-up: the phone can be sitting idle, and a phone-side start can't
+    // be automated (and shouldn't have to be). The transport is named explicitly -- the
+    // phone either binds its framed video socket (the socket transports connect to it) or
+    // streams RTP straight to this PC.
+    //
+    // Not sent over AOA: there the phone starts the session itself, when the USB accessory
+    // is attached (the accessory pipe *is* the video transport).
+    controlChannel.SetSessionReadyHandler([&]() {
+        if (useAoa) return;
+        // The mode is passed as a plain byte on purpose: ControlChannel.h keeps FlatBuffers
+        // types out of its interface (see that header's own rule), so the schema's enum is
+        // converted here, at the one place that includes it.
+        controlChannel.SendStartVideo(kWirelessWidth, kWirelessHeight, kWirelessFps, kWirelessBitrateBps,
+                                      rtpPort,
+                                      forceRtp ? static_cast<uint8_t>(phonecam::control::VideoTransportMode::Rtp)
+                                               : static_cast<uint8_t>(phonecam::control::VideoTransportMode::FramedTcp));
+    });
 
     // The phone's address, once discovery has found one. Shared between the control channel
     // (which connects to it) and the framed-TCP wireless transport (which pulls from it), and
@@ -673,23 +693,11 @@ int wmain(int argc, wchar_t* argv[]) {
             }
             if (controlChannel.Connect(controlPort, controlHost)) {
                 controlConnected.store(true);
-                // Ask the phone to start streaming. This is also the wake-up: the phone
-                // can be sitting idle, and a phone-side start can't be automated (and
-                // shouldn't have to be). The transport is named explicitly -- the phone
-                // either binds its framed video socket (the socket transports connect to
-                // it) or streams RTP straight to this PC.
+                // The session is only ready for commands once the phone has sent its
+                // capabilities, which it only does after a successful authentication --
+                // so that is when the session is asked for (see the session-ready handler
+                // below). Asking earlier would simply be rejected by the phone.
                 //
-                // Not sent over AOA: there the phone starts the session itself, when the
-                // USB accessory is attached (the accessory pipe *is* the video transport).
-                if (!useAoa) {
-                    // The mode is passed as a plain byte on purpose: ControlChannel.h keeps
-                    // FlatBuffers types out of its interface (see that header's own rule), so
-                    // the schema's enum is converted here, at the one place that includes it.
-                    controlChannel.SendStartVideo(kWirelessWidth, kWirelessHeight, kWirelessFps,
-                                                  kWirelessBitrateBps, rtpPort,
-                                                  forceRtp ? static_cast<uint8_t>(phonecam::control::VideoTransportMode::Rtp)
-                                                           : static_cast<uint8_t>(phonecam::control::VideoTransportMode::FramedTcp));
-                }
                 // Every (re)connect implies the video side may also just have
                 // reconnected onto a fresh encoder session (new SPS/PPS, no
                 // guaranteed keyframe yet) -- ask for one explicitly rather

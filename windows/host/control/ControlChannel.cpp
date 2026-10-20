@@ -243,6 +243,9 @@ struct ControlChannel::Impl {
     std::atomic<uint32_t> nextCmdId{1};
     // The pairing code, when one is configured (see SetPairingCode).
     std::string pairingCode;
+    // Called once per session, when the phone's capabilities arrive (which it only
+    // sends after a successful authentication).
+    std::function<void()> sessionReadyHandler;
 
     mutable std::mutex cacheMutex;
     CapabilityInfo lastCapabilities;
@@ -280,6 +283,10 @@ void ControlChannel::Disconnect() { impl_->transport.Disconnect(); }
 
 void ControlChannel::SetPairingCode(std::string code) { impl_->pairingCode = std::move(code); }
 
+void ControlChannel::SetSessionReadyHandler(std::function<void()> handler) {
+    impl_->sessionReadyHandler = std::move(handler);
+}
+
 void ControlChannel::RunReceiveLoop(const ControlMessageHandler& onMessage) {
     impl_->transport.RunReceiveLoop([&](const uint8_t* data, size_t size) {
         if (size == 0) return;
@@ -314,6 +321,9 @@ void ControlChannel::RunReceiveLoop(const ControlMessageHandler& onMessage) {
             std::lock_guard<std::mutex> lock(impl_->cacheMutex);
             impl_->lastCapabilities = msg.capabilities;
             impl_->hasCapabilities = true;
+            // The capabilities arrive only after a successful authentication, so this is
+            // the moment the session can accept commands.
+            if (impl_->sessionReadyHandler) impl_->sessionReadyHandler();
             if (msg.capabilities.protocolVersion != kSupportedProtocolVersion) {
                 const std::string phoneVersion = std::to_string(msg.capabilities.protocolVersion);
                 const std::string hostVersion = std::to_string(kSupportedProtocolVersion);
