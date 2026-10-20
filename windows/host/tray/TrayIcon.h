@@ -1,6 +1,6 @@
 #pragma once
 
-// Phase 5: a minimal Win32 system-tray icon for phonecam-host.exe, so it can run as a background
+// A minimal Win32 system-tray icon for phonecam-host.exe, so it can run as a background
 // process instead of requiring a visible console window to stay open. Deliberately plain
 // Shell_NotifyIcon + a hidden message-only window -- no GUI framework, matching the project's
 // all-C++/MSVC, fork-working-samples-over-hand-authoring stance (see docs/architecture.md). The
@@ -19,7 +19,7 @@ namespace phonecam::tray {
 // One dynamic menu item, between the status line and Exit. onClick empty means
 // display-only/disabled (matches the status line's own existing MF_GRAYED treatment).
 //
-// A non-empty `submenu` turns this item into a submenu parent (Phase 4: lens/zoom/ev/focus/
+// A non-empty `submenu` turns this item into a submenu parent (lens/zoom/ev/focus/
 // rotation each need a small picker) -- onClick and checked are ignored for a submenu parent,
 // its own children carry those instead.
 struct MenuItem {

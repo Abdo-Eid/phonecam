@@ -122,7 +122,7 @@ public:
     ControlChannel& operator=(const ControlChannel&) = delete;
 
     // host empty == the adb-forward path (unchanged); host set == connect straight to that
-    // address, no adb (Phase 8: USB tethering / Wi-Fi). See ControlTransport::Connect.
+    // address, no adb (USB tethering / Wi-Fi). See ControlTransport::Connect.
     bool Connect(uint16_t port = 27184, const std::string& host = {});
     void Disconnect();
 
@@ -144,7 +144,26 @@ public:
     uint32_t SendSetBitrate(uint32_t bitrateBps);
     uint32_t SendSetLens(const std::string& cameraId);
 
-    // Phase 4 (tray controls): a cache of the last-seen Capabilities/CurrentSettings messages,
+    // Wireless session control (RTP over UDP): asks the phone to start
+    // streaming live camera video to this PC. The phone learns the PC's
+    // address from the control connection itself, so the only extra
+    // information it needs is the UDP port the PC is listening on.
+    //
+    // Sent on every (re)connect, not once per process: the phone may have
+    // restarted, or its capture may have stopped while the control channel
+    // stayed up -- either way the phone is the one that knows whether video
+    // is actually running, and it answers Ack{Busy} if it already is.
+    //
+    // [mode] is VideoTransportMode: FramedTcp for the socket-based transports
+    // (the phone binds its video socket and the video transport connects to
+    // it), Rtp for the UDP one.
+    uint32_t SendStartVideo(uint16_t width, uint16_t height, uint16_t fps, uint32_t bitrateBps, uint16_t rtpPort,
+                            uint8_t mode = 0);
+
+    // Stops a wireless session (the phone keeps its control channel open).
+    uint32_t SendStopVideo();
+
+    // Tray controls: a cache of the last-seen Capabilities/CurrentSettings messages,
     // populated inside RunReceiveLoop before the message reaches the caller's handler -- moved
     // here (rather than duplicating it in the tray, the way ConsoleControlUi has its own private
     // copy) because this is already the single decode chokepoint every consumer reads from, and

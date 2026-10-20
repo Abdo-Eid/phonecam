@@ -1,4 +1,4 @@
-# Phase 7 throwaway diagnostic -- see main.cpp's header comment. Not linked into phonecam-host;
+# Throwaway diagnostic -- see main.cpp's header comment. Not linked into phonecam-host;
 # deleted once the real AoaTransport lands and this question is answered for good.
 add_executable(aoa_probe main.cpp)
 

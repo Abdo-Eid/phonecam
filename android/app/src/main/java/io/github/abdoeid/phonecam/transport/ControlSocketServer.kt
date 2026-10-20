@@ -38,6 +38,18 @@ class ControlSocketServer(
   private var tcpServer: ServerSocket? = null
   private var tcpClient: Socket? = null
 
+  /**
+   * The address of the most recently accepted TCP client, or null if the
+   * connection came through the abstract socket (the adb-forward path, where
+   * the "peer" is the phone's own adb daemon and its address is meaningless).
+   *
+   * This is how the wireless session finds its destination: the PC connects
+   * over TCP and the phone then streams RTP back to this address -- no
+   * discovery protocol, no address typed on the phone.
+   */
+  var lastAcceptedAddress: String? = null
+    private set
+
   // isCancelled / retry budget / both-listeners rationale: see VideoSocketServer.open()'s doc
   // comment -- same reasoning, same fix, same best-effort TCP bind.
   fun open(isCancelled: () -> Boolean = { false }) {
@@ -96,6 +108,9 @@ class ControlSocketServer(
         if (ready > 0) {
           val socket = local.accept()
           clientSocket = socket
+          // The abstract socket's peer is the phone's own adb daemon -- there
+          // is no meaningful address to stream to.
+          lastAcceptedAddress = null
           Log.i(TAG, "$name: accepted over the abstract socket (adb)")
           return socket.inputStream to socket.outputStream
         }
@@ -108,6 +123,7 @@ class ControlSocketServer(
           // whenever Nagle decides enough bytes have accumulated).
           socket.tcpNoDelay = true
           tcpClient = socket
+          lastAcceptedAddress = socket.inetAddress?.hostAddress
           Log.i(TAG, "$name: accepted over TCP from ${socket.inetAddress?.hostAddress}")
           return socket.getInputStream() to socket.getOutputStream()
         } catch (_: SocketTimeoutException) {

@@ -25,7 +25,7 @@ import java.util.concurrent.Executor
  * balance only: manual controls (ISO, exposure time, manual WB) are deferred -- see
  * docs/architecture.md.
  *
- * Phase 4 adds live control-channel updates (zoom/EV/torch/focus/tap-to-focus, all via
+ * Live control-channel updates (zoom/EV/torch/focus/tap-to-focus, all via
  * re-submitting an updated repeating request on the already-open session) and [switchLens], which
  * tears down and reopens just the camera device/session -- targetSurface (and therefore the
  * encoder and video socket) stays untouched, so a lens switch doesn't interrupt streaming beyond

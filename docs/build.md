@@ -87,6 +87,21 @@ Bash's `gradlew` invocations to a broken sandbox path missing `gradle-wrapper.ja
 The Kotlin FlatBuffers bindings are generated automatically as part of the build (a Gradle `Exec`
 task in `android/app/build.gradle.kts` invoking `flatc --kotlin`) -- no manual step needed.
 
+## Wireless transport (RTP over UDP)
+
+```
+windows\build\host\Debug\phonecam-host.exe --rtp <phone-ip> [udp-port]
+```
+
+The phone's address is the one it shows on its Wi-Fi (or hotspot) connection; the
+UDP port defaults to 27185 and is the port the *PC* binds. The control channel
+goes to TCP 27184 on the same address. Both sides must be able to reach each
+other — same Wi-Fi, or the phone joined to the PC's own Windows Mobile Hotspot
+(one radio hop instead of two).
+
+Windows' firewall blocks inbound connections on a "Public" network profile, so
+allow `phonecam-host.exe` (or open the ports) when running over Wi-Fi.
+
 ## Verifying the virtual camera reaches DirectShow apps, not just Media Foundation ones
 
 ```

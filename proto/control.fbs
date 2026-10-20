@@ -33,6 +33,30 @@ table SetTorch { on: bool; }
 table SetStabilization { on: bool; }
 table RequestKeyframe {}
 
+// Wireless (RTP over UDP) session bootstrap: PC tells the phone to
+// start live capture and stream RTP/H.264 to it. The phone learns the
+// PC's address from the *control TCP connection itself* (its remote peer) --
+// the user already had to make that connection for the PC to send this
+// command, so it doubles as destination discovery (no mDNS, no typed IP on
+// the phone side). The phone replies Ack{Ok} then starts capture + RTP
+// immediately; errors surface as a follow-up Error push, matching how every
+// async camera/encoder failure behaves (docs/control-protocol.md).
+// How the phone should deliver video for a session.
+enum VideoTransportMode : ubyte {
+  FramedTcp = 0,  // the phone's framed stream socket (USB/adb, tethering, Wi-Fi TCP)
+  Rtp = 1,        // RTP/H.264 over UDP straight to the PC (wireless)
+}
+
+table StartVideo {
+  mode: VideoTransportMode;
+  width: uint16;
+  height: uint16;
+  fps: uint16;
+  bitrate_bps: uint32;
+  rtp_port: uint16;      // PC-side UDP listen port (RTP mode only)
+}
+table StopVideo {}
+
 // ---- phone -> PC status / telemetry ----
 
 enum AckResult : byte { Ok = 0, Unsupported = 1, OutOfRange = 2, Busy = 3, Error = 4 }
@@ -79,6 +103,7 @@ table Error { code: uint16; message: string; }
 union ControlPayload {
   // PC -> phone
   Start, Stop,
+  StartVideo, StopVideo,
   SetResolution, SetFps, SetBitrate,
   SetLens, SetZoomRatio, TapToFocus, SetFocusMode,
   SetEv, SetManualExposure, SetAutoExposure,

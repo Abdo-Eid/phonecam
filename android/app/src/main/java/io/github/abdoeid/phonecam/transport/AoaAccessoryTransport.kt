@@ -11,7 +11,7 @@ import java.io.IOException
 private const val TAG = "PhoneCamAoa"
 
 /**
- * Phase 7 AOA transport, seeded from a single-direction pipe checkpoint before any multiplexing
+ * AOA transport, seeded from a single-direction pipe checkpoint before any multiplexing
  * exists (see docs/wire-protocol.md's "AOA transport" section). [openAndSendCheckpoint] proves
  * openAccessory() actually yields a live, host-readable bulk pipe -- nothing more. The real
  * video/control multiplexing (per-message 1-byte Channel tag, see proto/wire.fbs) is later work

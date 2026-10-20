@@ -56,7 +56,7 @@ bool LiveVideoBridge::WaitBeforeRetry() {
 // loop ends for any reason (phone stopped capture, USB replug, adb-server
 // restart), then back off and try again. This is what lets phonecam-host
 // survive unplug/replug and phone-side backgrounding without a restart
-// (Phase 5) -- previously Start() failed permanently if the phone wasn't
+// (reconnect robustness) -- previously Start() failed permanently if the phone wasn't
 // already streaming, and any later disconnect was terminal.
 //
 // The backoff applies after EVERY disconnect, not just an outright Connect()

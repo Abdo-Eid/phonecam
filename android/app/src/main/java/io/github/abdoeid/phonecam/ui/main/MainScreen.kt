@@ -95,19 +95,10 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
     }
   }
 
-  var hasAutoStarted by remember { mutableStateOf(false) }
   LaunchedEffect(state) {
-    when (state) {
-      CaptureUiState.Idle ->
-        if (!hasAutoStarted) {
-          hasAutoStarted = true
-          viewModel.startCapture()
-        }
-      is CaptureUiState.Error -> {
-        delay(1500)
-        viewModel.startCapture()
-      }
-      else -> {}
+    if (state is CaptureUiState.Error) {
+      delay(1500)
+      viewModel.startCapture()
     }
   }
 
@@ -247,8 +238,14 @@ private fun ViewfinderPanel(state: CaptureUiState, onStart: () -> Unit, onStop: 
         color = accent,
       )
 
+      // contentKey keeps the fade for genuine screen changes only. Streaming carries live
+      // stats and is re-emitted every 500ms by the ViewModel's poll loop, so keying on the
+      // whole state would restart this cross-fade twice a second -- a permanent flicker on the
+      // OSD row instead of a transition. With the state *kind* as the key, the numbers update
+      // in place and only Idle/Searching/Streaming/Error boundaries animate.
       AnimatedContent(
         targetState = state,
+        contentKey = { it::class },
         transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(140)) },
         label = "panelDetail",
       ) { s ->
@@ -305,7 +302,7 @@ private fun PanelButton(label: String, accent: Color, onClick: () -> Unit, fille
 }
 
 // A real camera's on-screen viewfinder display: dim tabular labels, bright monospace values.
-// FPS comes straight from measured encoder output; RES reflects Phase 6's fixed 1080p pipeline
+// FPS comes straight from measured encoder output; RES reflects the fixed 1080p pipeline
 // (see docs/architecture.md) -- would need to become dynamic alongside a future PC-driven
 // SetResolution. TIME is elapsed mm:ss rather than a raw frame count -- a frame counter's digit
 // width keeps growing for as long as a session runs, while mm:ss stays a fixed, glanceable shape

@@ -1,6 +1,6 @@
 #pragma once
 
-// Phase 8: video over a plain TCP connection to the phone, with no adb and no USB driver of our
+// Video over a plain TCP connection to the phone, with no adb and no USB driver of our
 // own -- the transport that USB tethering (RNDIS) and Wi-Fi both reduce to.
 //
 // Why this exists alongside AdbVideoTransport and AoaVideoTransport: enabling USB tethering makes

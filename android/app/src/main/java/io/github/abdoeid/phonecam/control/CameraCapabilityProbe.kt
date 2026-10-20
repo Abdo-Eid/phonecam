@@ -23,8 +23,8 @@ import phonecam.wire.RangeF
  * R9 re: this LIMITED-hardware-level device).
  *
  * `resolutions` is left empty deliberately: SetResolution and dynamic vcam stream sizing are
- * explicitly out of Phase 4 scope (windows/vcam/MediaStream.cpp has a single fixed stream size --
- * see docs/architecture.md's Phase 4 section), so there's nothing on the PC side yet that would
+ * explicitly out of scope (windows/vcam/MediaStream.cpp has a single fixed stream size --
+ * see docs/architecture.md's control-channel section), so there's nothing on the PC side yet that would
  * consume a resolution list.
  */
 object CameraCapabilityProbe {
@@ -41,7 +41,11 @@ object CameraCapabilityProbe {
     CapabilityDescriptor.addLenses(builder, lensesOffset)
     CapabilityDescriptor.addAndroidRelease(builder, androidReleaseOffset)
     CapabilityDescriptor.addDeviceModel(builder, deviceModelOffset)
-    CapabilityDescriptor.addProtocolVersion(builder, 1u)
+    // Protocol version 2 = the wireless (RTP) session commands exist. Bump this
+    // whenever proto/control.fbs's ControlPayload union changes shape: FlatBuffers
+    // assigns union payload types by declaration order, so a new command renumbers
+    // the existing ones and mismatched builds misread each other silently.
+    CapabilityDescriptor.addProtocolVersion(builder, 2u)
     return CapabilityDescriptor.endCapabilityDescriptor(builder)
   }
 

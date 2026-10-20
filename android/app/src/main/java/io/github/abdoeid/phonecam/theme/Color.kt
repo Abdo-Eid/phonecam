@@ -2,7 +2,7 @@ package io.github.abdoeid.phonecam.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Phase 6 UI polish, second pass -- a deliberate identity built on broadcast/viewfinder
+// UI polish, second pass -- a deliberate identity built on broadcast/viewfinder
 // language rather than generic Material dark-mode defaults. PhoneCam's entire job is turning a
 // phone's camera into a signal a PC receives, so the palette borrows from what that equipment
 // actually looks like: a dark monitor housing, a tally light, a standby indicator, and the

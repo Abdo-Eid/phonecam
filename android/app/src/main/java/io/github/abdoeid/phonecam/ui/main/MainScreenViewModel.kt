@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlin.math.round
 
 sealed interface CaptureUiState {
   data object Idle : CaptureUiState
@@ -29,14 +30,14 @@ sealed interface CaptureUiState {
   data class Error(val message: String) : CaptureUiState
 }
 
-// Phase 5: capture itself now lives in CaptureService (see its class doc), not here -- this
+// Capture itself now lives in CaptureService (see its class doc), not here -- this
 // ViewModel only sends start/stop intents and polls the bound service's state. Binding (not
 // starting) in init{} so state can be read even if the service was already running from a prior
 // Activity instance; ACTION_START/ACTION_STOP intents (not direct method calls on the bound
 // service) own the actual start/stop, since that's the pattern startForegroundService() requires
 // -- the service must reach startForeground() from within its own onStartCommand.
 //
-// Phase 7: the poll loop now runs continuously from init{} rather than being started/cancelled
+// The poll loop runs continuously from init{} rather than being started/cancelled
 // alongside startCapture()/stopCapture() -- CaptureService can also be started by MainActivity's
 // AOA accessory-attach handling (ACTION_START_AOA), entirely independent of this ViewModel and
 // its Start button, so uiState needs to reflect the service's real state regardless of what
@@ -82,7 +83,17 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
               when (service.state) {
                 CaptureState.IDLE -> CaptureUiState.Idle
                 CaptureState.WAITING_FOR_CONNECTION -> CaptureUiState.WaitingForConnection
-                CaptureState.STREAMING -> CaptureUiState.Streaming(service.elapsedSeconds, service.measuredFps)
+                // Quantized to the precision OsdReadout actually renders -- whole seconds
+                // (formatElapsed truncates anyway) and 0.1 fps ("%.1f"). The poll runs twice a
+                // second, so without this every tick produced a visibly identical but
+                // not-equal Streaming, re-emitting StateFlow and recomposing the whole screen
+                // for the same pixels. At this precision consecutive ticks compare equal and
+                // StateFlow conflates them.
+                CaptureState.STREAMING ->
+                  CaptureUiState.Streaming(
+                    elapsedSeconds = service.elapsedSeconds.toLong().toDouble(),
+                    measuredFps = round(service.measuredFps * 10.0) / 10.0,
+                  )
               }
           }
           delay(500)
@@ -90,11 +101,11 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
       }
   }
 
-  // TODO(Phase 7+): resolution/fps become PC-driven SetResolution/SetFps commands once the vcam
-  // supports a non-fixed stream size (docs/architecture.md's Phase 4 section explains why that's
-  // out of scope for now). 1080p is the default here as of Phase 6 ("push stable 1080p30" exit
+  // TODO: resolution/fps become PC-driven SetResolution/SetFps commands once the vcam
+  // supports a non-fixed stream size (docs/architecture.md's control-channel section explains why that's
+  // out of scope for now). 1080p is the default here (the "push stable 1080p30" exit
   // criterion) -- matches windows/vcam/MediaStream.cpp's now-1080p declared stream size; a
-  // mismatch here would silently stretch the image again, the same bug Phase 3C already fixed
+  // mismatch here would silently stretch the image again, the same bug already fixed
   // once for 720p.
   fun startCapture(
     width: Int = 1920,
@@ -127,7 +138,7 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     super.onCleared()
     statsJob?.cancel()
     // Deliberately not stopping capture here -- CaptureService outliving this ViewModel (e.g. the
-    // Activity being destroyed while backgrounded) is the entire point of Phase 5's foreground
+    // Activity being destroyed while backgrounded) is the entire point of the foreground
     // service. Only unbind; the service keeps running until an explicit ACTION_STOP.
     if (isBound) {
       getApplication<Application>().unbindService(connection)

@@ -21,7 +21,7 @@ class FrameGenerator
 	wil::com_ptr_nothrow<IWICBitmap> _bitmap;
 	wil::com_ptr_nothrow<IMFDXGIDeviceManager> _dxgiManager;
 
-	// Phase 1b: frames come from phonecam-host via shared memory instead of
+	// Frames come from phonecam-host via shared memory instead of
 	// being drawn here. _ring is opened lazily (the host may not have
 	// created it yet) and _nv12Scratch/_rgb32Scratch are reused across calls
 	// to avoid a per-frame heap allocation.
@@ -58,7 +58,7 @@ public:
 		}
 	}
 
-	// Phase 7 (vcam real resolution + rotation): no longer takes a size -- just opens the D3D
+	// (vcam real resolution + rotation): no longer takes a size -- just opens the D3D
 	// device handle. EnsureRenderTarget is now the single place resources get (re)sized, called
 	// once the negotiated MF_MT_FRAME_SIZE is actually known (see MediaStream::Start).
 	HRESULT SetD3DManager(IUnknown* manager);

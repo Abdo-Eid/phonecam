@@ -1,12 +1,12 @@
 #pragma once
 
-// Phase 7 production host-side AOA transport: mirrors
+// Production host-side AOA transport: mirrors
 // android/.../transport/AoaTransport.kt's framing exactly (see that file's
 // doc comment for the full rationale) using libusb against the accessory
 // interface, per the already-debugged open/claim sequence in
 // windows/tools/aoa_probe/main.cpp's OpenAccessoryInterface() and the
 // handshake in its RunHandshake(). Video-channel only: control still runs
-// over adb (control/ControlChannel.h) -- see docs/architecture.md's Phase 7
+// over adb (control/ControlChannel.h) -- see docs/architecture.md's AOA
 // section for why the control path over AOA isn't wired in yet (only the
 // video-tagged frame shape has ever been exercised live).
 //

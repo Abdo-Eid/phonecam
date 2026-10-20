@@ -1,10 +1,10 @@
 #pragma once
 
-// Phase 3C: the real frame source, superseding TestPatternProducer as the
+// The real frame source, superseding TestPatternProducer as the
 // host's default. Connects to the phone over adb-forward (transport/), feeds
 // the received Annex-B stream into the MF H.264 decoder (decode/), and
 // writes each decoded NV12 frame into the same SharedFrameRing the vcam side
-// already reads from (Phase 1) -- only the frame source is new; everything
+// already reads from -- only the frame source is new; everything
 // upstream and downstream of WriteFrame() is unchanged.
 
 #include <atomic>
@@ -20,7 +20,7 @@ namespace phonecam::bridge {
 
 class LiveVideoBridge {
 public:
-    // Defaults to the adb-forward transport (Phase 3-5's proven path) --
+    // Defaults to the adb-forward transport (the proven path) --
     // pass an AoaVideoTransport (transport/AoaTransport.h) to run the same
     // decode/ring/vcam pipeline over AOA instead. See main.cpp's --aoa flag.
     explicit LiveVideoBridge(std::unique_ptr<phonecam::transport::VideoTransport> transport =
@@ -33,15 +33,15 @@ public:
     // still fails fast for those. The phone-side connection itself is not
     // required to succeed here: a background thread owns connect-or-retry,
     // so Start() returns as soon as the ring/decoder are ready, before the
-    // phone has necessarily started capture (Phase 5: reconnect robustness).
+    // phone has necessarily started capture (reconnect robustness).
     bool Start();
     void Stop();
 
-    // Cheap, thread-safe status snapshot for the tray icon (Phase 5) -- true only while the phone
+    // Cheap, thread-safe status snapshot for the tray icon -- true only while the phone
     // connection is actually up, not while the supervise loop is retrying.
     bool IsConnected() const { return connected_.load(); }
 
-    // Thin forwarders so main.cpp/the tray (Phase 4) can reach the ring's standing settings
+    // Thin forwarders so main.cpp/the tray can reach the ring's standing settings
     // without touching the private ring_ member directly. SetTransform is a no-op (returns false)
     // until Start() has opened the ring; GetNegotiatedSize reports 0,0 the same way until the vcam
     // side has negotiated a size at least once.

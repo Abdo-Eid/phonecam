@@ -34,6 +34,8 @@ Each is sent inside a `ControlEnvelope` with a fresh, monotonically increasing
 | Command | Camera2 mapping | Notes |
 |---|---|---|
 | `Start` / `Stop` | opens/closes the `CameraCaptureSession` and encoder | `Stop` keeps the control socket alive, just halts the video channel |
+| `StartVideo` | starts a capture session and names the transport to deliver it on | `mode` is `FramedTcp` (the phone binds its video socket and the PC's video transport connects to it) or `Rtp` (the phone streams RTP/H.264 straight to the PC's `rtp_port`). The PC's address is learned from the control connection itself, so this command is both the wake-up and the destination discovery. Answered `Ack{Busy}` if the phone is already streaming on another transport |
+| `StopVideo` | stops a session started by `StartVideo` | the control channel stays open |
 | `SetResolution` | re-negotiates the `MediaCodec` input `Surface` + repeating request | triggers a new `CONFIG` on the video channel |
 | `SetFps` | `CONTROL_AE_TARGET_FPS_RANGE` (fixed range `[fps, fps]`) | clamp to the resolution's `max_fps` from `Resolution` |
 | `SetBitrate` | `MediaCodec` dynamic bitrate (`PARAMETER_KEY_VIDEO_BITRATE`) | no re-negotiation needed |
@@ -94,10 +96,17 @@ Each is sent inside a `ControlEnvelope` with a fresh, monotonically increasing
 Implemented and verified against the real device: the whole handshake
 (`CapabilityDescriptor` on connect), `SetZoomRatio`, `SetEv`, `SetTorch`,
 `SetFocusMode`, `TapToFocus`, `RequestKeyframe`, `SetBitrate`, `SetLens`
-(with `LensChanged` + `CurrentSettings` confirmation), and `Ack` for all of
+(with `LensChanged` + `CurrentSettings` confirmation), `StartVideo` /
+`StopVideo`, and `Ack` for all of
 the above. The host side is a console command surface
 (`windows/host/control/ConsoleControlUi`), not a GUI yet — see
 `docs/architecture.md`'s Phase 4 section for why.
+
+**The control channel is durable**: it is owned by the phone's `CaptureService`,
+not by the capture session, so it keeps serving across a video Stop/Start and
+exists while the phone is idle. That is what lets the PC wake a phone that
+isn't streaming yet (`StartVideo`) — a channel that only existed during a
+capture could never receive the command that starts one.
 
 **Not yet implemented** (the phone replies `Ack{Unsupported}`):
 `SetResolution`, `SetFps` (blocked on `windows/vcam` only supporting one
@@ -106,8 +115,5 @@ fixed stream size — see architecture.md), `SetManualExposure`,
 `SetStabilization` (deferred by choice since Phase 2, not by device
 capability — a live capability probe now shows this device actually
 supports `MANUAL_SENSOR` on both lenses), `Start`, `Stop` (video
-start/stop is still driven by the phone's own UI, not the control
-channel). `Stats` telemetry exists as a method but isn't pushed
-periodically yet. The control channel's lifecycle is tied to
-`CaptureController`'s (torn down on video Stop, not durable the way this
-doc describes) — Phase 5 robustness scope.
+start/stop is driven by the PC's `StartVideo`/`StopVideo` or the phone's own
+UI). `Stats` telemetry is pushed roughly once a second while streaming.

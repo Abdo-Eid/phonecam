@@ -15,6 +15,19 @@ namespace pcc = phonecam::control;
 
 namespace {
 
+// The control-protocol version this host understands. The phone reports its
+// own in CapabilityDescriptor.protocol_version.
+//
+// This check is not ceremony: FlatBuffers assigns union payload types by
+// declaration order, so adding a command to the union RENUMBERS the existing
+// ones. A host and a phone app built against different schema versions then
+// interpret each other's payload types differently -- silently, and in a way
+// that looks like a broken camera rather than a version mismatch. The version
+// number turns that into a legible error instead.
+//
+// Bump this whenever proto/control.fbs's ControlPayload union changes shape.
+constexpr uint16_t kSupportedProtocolVersion = 2;
+
 CapabilityInfo DecodeCapabilities(const pcw::CapabilityDescriptor* d) {
     CapabilityInfo out;
     if (!d) return out;
@@ -138,6 +151,11 @@ ControlMessage DecodeEnvelope(const uint8_t* data, size_t size) {
         }
         default:
             msg.kind = ControlMsgKind::Unknown;
+            // Logged rather than silently ignored: an unrecognized payload type means the phone
+            // and the host disagree about the protocol (e.g. a newer phone app sending a command
+            // this host doesn't know), and that's worth seeing in the log.
+            phonecam::log::Error("ControlChannel: unrecognized payload type " +
+                                 std::to_string(static_cast<int>(envelope->payload_type())));
             break;
     }
     return msg;
@@ -187,6 +205,19 @@ void ControlChannel::RunReceiveLoop(const ControlMessageHandler& onMessage) {
             std::lock_guard<std::mutex> lock(impl_->cacheMutex);
             impl_->lastCapabilities = msg.capabilities;
             impl_->hasCapabilities = true;
+            if (msg.capabilities.protocolVersion != kSupportedProtocolVersion) {
+                const std::string phoneVersion = std::to_string(msg.capabilities.protocolVersion);
+                const std::string hostVersion = std::to_string(kSupportedProtocolVersion);
+                if (msg.capabilities.protocolVersion > kSupportedProtocolVersion) {
+                    phonecam::log::Error("ControlChannel: the phone app speaks control protocol v" + phoneVersion +
+                                         " but this host speaks v" + hostVersion +
+                                         " -- update phonecam-host.exe, or the two will misread each other");
+                } else {
+                    phonecam::log::Error("ControlChannel: the phone app speaks control protocol v" + phoneVersion +
+                                         " but this host speaks v" + hostVersion +
+                                         " -- update the phone app, or the two will misread each other");
+                }
+            }
         } else if (msg.kind == ControlMsgKind::Settings) {
             std::lock_guard<std::mutex> lock(impl_->cacheMutex);
             impl_->lastSettings = msg.settings;
@@ -238,6 +269,20 @@ uint32_t ControlChannel::SendSetBitrate(uint32_t bitrateBps) {
 uint32_t ControlChannel::SendSetLens(const std::string& cameraId) {
     return impl_->SendCommand(pcc::ControlPayload::SetLens, [&](fb::FlatBufferBuilder& fbb) {
         return pcc::CreateSetLensDirect(fbb, cameraId.c_str()).Union();
+    });
+}
+
+uint32_t ControlChannel::SendStartVideo(uint16_t width, uint16_t height, uint16_t fps, uint32_t bitrateBps,
+                                         uint16_t rtpPort, uint8_t mode) {
+    return impl_->SendCommand(pcc::ControlPayload::StartVideo, [&](fb::FlatBufferBuilder& fbb) {
+        return pcc::CreateStartVideo(fbb, static_cast<pcc::VideoTransportMode>(mode), width, height, fps, bitrateBps,
+                                     rtpPort).Union();
+    });
+}
+
+uint32_t ControlChannel::SendStopVideo() {
+    return impl_->SendCommand(pcc::ControlPayload::StopVideo, [&](fb::FlatBufferBuilder& fbb) {
+        return pcc::CreateStopVideo(fbb).Union();
     });
 }
 

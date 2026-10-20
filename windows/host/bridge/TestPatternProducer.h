@@ -8,10 +8,10 @@
 
 namespace phonecam::bridge {
 
-// Phase 1b dev/test tool: writes a synthetic animated NV12 pattern into the
+// Dev/test tool: writes a synthetic animated NV12 pattern into the
 // SharedFrameRing so the vcam side (and the whole shm contract) can be
 // verified without a real phone connected. Superseded by the real
-// H.264-decode bridge in Phase 3, which will write actually-decoded frames
+// H.264-decode bridge, which writes actually-decoded frames
 // through the same SharedFrameRing::WriteFrame() call.
 class TestPatternProducer {
 public:

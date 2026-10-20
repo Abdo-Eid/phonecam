@@ -2047,3 +2047,101 @@ fallback on the strength of one device's behavior would be premature.
   the user's whole flow is: enable tethering, open the app.
 - Wi-Fi falls out of this nearly free (`--net <host>` already targets an arbitrary address); it
   needs a discovery story and would trade USB latency for Wi-Fi jitter and battery drain. Not built.
+
+## The wireless transport: RTP over UDP, and a durable control channel
+
+Wi-Fi is now a first-class transport: `phonecam-host --rtp <phone-ip> [udp-port]`
+streams the phone's camera to the PC over **RTP/H.264 (RFC 6184) over UDP**,
+with the control channel still TCP to the same address. Verified live on the
+reference phone (Redmi Note 8, Android 11) with the phone on the laptop's
+Windows Mobile Hotspot -- i.e. a genuine one-hop link, not a router -- and a
+real frame pulled out of the virtual camera through DirectShow.
+
+**Why UDP, and not the framed TCP the other transports use.** For a live
+camera a late frame is worth less than a dropped one. TCP's retransmit and
+head-of-line blocking turn a single lost Wi-Fi frame into a latency spike
+that can outlast a whole GOP; UDP lets the receiver drop what it must and ask
+for a fresh keyframe instead. The control channel stayed TCP -- it was always
+just TCP; adb only ever provided a route to it.
+
+**The PC is the RTP receiver, the phone the sender.** The phone learns the
+PC's address from the control connection itself (the socket the PC connected
+on), so there is no address to type on the phone and no discovery protocol to
+speak of. The `StartVideo` command carries the PC's UDP port and the transport
+mode; the phone starts capture and streams.
+
+**What had to change underneath, and why each piece was necessary:**
+
+- **The control channel became durable.** It used to be created and destroyed
+  with each capture session, which made a PC-driven start impossible: a
+  channel that only exists *during* a capture can never receive the command
+  that *starts* one. It is now owned by `CaptureService` and keeps serving
+  across a video Stop/Start, and while the phone is idle. This is the design
+  the protocol doc described all along.
+- **The encoder's output is no longer an `OutputStream`.** `VideoPacketSink`
+  is the seam now: the framed-TCP and AOA paths adapt to it in one line
+  (`OutputStreamVideoSink`), and the RTP path implements it. Without that
+  seam, adding a transport would have meant touching the encoder's hot path.
+- **The PC can start the phone's capture over the control channel**
+  (`StartVideo`, with a `FramedTcp` or `Rtp` mode). This is also what makes
+  the framed-TCP path testable without touching the phone's screen -- a
+  phone-side start can't be automated on this device (MIUI blocks
+  `adb shell input tap`), and shouldn't have to be.
+
+**Four real bugs found by doing this, all fixed:**
+
+1. **A silent protocol mismatch.** FlatBuffers assigns union payload types by
+   declaration order, so adding `StartVideo`/`StopVideo` *renumbered* the
+   existing payload types. A host built against the new schema and a phone app
+   built against the old one then decoded every message as the wrong type --
+   the phone's `CapabilityDescriptor` came back as `SetStabilization`. It
+   looked like a broken camera, not a version mismatch. `protocol_version` now
+   exists for exactly this and the host checks it on connect, logging a
+   specific error; the number is bumped whenever the union changes shape.
+   Worth remembering: **a wire protocol whose message types are numbered by
+   declaration order needs a version number that is actually enforced.**
+2. **The RTP version byte was in the wrong bits.** The phone's packetizer
+   wrote `0x02` where RFC 3550 wants the version in the *top* two bits
+   (`0x80`). The receiver rejected every packet as a bad version, and the
+   symptom -- datagrams arriving steadily and nothing decoding -- looked
+   like a network problem rather than a one-bit bug. Found by dumping the
+   first few datagrams' bytes.
+3. **The phone's control channel was written from three threads without a
+   lock.** Each control message is a length prefix followed by its body, and
+   the Acks (control receive thread), the telemetry (stats thread) and the
+   lens/settings pushes (camera callback thread) all write to the same
+   socket. Interleaved writes corrupt the framing, and the PC then decodes
+   garbage -- observed live as a message arriving with payload type 0, i.e.
+   no payload at all. The phone side now serializes its sends, the same way
+   the host's `ControlTransport` already did. Worth remembering: **a length-
+   prefixed framing is only self-delimiting if one writer owns the socket.**
+4. **A reordered RTP packet was counted as a huge loss.** The receiver
+   treated any sequence number that wasn't the expected one as a forward gap,
+   so a packet that arrived a few milliseconds late -- an ordinary thing on
+   Wi-Fi -- was reported as "65533 packets lost", discarded the access unit
+   in progress, and triggered a pointless keyframe request. RFC 3550's rules
+   distinguish the two: a forward jump is loss, a backward jump is
+   reordering and the packet is simply ignored. Fixed, and the link now
+   reports 0 lost over a long session.
+
+**One known rough edge, not fixed:** the startup race between "the PC connects"
+and "the phone binds". The PC's video transport can reach the phone before the
+phone's video socket exists (the phone binds it when the session starts), so
+the first attempt fails and the PC's reconnect loop picks it up ~2s later.
+Not a bug, but a visible 2s delay on every cold start; the fix is for the
+phone to bind before answering `StartVideo`, which the capture path doesn't do
+yet.
+
+**Where the pieces are:** `windows/host/transport/RtpVideoTransport.*` (the
+receiver: depacketizer, access-unit reassembly, loss detection, keyframe
+request), `android/.../rtp/RtpVideoSink.kt` (the sender), and
+`android/.../transport/VideoPacketSink.kt` (the seam). The protocol details
+are in [`wire-protocol.md`](wire-protocol.md) and
+[`control-protocol.md`](control-protocol.md).
+
+**Not done:** discovery (the phone's address is typed on the command line),
+hotspot setup automation, latency measurement (the tools for it aren't
+written yet -- the claim "it's faster than USB" is *not* verified, only
+"it works"), and any authentication. That last one is the important caveat:
+a wireless camera stream is currently unauthenticated, so anyone on the link
+can watch the feed and drive the camera controls.

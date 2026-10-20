@@ -98,6 +98,37 @@ Encoders on both sides use `include "wire.fbs"` codegen for
 `phonecam::control::ControlEnvelope` — see `docs/build.md` for the flatc
 invocation wired into each build.
 
+## Video over RTP/UDP (the wireless transport)
+
+The transports above deliver the video channel over a reliable byte stream. The
+wireless transport doesn't: it carries H.264 as **RTP (RFC 3550) over UDP**,
+packetized per **RFC 6184**.
+
+Why: for a live camera, a late frame is worth less than a dropped one. TCP's
+retransmit and head-of-line blocking turn one lost Wi-Fi frame into a latency
+spike that can outlast a whole GOP. UDP lets the receiver drop what it must
+and ask for a fresh keyframe instead. The control channel stays TCP (it was
+always just TCP -- adb only ever provided a route to it).
+
+| | |
+|---|---|
+| Ports | video: **UDP 27185** on the PC (the PC binds it), control: TCP 27184 to the phone |
+| Packetization | single NAL unit packets; FU-A for NALs larger than 1400 bytes |
+| Payload type | 96 (dynamic), 90 kHz clock |
+| Marker bit | set on the last packet of every access unit |
+| Loss handling | a sequence gap drops the in-progress access unit and asks the phone for a keyframe (`RequestKeyframe` over the control channel) |
+
+Each encoder output buffer is one access unit, so the packetizer's call
+boundaries are access-unit boundaries by construction -- the receiver never has
+to guess where a frame ends. The receiver reassembles access units, detects a
+new picture by its first macroblock, and hands whole access units to the
+decoder, exactly as the framed transports do.
+
+The PC is the RTP *receiver* and the phone the *sender*. The phone learns the
+PC's address from the control connection itself (see
+[`control-protocol.md`](control-protocol.md)'s `StartVideo`), so there is no
+address to type on the phone and no discovery protocol to speak of.
+
 ## Versioning
 
 `CapabilityDescriptor.protocol_version` and any future breaking change bump a
@@ -105,3 +136,14 @@ single integer. The host refuses to proceed (shows an "update the app on your
 phone" style error) if the phone's `protocol_version` is newer than what the
 host understands; the phone does the same in reverse if it ever needs to. Until
 v1.0 this number may change freely between phases.
+
+**The version number is not optional bookkeeping here.** FlatBuffers assigns
+union payload types by declaration order, so *adding a command to
+`ControlPayload` renumbers the existing ones*. A host and a phone app built
+against different schema versions then interpret each other's payload types
+differently -- silently, and in a way that looks like a broken camera rather
+than a version mismatch. This was hit for real: a host with the wireless
+commands talked to a phone app without them, and every message was decoded as
+the wrong type. The host now checks the phone's reported version on connect
+and logs a specific error either way; bump `protocol_version` (both sides)
+whenever the union changes shape.

@@ -45,6 +45,8 @@ add_executable(phonecam-host WIN32
     transport/AoaTransport.cpp
     transport/NetTransport.h
     transport/NetTransport.cpp
+    transport/RtpVideoTransport.h
+    transport/RtpVideoTransport.cpp
     control/ControlTransport.h
     control/ControlTransport.cpp
     control/ControlChannel.h
@@ -58,7 +60,7 @@ add_executable(phonecam-host WIN32
 
 add_dependencies(phonecam-host phonecam_proto_gen)
 
-# Phase 7: AOA transport (transport/AoaTransport.h) needs libusb, already
+# The AOA transport (transport/AoaTransport.h) needs libusb, already
 # vendored for windows/tools/aoa_probe -- same include/lib/dll layout.
 set(LIBUSB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/libusb)
 

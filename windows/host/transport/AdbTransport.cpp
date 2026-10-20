@@ -63,9 +63,9 @@ bool ReadExact(SOCKET s, uint8_t* buffer, size_t size) {
 struct AdbVideoTransport::Impl {
     SOCKET sock = INVALID_SOCKET;
     bool wsaOk = false;
-    // Guards sock: Phase 5's reconnect loop calls Connect() repeatedly from a
+    // Guards sock: the reconnect loop calls Connect() repeatedly from a
     // worker thread while Stop()/dtor can call Disconnect() from another
-    // thread at any time, including mid-Connect() -- unlike Phase 3B, where
+    // thread at any time, including mid-Connect() -- unlike the original, where
     // Connect() only ever ran once, synchronously, before any thread existed.
     std::mutex mutex;
     // Set by Disconnect() before it touches sock, checked by Connect() at its
@@ -80,7 +80,7 @@ struct AdbVideoTransport::Impl {
 AdbVideoTransport::AdbVideoTransport() : impl_(std::make_unique<Impl>()) {
     // WSAStartup/WSACleanup are meant to be paired once per session, not once
     // per connection attempt -- doing that per-Connect()/Disconnect() (as
-    // Phase 3B did, when there was only ever one attempt) is unsafe once a
+    // there was only ever one attempt) is unsafe once a
     // reconnect loop can race a fresh Connect() against a Stop()-triggered
     // Disconnect() calling WSACleanup() while the new attempt's socket is
     // still in use.

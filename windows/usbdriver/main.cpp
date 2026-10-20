@@ -1,7 +1,7 @@
 // phonecam-usbdriver.exe: elevated helper that binds a libusbK driver to a
 // phone's normal-mode USB device, so the AOA transport (windows/host/transport/
 // AoaTransport.cpp) can talk to it without the user ever running Zadig
-// themselves. See docs/architecture.md's Phase 7 driver-auto-install sections
+// themselves. See docs/architecture.md's driver-auto-install sections
 // for the full investigation this is built on -- in particular, the finding
 // that the binding must target the phone's CURRENT (not accessory-mode)
 // device, and that a composite device (USB debugging ON, exposing ADB/MTP

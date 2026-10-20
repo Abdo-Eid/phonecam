@@ -9,7 +9,7 @@
 
 namespace
 {
-	// Real, app-negotiated resolution (Phase 7): the vcam advertises multiple sizes and lets the
+	// Real, app-negotiated resolution: the vcam advertises multiple sizes and lets the
 	// consuming app (Zoom/OBS/Chrome/...) pick one via normal MF/DirectShow negotiation, exactly
 	// like a real UVC webcam -- there's no other mechanism, and forcing a live format change on a
 	// running consumer would make the device disappear out from under it rather than gracefully
@@ -46,7 +46,7 @@ namespace
 		else // NV12
 		{
 			// Y-plane stride -- NOT width*1.5. Setting this to the whole-frame byte multiplier
-			// (the pre-Phase-7 bug) is evidence this type was never actually exercised by a real
+			// (the earlier stride bug) is evidence this type was never actually exercised by a real
 			// consumer, since a wrong MF_MT_DEFAULT_STRIDE here would misread every NV12 sample.
 			type->SetUINT32(MF_MT_DEFAULT_STRIDE, width);
 			type->SetUINT32(MF_MT_SAMPLE_SIZE, (UINT32)((UINT64)width * height * 3 / 2));

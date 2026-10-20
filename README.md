@@ -24,11 +24,11 @@ So PhoneCam plays that same architecture straight, and competes on what the paid
 Android app                     USB                  Windows host              Virtual camera
 Camera2 → MediaCodec   ──►  USB tethering  ──►   Media Foundation    ──►   MFCreateVirtualCamera
 (H.264, zero-copy)          / ADB / AOA          H.264 decode              seen by ALL apps
-     ▲                                                 │
+     ▲       / Wi-Fi (RTP)                         │
      └──────────────── control channel (bidirectional) ┘
 ```
 
-The phone captures and hardware-encodes video, streams it over USB, and a Windows host process decodes it and feeds a registered [`MFCreateVirtualCamera`](https://learn.microsoft.com/en-us/windows/win32/api/mfvirtualcamera/) media source — which Windows' Frame Server serves to both Media Foundation apps (Chrome, Windows Camera, new Teams) and DirectShow apps (Zoom, classic OBS) at once. A bidirectional control channel carries camera commands (PC → phone) and capabilities/telemetry (phone → PC).
+The phone captures and hardware-encodes video, streams it over USB (or Wi-Fi), and a Windows host process decodes it and feeds a registered [`MFCreateVirtualCamera`](https://learn.microsoft.com/en-us/windows/win32/api/mfvirtualcamera/) media source — which Windows' Frame Server serves to both Media Foundation apps (Chrome, Windows Camera, new Teams) and DirectShow apps (Zoom, classic OBS) at once. A bidirectional control channel carries camera commands (PC → phone) and capabilities/telemetry (phone → PC).
 
 Three USB transports exist side by side, auto-detected at startup in this order:
 
@@ -36,7 +36,7 @@ Three USB transports exist side by side, auto-detected at startup in this order:
 - **ADB** — needs Developer Options → USB debugging on. The original, fully proven path; still the fallback when tethering isn't available but debugging is.
 - **AOA** (Android Open Accessory) — no Developer Options either, but it needs a Windows driver bound to the phone (handled automatically, one admin prompt, no Zadig) which makes file transfer unavailable until reverted, and it carries video only. Kept as the last resort for devices where the carrier gates USB tethering.
 
-Nothing about this is wireless — tethering is a USB cable carrying a network protocol, which is exactly why it keeps USB's latency while needing none of USB's driver machinery.
+A **wireless** transport also exists: `phonecam-host --rtp <phone-ip>` streams the camera as RTP/H.264 over UDP to the PC's port 27185, with the control channel over TCP to the same address. Put the phone on the same Wi-Fi (or on the PC's own hotspot) and no cable, driver, or Developer Options is involved. It is opt-in because the phone's address is typed on the command line for now — there's no discovery yet.
 
 Full design and phased roadmap: [`docs/architecture.md`](docs/architecture.md).
 
@@ -60,7 +60,7 @@ Not yet a finished product — actively developed, most of the core pipeline wor
 - Full tray controls: camera/lens switch, zoom, exposure, torch, focus mode, plus the rotation/mirror above and a read-only resolution display — all real submenus, not stubs, populated from the phone's own reported capabilities (a control never appears unless the phone actually supports it). Resolution is display-only by design: the consuming app picks it, exactly like a real webcam, so you set it in OBS/Zoom/Chrome's own device settings.
 - Camera controls need either USB tethering or ADB — they don't work over AOA, which carries video only.
 
-**Not built yet:** a proactive nudge for first-time users (today the tray items are there to click, but nothing prompts you toward them automatically), the installer itself (registers the vcam, bundles what's needed — including the USB driver helper), Wi-Fi as a transport (the network transport already accepts an explicit address, but there's no discovery or UI for it), and synced audio.
+**Not built yet:** a proactive nudge for first-time users (today the tray items are there to click, but nothing prompts you toward them automatically), discovery for the wireless transport (the phone's address is typed on the command line for now), latency measurement for it, authentication for it (a wireless camera stream is currently open to anyone on the link), and synced audio.
 
 See [`docs/architecture.md`](docs/architecture.md) for the full phase-by-phase history, including real bugs found and fixed along the way.
 

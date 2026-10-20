@@ -1,4 +1,4 @@
-; PhoneCam installer (Phase 5). Built with Inno Setup (ISCC.exe) -- see docs/build.md for the
+; PhoneCam installer. Built with Inno Setup (ISCC.exe) -- see docs/build.md for the
 ; exact command and prerequisites for both source-side and installer testing.
 ;
 ; What this installs and why, matching the pieces each already has a working implementation of
@@ -9,7 +9,7 @@
 ;     C:\ProgramData\PhoneCam, the SAME path PhoneCamVCam.vcxproj's PostBuildEvent already
 ;     refreshes on every dev build -- keep these in sync; two different "the registered copy"
 ;     paths is exactly the bug that PostBuildEvent was added to fix (see docs/architecture.md's
-;     Phase 5 section).
+;     installer section).
 ;   - adb.exe + its two DLLs (third_party/platform-tools, vendored, not a submodule -- see that
 ;     directory) -- bundled next to phonecam-host.exe. No code change was needed for this to work:
 ;     CreateProcessW's search order (used by AdbTransport.cpp / ControlTransport.cpp's
@@ -20,7 +20,7 @@
 ;   - regsvr32 register/unregister of the vcam DLL, both directions.
 ;
 ; NOT verified by this script or by running it once: "clean install on a fresh Windows account"
-; (Phase 5's actual roadmap exit criterion) -- only verifiable on hardware this session doesn't
+; (the installer's actual roadmap exit criterion) -- only verifiable on hardware this session doesn't
 ; have. What WAS verified here: the installer builds, installs, the service installs/starts, the
 ; DLL registers, and the virtual camera is visible via DirectShow after an uninstall-then-install
 ; cycle on this machine (not just re-blessing already-installed state). See docs/build.md.

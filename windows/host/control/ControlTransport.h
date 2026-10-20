@@ -30,7 +30,7 @@ public:
     // localabstract:phonecam_control` and connects to 127.0.0.1, retrying
     // briefly (same rationale as AdbVideoTransport::Connect).
     //
-    // With `host` set (Phase 8: USB tethering / Wi-Fi, see
+    // With `host` set (USB tethering / Wi-Fi, see
     // transport/NetTransport.h): skips adb entirely and connects straight to
     // that address. This is what makes the camera controls work with USB
     // debugging off -- over AOA this channel had no route to the phone at all,

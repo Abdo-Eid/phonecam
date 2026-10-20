@@ -1,11 +1,11 @@
-// Throwaway diagnostic tool for Phase 7 (AOA transport) -- NOT part of the shipping product.
+// Throwaway diagnostic tool for the AOA transport -- NOT part of the shipping product.
 // Answers two questions before any production code gets written against them:
 //   1. Does the Redmi Note 8 show up over libusb at all, and what's its current (pre-accessory)
 //      PID? (Xiaomi VID is 0x2717.)
 //   2. Once bound to a libusb-usable driver (WinUSB via Zadig -- NOT done by this tool), does the
 //      phone answer the AOA handshake, and which PID does it re-enumerate as afterward? 0x2D01
 //      (accessory+adb) vs 0x2D00 (accessory-only) decides whether the adb dev loop survives
-//      Phase 7 development -- see docs/architecture.md's Phase 7 section.
+//      AOA development -- see docs/architecture.md's AOA section.
 //
 // Run with no args: enumerate-only, safe, no driver changes required.
 // Run with --handshake: also attempts the AOA handshake -- requires the phone's relevant
@@ -35,7 +35,7 @@ int ReadCheckpointLoop(libusb_context* ctx);  // defined below; RunHandshake cal
 // Frame tags for the host->phone OUT-direction tests below. Not the real wire-protocol.md
 // Channel enum -- this is a throwaway rehearsal of "1-byte tag + self-delimiting body" framing,
 // specifically to prove the OUT direction and multi-packet reassembly work before any of that
-// design goes into production code. See docs/architecture.md's Phase 7 section.
+// design goes into production code. See docs/architecture.md's AOA section.
 constexpr uint8_t kTagTextMarker = 0;   // body: ASCII text ending in '\n'
 constexpr uint8_t kTagLengthPrefixed = 1;  // body: 4-byte LE length + that many pattern bytes
 
@@ -174,7 +174,7 @@ int RunHandshake(libusb_context* ctx) {
 
     std::printf("ACCESSORY_START sent. Phone should disconnect and re-enumerate as VID 0x18D1.\n");
     std::printf("Waiting up to 10s for re-enumeration (this can take longer than the AOA spec's\n");
-    std::printf("usual few seconds -- confirmed empirically this phase)...\n");
+    std::printf("usual few seconds -- confirmed empirically during development)...\n");
 
     // --handshake's only job now is switching the phone into accessory mode and confirming it --
     // it used to also run ReadCheckpointLoop, but that tested AoaAccessoryTransport's throwaway
@@ -376,7 +376,7 @@ int ReadCheckpointLoop(libusb_context* ctx) {
     }
 
     // OUT-direction + multi-packet reassembly proof (advisor-recommended, see
-    // docs/architecture.md's Phase 7 section): the IN-direction checkpoint above proves nothing
+    // docs/architecture.md's AOA section): the IN-direction checkpoint above proves nothing
     // about writing host->phone, nor about payloads larger than one bulk transfer/read() call.
     // Both are required for the real control channel (bidirectional) and video channel (frames
     // far bigger than wMaxPacketSize=512). Verify success via `adb logcat -s PhoneCamAoa` on the
@@ -452,18 +452,18 @@ int ReadCheckpointLoop(libusb_context* ctx) {
     return 0;
 }
 
-// Phase 7's Phase-3B-equivalent proof: the real AoaTransport.kt (Android) tags real
+// The AOA-equivalent of the live-transport proof: the real AoaTransport.kt (Android) tags real
 // WireFraming-framed H.264 packets as Channel.Video and writes them over the same accessory pipe
 // -- this reads them back, strips the 1-byte channel tag and WireFraming's own 20-byte header,
 // and appends the raw Annex-B payload to a file, same discriminating check as
-// docs/architecture.md's Phase 3B ("if the reassembled file decodes cleanly with ffmpeg, the
+// docs/architecture.md ("if the reassembled file decodes cleanly with ffmpeg, the
 // framing is byte-correct end to end"). Requires MainActivity's TEMPORARY AoaTransport test
 // wiring to already be running a capture session (see its class doc comment) -- this tool does
 // not trigger capture itself, only reads whatever the phone is already sending.
 //
 // Deliberately reads into a generously-sized buffer and parses from an accumulator, never a
 // small/fixed-size read per message -- see AoaAccessoryTransport.kt's doc comment for the
-// concrete bug (permanently losing bytes) that shape of bug caused earlier in this phase.
+// concrete bug (permanently losing bytes) that shape of bug caused earlier in development.
 int RunTestVideo(libusb_context* ctx, const std::wstring& outputPath) {
     libusb_device_handle* handle = nullptr;
     int accessoryInterfaceNum = -1;

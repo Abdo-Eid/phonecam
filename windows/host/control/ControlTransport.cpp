@@ -58,14 +58,14 @@ struct ControlTransport::Impl {
     SOCKET sock = INVALID_SOCKET;
     bool wsaOk = false;
     // Same race and same fix as AdbVideoTransport::Impl (see its comments):
-    // Phase 5's reconnect loop calls Connect() from a worker thread while
+    // The reconnect loop calls Connect() from a worker thread while
     // Stop()/dtor can call Disconnect() from another thread at any time.
     std::mutex mutex;
     std::atomic<bool> cancelled{false};
     // Separate from `mutex` (which guards connect/disconnect of `sock` itself) on purpose: a
     // send racing a concurrent Disconnect() should fail fast on the INVALID_SOCKET check below,
     // not block waiting for a lock an unrelated teardown is holding. Needed now that the tray
-    // (Phase 4: lens/zoom/ev/torch/focus menu clicks, on the tray's message-pump thread) is a
+    // (lens/zoom/ev/torch/focus menu clicks, on the tray's message-pump thread) is a
     // second concurrent sender alongside ConsoleControlUi's console-input thread -- interleaved
     // length-prefix + body writes from two threads would corrupt framing on the wire.
     std::mutex sendMutex;
@@ -150,8 +150,8 @@ void ControlTransport::Disconnect() {
     if (impl_->sock != INVALID_SOCKET) {
         // shutdown() before closesocket(): the documented-safe way to unblock
         // a concurrent recv() on this socket from RunReceiveLoop's thread
-        // (see AdbVideoTransport::Disconnect for the same fix, found in
-        // Phase 3B).
+        // (see AdbVideoTransport::Disconnect for the same fix, found while
+        // fixing the live-transport reconnect path).
         shutdown(impl_->sock, SD_BOTH);
         closesocket(impl_->sock);
         impl_->sock = INVALID_SOCKET;

@@ -30,8 +30,8 @@
 
 namespace phonecam::shm {
 
-// Bumped v1 -> v2 when RingHeader gained the transform field (Phase 7,
-// rotation/mirror): a name bump makes an old/new binary mismatch structurally
+// Bumped v1 -> v2 when RingHeader gained the transform field (rotation/mirror): a name bump
+// makes an old/new binary mismatch structurally
 // impossible to alias onto the same mapping, rather than relying on a
 // version-field check both sides have to remember to add. Whichever binary
 // (host or vcam DLL) gets redeployed second after this change simply creates
@@ -85,7 +85,7 @@ struct RingHeader {
     std::atomic<uint32_t> transform;
     // What the consuming app actually negotiated (MediaStream::Start's MF_MT_FRAME_SIZE),
     // published by the vcam DLL on every draw -- read by the host's tray as a read-only display
-    // (there's no PC-side "push resolution" mechanism; see docs/architecture.md's Phase 7 section).
+    // (there's no PC-side "push resolution" mechanism; see docs/architecture.md's vcam-resolution section).
     // 0,0 until a consumer has negotiated at least once.
     std::atomic<uint32_t> negotiatedWidth;
     std::atomic<uint32_t> negotiatedHeight;
@@ -272,7 +272,7 @@ public:
 
     // Consumer: block until a new frame is published, or timeoutMs elapses.
     // Optional -- TryReadLatestFrame() alone is enough for a poll-driven
-    // reader (e.g. MediaStream's per-frame pull in Phase 1b); this exists for
+    // reader (e.g. MediaStream's per-frame pull in the shared-memory design); this exists for
     // a future push-driven consumer.
     bool WaitForFrame(DWORD timeoutMs) {
         if (!readyEvent_) {

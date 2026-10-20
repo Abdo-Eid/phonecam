@@ -1,6 +1,7 @@
 package io.github.abdoeid.phonecam.control
 
 import android.content.Context
+import android.util.Log
 import com.google.flatbuffers.FlatBufferBuilder
 import io.github.abdoeid.phonecam.transport.ControlSocketServer
 import java.io.EOFException
@@ -22,11 +23,13 @@ import phonecam.control.SetFocusMode
 import phonecam.control.SetLens
 import phonecam.control.SetTorch
 import phonecam.control.SetZoomRatio
+import phonecam.control.StartVideo
 import phonecam.control.Stats
+import phonecam.control.StopVideo
 import phonecam.control.TapToFocus
 
 /**
- * Handlers for PC -> phone commands this phase implements. Handlers run on ControlChannel's
+ * Handlers for PC -> phone commands this channel implements. Handlers run on ControlChannel's
  * receive thread; implementations that touch Camera2/MediaCodec objects owned by another thread
  * hop appropriately themselves (same pattern CaptureController already uses for camera callbacks).
  * Each handler returns an [AckResult] so ControlChannel can send the Ack -- see
@@ -41,53 +44,106 @@ interface ControlCommandListener {
   fun onRequestKeyframe(): Byte
   fun onSetBitrate(bitrateBps: Int): Byte
   fun onSetLens(cameraId: String): Byte
+
+  /**
+   * Start streaming live camera video to the PC. [mode] says how (framed TCP
+   * socket, or RTP over UDP); [rtpPort] is the PC-side UDP port for RTP mode.
+   *
+   * The PC's address comes from the control connection itself (the phone
+   * learns it from the socket the PC connected on) -- there is no address to
+   * type on the phone and no discovery protocol to speak of.
+   *
+   * Return AckResult.Ok only if the session actually started; the reply is what the PC
+   * treats as "video is coming".
+   *
+   * The default is "not implemented here": the camera-command listener in CaptureController
+   * knows nothing about sessions, while the service that owns the capture lifecycle
+   * implements both.
+   */
+  fun onStartVideo(mode: Int, width: Int, height: Int, fps: Int, bitrateBps: Int, rtpPort: Int): Byte =
+    AckResult.Unsupported
+
+  /** Stop a wireless session started by [onStartVideo]. The control channel stays open. */
+  fun onStopVideo(): Byte = AckResult.Unsupported
 }
 
 /**
- * Owns the phonecam_control socket for one capture session: accepts the PC's connection, sends
+ * Owns the phonecam_control socket: accepts the PC's connection, sends
  * CapabilityDescriptor immediately (docs/wire-protocol.md's control-channel handshake), then
  * dispatches incoming commands to [listener] and exposes send* methods for telemetry.
  *
- * Scoped to this phase: control and video share one start()/stop() lifecycle via
- * CaptureController (unlike the full protocol doc, which allows control to outlive a Stop) --
- * making control durable across video Stop/Start is Phase 5 robustness scope.
+ * Durable by design: the channel is owned by CaptureService and keeps serving across capture
+ * sessions, so a PC can command a phone that is sitting idle (starting a wireless session, for
+ * instance) -- a channel that only existed while a capture was running could never receive the
+ * command that starts one. A PC that disconnects and comes back is served by the same
+ * listener, without rebinding the socket.
  */
 class ControlChannel(private val context: Context, private val listener: ControlCommandListener) {
   private val server = ControlSocketServer()
   private var output: OutputStream? = null
-  private var receiveThread: Thread? = null
   private val stopped = AtomicBoolean(false)
 
+  // Guards writes to the control socket -- see sendBytes.
+  private val sendLock = Any()
+
   /**
-   * Binds and blocks in accept() until the PC connects (or [stop] unblocks it), then sends
-   * CapabilityDescriptor and starts the receive loop on a new background thread. Call this from a
-   * background thread -- accept() blocks.
+   * The address of the PC this session is connected to, or null when the connection came
+   * through the adb-forwarded abstract socket (where the peer address is meaningless).
+   * A wireless session needs a real address to stream to.
    */
-  fun start(isCancelled: () -> Boolean = { false }) {
+  @Volatile
+  var peerAddress: String? = null
+    private set
+
+  /**
+   * Binds the listeners, then serves control sessions until [isCancelled] (or [stop] is
+   * called): accept a PC, send capabilities, run the receive loop until it disconnects, then
+   * accept the next one.
+   *
+   * Blocks -- call it from a background thread. The socket is bound exactly once here (not per
+   * session): re-binding the same abstract name while the previous listener still holds it
+   * fails with "Address already in use", which is why a per-session bind would be wrong.
+   */
+  fun runSessions(isCancelled: () -> Boolean = { false }) {
     stopped.set(false)
     server.open(isCancelled)
-    val (input, out) = server.accept(isCancelled)
-    if (stopped.get()) {
-      try {
-        input.close()
-        out.close()
-      } catch (_: IOException) {
-        // already torn down
+    while (!isCancelled() && !stopped.get()) {
+      val session =
+        try {
+          server.accept(isCancelled)
+        } catch (e: IOException) {
+          // A real accept failure (not our own close) shouldn't kill the channel -- the PC
+          // simply isn't there yet, and the next accept() keeps waiting.
+          if (!isCancelled() && !stopped.get()) {
+            Log.w(TAG, "accept() failed, retrying", e)
+            continue
+          }
+          break
+        }
+      if (stopped.get()) {
+        try {
+          session.first.close()
+          session.second.close()
+        } catch (_: IOException) {
+          // already torn down
+        }
+        break
       }
-      return
+      val (input, out) = session
+      output = out
+      peerAddress = server.lastAcceptedAddress
+      sendCapabilities(out)
+      Log.i(TAG, "control session started (peer=$peerAddress)")
+      receiveLoop(input) // blocks until the PC disconnects
+      Log.i(TAG, "control session ended")
+      output = null
+      peerAddress = null
     }
-    output = out
-    sendCapabilities(out)
-    receiveThread = Thread({ receiveLoop(input) }, "ControlChannel-recv").apply { start() }
   }
 
   fun stop() {
     if (!stopped.compareAndSet(false, true)) return
     server.close() // unblocks a pending accept() or receiveLoop's read
-    if (receiveThread !== Thread.currentThread()) {
-      receiveThread?.join(1000)
-    }
-    receiveThread = null
     output = null
   }
 
@@ -132,7 +188,7 @@ class ControlChannel(private val context: Context, private val listener: Control
     sendBytes(builder)
   }
 
-  // Phase 6: periodic telemetry, previously defined in the protocol (proto/control.fbs) but
+  // Periodic telemetry, previously defined in the protocol (proto/control.fbs) but
   // never sent -- CaptureController calls this roughly once a second while streaming (see its
   // statsJob), feeding the adaptive-bitrate policy there and the host console's "Stats" line.
   fun sendStats(encodeFps: Float, bitrateKbps: Int, droppedFrames: Int, thermalStatus: Byte) {
@@ -164,14 +220,24 @@ class ControlChannel(private val context: Context, private val listener: Control
 
   private fun sendBytes(builder: FlatBufferBuilder) {
     val out = output ?: return
-    try {
-      val buf = builder.dataBuffer()
-      val bytes = ByteArray(buf.remaining())
-      buf.get(bytes)
-      ControlFraming.writeEnvelope(out, bytes)
-    } catch (_: IOException) {
-      // Best-effort: a send failure means the connection is already broken;
-      // the receive loop's own EOF/IO handling is what tears the session down.
+    // Serialized: the channel is written from three different threads -- the control receive
+    // thread (Acks), the stats thread (telemetry) and the camera callback thread (lens/settings)
+    // -- and each message is a length prefix followed by its body. Two threads interleaving
+    // those two writes corrupt the framing, and the PC then decodes garbage: confirmed live,
+    // as a control message that arrived with payload type 0 (i.e. no payload at all).
+    synchronized(sendLock) {
+      // Re-read the stream under the lock: the session can end between the check above and
+      // here, and writing to a closed stream would throw.
+      val current = output ?: return
+      try {
+        val buf = builder.dataBuffer()
+        val bytes = ByteArray(buf.remaining())
+        buf.get(bytes)
+        ControlFraming.writeEnvelope(current, bytes)
+      } catch (_: IOException) {
+        // Best-effort: a send failure means the connection is already broken;
+        // the receive loop's own EOF/IO handling is what tears the session down.
+      }
     }
   }
 
@@ -242,6 +308,17 @@ class ControlChannel(private val context: Context, private val listener: Control
           envelope.payload(t)
           listener.onSetLens(t.cameraId ?: "")
         }
+        ControlPayload.StartVideo -> {
+          val t = StartVideo()
+          envelope.payload(t)
+          listener.onStartVideo(t.mode.toInt(), t.width.toInt(), t.height.toInt(), t.fps.toInt(),
+            t.bitrateBps.toInt(), t.rtpPort.toInt())
+        }
+        ControlPayload.StopVideo -> listener.onStopVideo()
       else -> AckResult.Unsupported
     }
+
+  private companion object {
+    const val TAG = "ControlChannel"
+  }
 }

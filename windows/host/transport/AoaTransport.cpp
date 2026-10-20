@@ -18,7 +18,7 @@ namespace {
 
 // Same VID/PID facts aoa_probe/main.cpp already established live on the
 // reference device -- see its header comment and docs/architecture.md's
-// Phase 7 section for how these were learned (not assumed).
+// AOA section for how these were learned (not assumed).
 constexpr uint16_t kXiaomiVid = 0x2717;
 constexpr uint16_t kGoogleVid = 0x18D1;
 constexpr uint16_t kAccessoryPidLow = 0x2D00;

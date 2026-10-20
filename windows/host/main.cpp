@@ -21,14 +21,27 @@
 #include "transport/AdbTransport.h"
 #include "transport/AoaTransport.h"
 #include "transport/NetTransport.h"
+#include "transport/RtpVideoTransport.h"
 #include "tray/TrayIcon.h"
 #include "vcam_ctl/VCamControl.h"
+
+#include "control_generated.h"
 
 namespace {
 
 // d0255f4e-4471-47c4-91fc-0e74dcc93308 -- must match windows/vcam/dllmain.cpp
 constexpr GUID kVCamSourceClsid = {
     0xd0255f4e, 0x4471, 0x47c4, {0x91, 0xfc, 0x0e, 0x74, 0xdc, 0xc9, 0x33, 0x08}};
+
+// The capture parameters the PC asks for in the wireless StartVideo command.
+// They match the phone app's own capture defaults and the virtual camera's
+// declared stream size -- a mismatch on either side is exactly what silently
+// stretched the image on the PC side once before, so all three numbers have
+// to agree.
+constexpr uint16_t kWirelessWidth = 1920;
+constexpr uint16_t kWirelessHeight = 1080;
+constexpr uint16_t kWirelessFps = 30;
+constexpr uint32_t kWirelessBitrateBps = 6'000'000;
 
 // Set once, right before TrayIcon::RunMessageLoop() -- ConsoleHandler runs on a separate
 // OS-created thread (per SetConsoleCtrlHandler's contract), so Ctrl+C and the tray's own Exit
@@ -57,7 +70,7 @@ BOOL WINAPI ConsoleHandler(DWORD /*ctrlType*/) {
 
 // Splits a raw Annex-B buffer into per-NALU spans (each beginning at a
 // 00 00 01 start code, running up to the next one or EOF). Dev/test-only
-// (Phase 3A): real usage gets pre-chunked packets over the wire instead.
+// (dev-only): real usage gets pre-chunked packets over the wire instead.
 std::vector<std::vector<uint8_t>> SplitAnnexBNalus(const std::vector<uint8_t>& bytes) {
     std::vector<size_t> starts;
     for (size_t i = 0; i + 2 < bytes.size(); ++i) {
@@ -76,9 +89,9 @@ std::vector<std::vector<uint8_t>> SplitAnnexBNalus(const std::vector<uint8_t>& b
 
 uint8_t NaluType(const std::vector<uint8_t>& nalu) { return nalu.size() < 4 ? 0xFF : (nalu[3] & 0x1F); }
 
-// Phase 4 (tray controls): small label tables, matching ConsoleControlUi.cpp's own -- duplicated
+// Tray controls: small label tables, matching ConsoleControlUi.cpp's own -- duplicated
 // intentionally rather than shared, same reasoning as that class's own capability-cache
-// duplication (see ControlChannel.h's Phase 4 comment): different consumer, not worth coupling.
+// duplication (see ControlChannel.h's capability-cache comment): different consumer, not worth coupling.
 const char* AfModeName(int m) {
     switch (m) {
         case 0: return "Off";
@@ -142,7 +155,7 @@ std::vector<int32_t> EvPresets(int32_t evMin, int32_t evMax) {
     return out;
 }
 
-// Phase 1 (transport auto-detect): runs `adb devices` and checks for a
+// Transport auto-detect: runs `adb devices` and checks for a
 // line ending in a real device state ("...\tdevice"), as opposed to
 // "unauthorized"/"offline"/"no permissions"/absent entirely. Used once at
 // startup to decide adb vs. AOA -- see the useAoa computation in wmain.
@@ -192,7 +205,7 @@ bool DetectAdbDevicePresent() {
     return output.find("\tdevice") != std::string::npos;
 }
 
-// Phase 2 UX: launches windows/usbdriver/phonecam-usbdriver.exe (built to sit next to this
+// Driver helper UX: launches windows/usbdriver/phonecam-usbdriver.exe (built to sit next to this
 // exe, same directory PhoneCam.iss installs both into) elevated via ShellExecuteExW's "runas"
 // verb -- this is the ONE UAC prompt covering the whole install-or-revert operation, not
 // phonecam-host.exe itself, which stays asInvoker throughout (see its own build.md notes on
@@ -241,8 +254,8 @@ int RunUsbDriverHelperElevated(const wchar_t* args) {
     return static_cast<int>(exitCode);
 }
 
-// Phase 3A offline proof: decode a raw .h264 file (same shape as the
-// scratchpad captures already validated with ffmpeg in Phase 2) with zero
+// Offline proof: decode a raw .h264 file (same shape as the
+// scratchpad captures already validated with ffmpeg) with zero
 // phone/transport involvement, and dump one decoded frame's packed NV12 so
 // it can be diffed against the known-good ffmpeg-extracted frame. See
 // docs/architecture.md.
@@ -285,7 +298,7 @@ int RunTestDecode(const std::wstring& inputPath, const std::wstring& outputPath)
     };
 
     // Group leading SPS/PPS (types 7/8) into one CONFIG-style feed, matching
-    // how they'll arrive as one wire-protocol CONFIG packet in Phase 3C.
+    // how they'll arrive as one wire-protocol CONFIG packet.
     std::vector<uint8_t> config;
     size_t idx = 0;
     while (idx < nalus.size()) {
@@ -309,10 +322,10 @@ int RunTestDecode(const std::wstring& inputPath, const std::wstring& outputPath)
     return dumped ? 0 : 1;
 }
 
-// Phase 3B proof: adb-forward + wire framing, entirely decoupled from the
+// Live-transport proof: adb-forward + wire framing, entirely decoupled from the
 // decoder. Strips the 20-byte header from each received packet and appends
 // the raw Annex-B payload straight to a .h264 file -- if that file plays
-// back correctly (same ffmpeg check used in Phase 2), the framing is
+// back correctly (same ffmpeg check used for the scratchpad captures), the framing is
 // byte-correct end to end, independent of whether MFH264Decoder is right.
 // Runs until the phone side disconnects (e.g. the user presses Stop).
 int RunTestTransport(const std::wstring& outputPath) {
@@ -351,11 +364,11 @@ int RunTestTransport(const std::wstring& outputPath) {
 
 }  // namespace
 
-// Phase 1b checkpoint 2: FrameGenerator's built-in test pattern is now
+// Shared-ring checkpoint: FrameGenerator's built-in test pattern is now
 // replaced by a SharedFrameRing reader (windows/vcam/FrameGenerator.cpp).
 // This host writes a synthetic animated NV12 pattern into that ring via
 // TestPatternProducer, standing in for the real H.264-decode bridge that
-// Phase 3 adds. See docs/architecture.md.
+// H.264 decode adds. See docs/architecture.md.
 int wmain(int argc, wchar_t* argv[]) {
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
@@ -394,17 +407,17 @@ int wmain(int argc, wchar_t* argv[]) {
         return result;
     }
 
-    // --test-pattern: the old Phase 1b synthetic-frame source, kept as an
+    // --test-pattern: the old synthetic-frame source, kept as an
     // opt-in dev tool for exercising the PC side (ring/vcam/Frame Server)
     // without a phone connected. Real usage is the default path below.
     const bool useTestPattern = argc > 1 && std::wstring(argv[1]) == L"--test-pattern";
-    // --aoa / --adb: explicit dev overrides, unchanged from Phase 7. Video
+    // --aoa / --adb: explicit dev overrides. Video
     // channel only either way -- control still runs over adb regardless of
     // which video transport is picked (see AoaVideoTransport's class doc
     // comment for why).
     const bool forceAoa = argc > 1 && std::wstring(argv[1]) == L"--aoa";
     const bool forceAdb = argc > 1 && std::wstring(argv[1]) == L"--adb";
-    // Phase 8: --net [host]. With no host, the tethered phone is discovered as the RNDIS
+    // --net [host]. With no host, the tethered phone is discovered as the RNDIS
     // adapter's gateway; with one, it targets that address directly (Wi-Fi, or bypassing
     // discovery). See transport/NetTransport.h.
     const bool forceNet = argc > 1 && std::wstring(argv[1]) == L"--net";
@@ -417,25 +430,53 @@ int wmain(int argc, wchar_t* argv[]) {
             netHostOverride.push_back(static_cast<char>(*p & 0x7F));
         }
     }
+    // --rtp <phone-ip> [udp-port]: the wireless transport. The phone's address is given
+    // explicitly (there's no discovery mechanism for it yet); the port is the PC-side UDP port
+    // the phone streams to, and defaults to transport::kDefaultRtpPort. Control still goes over
+    // TCP to the same address (see the control supervise loop below) -- it was always just TCP;
+    // adb only ever provided a route to it.
+    const bool forceRtp = argc > 1 && std::wstring(argv[1]) == L"--rtp";
+    std::string rtpPhoneIp;
+    uint16_t rtpPort = phonecam::transport::kDefaultRtpPort;
+    if (forceRtp) {
+        if (argc > 2) {
+            for (const wchar_t* p = argv[2]; *p; ++p) {
+                rtpPhoneIp.push_back(static_cast<char>(*p & 0x7F));
+            }
+        }
+        if (argc > 3) {
+            rtpPort = static_cast<uint16_t>(_wtoi(argv[3]));
+        }
+        if (rtpPhoneIp.empty()) {
+            std::fprintf(stderr, "usage: phonecam-host --rtp <phone-ip> [udp-port]\n");
+            MFShutdown();
+            CoUninitialize();
+            return 1;
+        }
+        phonecam::log::Info("RTP transport requested for " + rtpPhoneIp + " on UDP port " +
+                             std::to_string(rtpPort));
+    }
 
-    // Phase 8: auto-detect now prefers the network path above everything else when a
+    // Auto-detect prefers the network path above everything else when a
     // USB-tethered phone is actually present. It's strictly the best of the three -- USB
     // latency (3-5ms measured), Windows' own inbox RNDIS driver so nothing to install and no
     // UAC, nothing displaced (unlike AOA, which must replace the MTP driver), and it's the only
     // no-debugging path that carries the *control* channel too, not just video.
     std::string netHost = netHostOverride;
-    if (!forceAoa && !forceAdb && !useTestPattern && netHost.empty()) {
+    if (!forceAoa && !forceAdb && !forceRtp && !useTestPattern && netHost.empty()) {
         netHost = phonecam::transport::DiscoverTetheredPhoneAddress();
     }
-    const bool useNet = forceNet || (!forceAoa && !forceAdb && !useTestPattern && !netHost.empty());
+    const bool useNet =
+        !forceRtp && (forceNet || (!forceAoa && !forceAdb && !useTestPattern && !netHost.empty()));
 
-    // Phase 1: with no explicit flag and no tethered phone, fall back to preferring adb when a
+    // With no explicit flag and no tethered phone, fall back to preferring adb when a
     // debugging-enabled phone is present (the proven, no-extra-setup path), then AOA (which
     // needs the driver from windows/usbdriver/ to have been set up; if it hasn't,
     // AoaVideoTransport::Connect() just fails and retries, same as adb failing to find a phone
     // streaming -- see LiveVideoBridge::Run()'s existing backoff).
-    const bool useAoa = forceAoa || (!forceAdb && !useNet && !useTestPattern && !DetectAdbDevicePresent());
-    if (!forceAoa && !forceAdb && !forceNet && !useTestPattern) {
+    const bool useAoa =
+        !forceRtp && (forceAoa || (!forceAdb && !useNet && !useTestPattern && !DetectAdbDevicePresent()));
+    if (!forceAoa && !forceAdb && !forceNet && !forceRtp && !useTestPattern) {
         if (useNet) {
             phonecam::log::Info("USB-tethered phone detected at " + netHost + " -- using the network transport");
         } else {
@@ -444,14 +485,31 @@ int wmain(int argc, wchar_t* argv[]) {
         }
     }
 
+    // The control channel is created before the bridge so the RTP transport can be given a
+    // keyframe-request callback that reaches it: after a packet loss the decoder needs a fresh
+    // IDR, and only the PC can ask the phone for one (the phone owns the encoder).
+    phonecam::control::ControlChannel controlChannel;
+
     phonecam::bridge::TestPatternProducer producer;
-    phonecam::bridge::LiveVideoBridge bridge(
-        useNet ? std::unique_ptr<phonecam::transport::VideoTransport>(
-                     std::make_unique<phonecam::transport::NetVideoTransport>(netHostOverride))
-        : useAoa ? std::unique_ptr<phonecam::transport::VideoTransport>(
-                       std::make_unique<phonecam::transport::AoaVideoTransport>())
-                 : std::unique_ptr<phonecam::transport::VideoTransport>(
-                       std::make_unique<phonecam::transport::AdbVideoTransport>()));
+    // Kept as a raw pointer (not just inside the unique_ptr) so the keyframe-request callback
+    // can be installed after the transport has been handed to the bridge.
+    phonecam::transport::RtpVideoTransport* rtpTransport = nullptr;
+    std::unique_ptr<phonecam::transport::VideoTransport> videoTransport;
+    if (forceRtp) {
+        auto rtp = std::make_unique<phonecam::transport::RtpVideoTransport>(rtpPort);
+        rtpTransport = rtp.get();
+        videoTransport = std::move(rtp);
+    } else if (useNet) {
+        videoTransport = std::make_unique<phonecam::transport::NetVideoTransport>(netHostOverride);
+    } else if (useAoa) {
+        videoTransport = std::make_unique<phonecam::transport::AoaVideoTransport>();
+    } else {
+        videoTransport = std::make_unique<phonecam::transport::AdbVideoTransport>();
+    }
+    if (rtpTransport != nullptr) {
+        rtpTransport->SetKeyframeRequester([&controlChannel]() { controlChannel.SendRequestKeyframe(); });
+    }
+    phonecam::bridge::LiveVideoBridge bridge(std::move(videoTransport));
     if (useTestPattern) {
         if (!producer.Start(1280, 960, 30)) {
             phonecam::log::Error("TestPatternProducer failed to start");
@@ -468,18 +526,17 @@ int wmain(int argc, wchar_t* argv[]) {
         }
     }
 
-    // Phase 4: control channel (proto/control.fbs) on a second adb-forwarded
-    // port, alongside the video channel started above. Phase 5: this now
+    // Control channel (proto/control.fbs) on a second adb-forwarded
+    // port, alongside the video channel started above. This now
     // supervises its own reconnect, mirroring LiveVideoBridge::Run() -- a USB
     // replug or adb-server restart kills both channels' TCP connections
     // together, so control needs the same connect-retry loop video got. A
     // connect failure is still non-fatal to the video pipeline (e.g. an older
     // phone app build predates control-channel support): the console UI just
     // keeps retrying quietly in the background.
-    phonecam::control::ControlChannel controlChannel;
     phonecam::control::ConsoleControlUi controlUi(controlChannel);
     std::atomic<bool> controlRunning{true};
-    std::atomic<bool> controlConnected{false};  // Phase 5: tray-icon status text reads this
+    std::atomic<bool> controlConnected{false};  // tray-icon status text reads this
     // Backoff applies after every disconnect, not just an outright Connect()
     // failure -- adb forward's local TCP proxy can accept the PC-side
     // connect() immediately and only then discover nothing is listening on
@@ -490,20 +547,39 @@ int wmain(int argc, wchar_t* argv[]) {
     // whole new adb.exe process per attempt) launched many times a second.
     std::thread controlSuperviseThread([&]() {
         while (controlRunning.load()) {
-            // Phase 8: on the network transport the control channel goes straight to the phone,
+            // On the network transport the control channel goes straight to the phone,
             // no adb involved. Rediscovered per attempt (not captured once) so a replug that
             // brings the RNDIS link back at a different address still reconnects. Empty host on
-            // every other transport == the unchanged adb-forward path.
+            // every other transport == the unchanged adb-forward path. The RTP transport
+            // connects to the address the user gave on the command line.
             const std::string controlHost =
-                useNet ? (netHostOverride.empty() ? phonecam::transport::DiscoverTetheredPhoneAddress()
-                                                  : netHostOverride)
-                       : std::string{};
+                forceRtp ? rtpPhoneIp
+                          : useNet ? (netHostOverride.empty() ? phonecam::transport::DiscoverTetheredPhoneAddress()
+                                                             : netHostOverride)
+                                   : std::string{};
             if (useNet && controlHost.empty()) {
                 for (int waitedMs = 0; waitedMs < 2000 && controlRunning.load(); waitedMs += 200) Sleep(200);
                 continue;
             }
             if (controlChannel.Connect(27184, controlHost)) {
                 controlConnected.store(true);
+                // Ask the phone to start streaming. This is also the wake-up: the phone
+                // can be sitting idle, and a phone-side start can't be automated (and
+                // shouldn't have to be). The transport is named explicitly -- the phone
+                // either binds its framed video socket (the socket transports connect to
+                // it) or streams RTP straight to this PC.
+                //
+                // Not sent over AOA: there the phone starts the session itself, when the
+                // USB accessory is attached (the accessory pipe *is* the video transport).
+                if (!useAoa) {
+                    // The mode is passed as a plain byte on purpose: ControlChannel.h keeps
+                    // FlatBuffers types out of its interface (see that header's own rule), so
+                    // the schema's enum is converted here, at the one place that includes it.
+                    controlChannel.SendStartVideo(kWirelessWidth, kWirelessHeight, kWirelessFps,
+                                                  kWirelessBitrateBps, rtpPort,
+                                                  forceRtp ? static_cast<uint8_t>(phonecam::control::VideoTransportMode::Rtp)
+                                                           : static_cast<uint8_t>(phonecam::control::VideoTransportMode::FramedTcp));
+                }
                 // Every (re)connect implies the video side may also just have
                 // reconnected onto a fresh encoder session (new SPS/PPS, no
                 // guaranteed keyframe yet) -- ask for one explicitly rather
@@ -529,7 +605,7 @@ int wmain(int argc, wchar_t* argv[]) {
         std::printf("PhoneCam virtual camera started. Ctrl+C (or close this window) to stop.\n");
         std::fflush(stdout);
 
-        // Phase 2 UX: g_driverSetupInFlight guards against a second click launching a second
+        // Driver helper UX: g_driverSetupInFlight guards against a second click launching a second
         // elevated helper (and a second UAC prompt) while one is still running; the actual
         // RunUsbDriverHelperElevated() call always happens on a fresh detached worker thread,
         // never on the tray's own message-pump thread, so a slow install or an unanswered UAC
@@ -545,7 +621,7 @@ int wmain(int argc, wchar_t* argv[]) {
             }).detach();
         };
 
-        // Phase 4 (tray controls): rotation/mirror are pure PC-side rendering settings -- the
+        // Tray controls: rotation/mirror are pure PC-side rendering settings -- the
         // phone is never involved, so this local state (read/written only on the tray's own
         // message-pump thread: itemsProvider and every onClick below all run there, see
         // TrayIcon.cpp) is the single source of truth, applied to the shared ring so the vcam DLL
@@ -557,7 +633,7 @@ int wmain(int argc, wchar_t* argv[]) {
         bool currentMirror = false;
         bridge.SetTransform(currentRotation, currentMirror);
 
-        // Phase 5: a tray icon so phonecam-host.exe can run backgrounded/minimized instead of
+        // A tray icon so phonecam-host.exe can run backgrounded/minimized instead of
         // requiring a visible console. Status text is a cheap read of atomics/getters already
         // updated by the bridge and control-channel supervise loops above -- no polling thread of
         // its own needed, TrayIcon refreshes on its own timer and on menu-open.
@@ -659,7 +735,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
             // Resolution: read-only display -- there is no PC-side "set resolution" mechanism,
             // the consuming app (Zoom/OBS/Chrome) picks it via its own device settings (see
-            // docs/architecture.md's Phase 3 section). This just shows what was actually
+            // docs/architecture.md's vcam-resolution section). This just shows what was actually
             // negotiated, sourced from FrameGenerator publishing it into the ring on every draw.
             {
                 uint32_t width = 0, height = 0;
@@ -704,7 +780,8 @@ int wmain(int argc, wchar_t* argv[]) {
             tray.RunMessageLoop();  // returns on Exit (tray menu) or Ctrl+C (ConsoleHandler)
             g_tray = nullptr;
         } else {
-            // Fallback if Shell_NotifyIcon itself failed: same plain event-wait Phase 1-4 used,
+            // Fallback if Shell_NotifyIcon itself failed: the same plain event-wait used before the
+            // tray icon existed,
             // so Ctrl+C still cleanly shuts everything down even without a tray icon.
             phonecam::log::Error("TrayIcon: failed to create, falling back to a plain wait (Ctrl+C still works)");
             HANDLE stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);

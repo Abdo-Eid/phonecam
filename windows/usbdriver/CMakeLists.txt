@@ -1,4 +1,4 @@
-# Phase 2: elevated helper that binds a libusbK driver for AOA, replacing
+# Elevated helper that binds a libusbK driver for AOA, replacing
 # the manual Zadig step -- see main.cpp's header comment and
 # docs/architecture.md's driver-auto-install sections.
 #

@@ -8,7 +8,7 @@ namespace phonecam.wire;
 enum Channel : ubyte {
   Video = 0,
   Control = 1,
-  Audio = 2,        // Phase 8
+  Audio = 2,        // not implemented yet
 }
 
 enum LensFacing : byte { Back = 0, Front = 1, External = 2 }

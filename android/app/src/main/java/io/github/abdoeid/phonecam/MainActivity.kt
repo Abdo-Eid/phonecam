@@ -36,7 +36,7 @@ class MainActivity : ComponentActivity() {
   }
 
   // Auto-detect: an AOA accessory attach starts capture on its own, with no Start-button tap
-  // needed -- this is what lets AOA work with USB debugging off (Phase 7's whole point). Forwards
+  // needed -- this is what lets AOA work with USB debugging off (AOA's whole point). Forwards
   // to CaptureService (ACTION_START_AOA) rather than owning a transport/controller here, so an
   // AOA-triggered session gets the exact same foreground-service/wake-lock/error-handling
   // treatment the normal Start-button path already has via ACTION_START -- see CaptureService's

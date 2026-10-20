@@ -264,11 +264,11 @@ const LSTATUS RegWriteValue(HKEY key, PCWSTR name, DWORD value)
 }
 
 // BT.601 (SD) vs BT.709 (HD) integer coefficients, studio/limited range (16-235 luma,
-// 16-240 chroma), ×256 fixed point -- Phase 6 fix. This project only ever streams 720p/1080p
+// 16-240 chroma), ×256 fixed point -- the BT.709 fix. This project only ever streams 720p/1080p
 // (never SD), so useBt709 is effectively always true in practice, but the branch is kept for
 // correctness rather than hardcoding one matrix, matching the broadcast convention of BT.709
 // for >=720 lines and BT.601 below that. Previously this always used BT.601 regardless of
-// content, which is the documented "washed out" color bug (docs/architecture.md's Phase 6
+// content, which is the documented "washed out" color bug (docs/architecture.md's quality/perf section
 // section) -- BT.601 coefficients applied to BT.709-native HD content shift reds/blues
 // noticeably. Both coefficient sets independently verified: their Y-row terms equal
 // (219/255)*Kr,Kg,Kb*256 for each standard's Kr/Kg/Kb, confirming the derivation.
@@ -336,10 +336,10 @@ static inline BYTE ClampToByte(int value)
 	return (BYTE)(value < 0 ? 0 : (value > 255 ? 255 : value));
 }
 
-// Inverse of RGB32ToNV12 above -- same BT.601/BT.709 selection (Phase 6 fix, see that
+// Inverse of RGB32ToNV12 above -- same BT.601/BT.709 selection (the BT.709 fix, see that
 // function's comment). Per-pixel rather than the 2x2-block-optimized style of the forward
-// conversion: this is Phase 1b proof-of-concept code, not the perf-tuned path -- see
-// docs/architecture.md's Phase 6 section.
+// conversion: this is proof-of-concept code, not the perf-tuned path -- see
+// docs/architecture.md's quality/perf section.
 static inline void NV12ToRGB32(BYTE y, BYTE u, BYTE v, BYTE* bgra, bool useBt709)
 {
 	int c = (int)y - 16;

@@ -10,10 +10,10 @@ import java.io.OutputStream
 import phonecam.wire.Channel
 
 /**
- * Phase 7 production AOA transport: multiplexes the video and control channels
+ * Production AOA transport: multiplexes the video and control channels
  * (`proto/wire.fbs`'s `Channel` enum) over the single pair of bulk endpoints an AOA accessory
  * connection provides, per docs/wire-protocol.md's "AOA transport" section. Distinct from
- * [AoaAccessoryTransport], which stays as the Phase-7-checkpoint-only diagnostic (see its own doc
+ * [AoaAccessoryTransport], which stays as the checkpoint-only diagnostic (see its own doc
  * comment) -- this is the real thing [io.github.abdoeid.phonecam.capture.CaptureController] uses
  * once wired in.
  *

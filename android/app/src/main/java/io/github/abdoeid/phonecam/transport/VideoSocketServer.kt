@@ -19,8 +19,8 @@ import java.net.SocketTimeoutException
  * connects first:
  *
  *  - the `phonecam_video` abstract socket, bridged via `adb forward tcp:27183
- *    localabstract:phonecam_video` (the Phase 3 path, needs USB debugging), and
- *  - a plain TCP listener on [tcpPort] (Phase 8), which a PC reaches directly over **USB
+ *    localabstract:phonecam_video` (the USB path, needs USB debugging), and
+ *  - a plain TCP listener on [tcpPort], which a PC reaches directly over **USB
  *    tethering** (RNDIS: the phone is the PC's default gateway on that link, ~3-5ms round trip)
  *    or over Wi-Fi -- no adb, no Developer Options, and no Windows driver install at all, since
  *    Windows binds its own inbox RNDIS driver automatically.

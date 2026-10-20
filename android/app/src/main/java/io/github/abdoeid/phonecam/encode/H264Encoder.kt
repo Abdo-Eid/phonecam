@@ -5,19 +5,21 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Bundle
 import android.view.Surface
+import io.github.abdoeid.phonecam.transport.VideoPacketSink
 import io.github.abdoeid.phonecam.transport.WireFraming
 import java.io.IOException
-import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Hardware H.264 encoder using a MediaCodec input Surface (Camera2 renders directly into it --
  * zero-copy, no CPU frame ever exists). Output is Annex-B (start-code-prefixed NALUs, including
- * CSD/SPS/PPS), written to [out] as wire-framed CONFIG/FRAME packets per docs/wire-protocol.md
- * (see [WireFraming]) -- [out] is the connected video socket's OutputStream (Phase 3).
+ * CSD/SPS/PPS), emitted as wire-framed CONFIG/FRAME packets per docs/wire-protocol.md (see
+ * [WireFraming]) to [sink] -- the connected transport's packet sink (USB socket, AOA, RTP).
+ * [out] used to be a raw OutputStream; the [VideoPacketSink] indirection is what
+ * lets non-stream transports (RTP/UDP) join without the encoder knowing they exist.
  *
- * Constrained-baseline / CBR / no B-frames / low-latency, per docs/architecture.md Phase 2.
+ * Constrained-baseline / CBR / no B-frames / low-latency, per docs/architecture.md's capture-pipeline section.
  */
 class H264Encoder(width: Int, height: Int, fps: Int, bitrateBps: Int) {
   val inputSurface: Surface
@@ -56,20 +58,21 @@ class H264Encoder(width: Int, height: Int, fps: Int, bitrateBps: Int) {
   }
 
   /**
-   * Starts the encoder and a background thread draining wire-framed output into [out]. [onWriteError]
-   * fires once (from the drain thread) if a socket write fails -- e.g. the PC host disconnected --
-   * at which point the drain loop stops draining; the caller owns deciding what happens next
-   * (Phase 3 keeps this simple: stop capture, surface an error, no auto-reconnect -- that's Phase 5).
+   * Starts the encoder and a background thread draining wire-framed output into [sink].
+   * [onWriteError] fires once (from the drain thread) if a packet write fails -- e.g. the PC host
+   * disconnected -- at which point the drain loop stops draining; the caller owns deciding what
+   * happens next (this stays simple: stop capture, surface an error, no auto-reconnect on the
+   * phone side -- reconnect is the PC host's reconnect loop's job, see LiveVideoBridge::Run()).
    */
-  fun start(out: OutputStream, onWriteError: (IOException) -> Unit) {
+  fun start(sink: VideoPacketSink, onWriteError: (IOException) -> Unit) {
     codec.start()
     running.set(true)
     drainThread =
-      Thread({ drainLoop(out, onWriteError) }, "H264Encoder-drain").apply { start() }
+      Thread({ drainLoop(sink, onWriteError) }, "H264Encoder-drain").apply { start() }
   }
 
   // Both are MediaCodec dynamic parameters -- no session/format renegotiation needed, unlike
-  // SetResolution (out of Phase 4 scope, see docs/architecture.md).
+  // SetResolution (out of scope, see docs/architecture.md).
   fun setBitrate(bitrateBps: Int) {
     codec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrateBps) })
   }
@@ -102,7 +105,7 @@ class H264Encoder(width: Int, height: Int, fps: Int, bitrateBps: Int) {
     inputSurface.release()
   }
 
-  private fun drainLoop(out: OutputStream, onWriteError: (IOException) -> Unit) {
+  private fun drainLoop(sink: VideoPacketSink, onWriteError: (IOException) -> Unit) {
     val bufferInfo = MediaCodec.BufferInfo()
     while (running.get()) {
       val index = codec.dequeueOutputBuffer(bufferInfo, DEQUEUE_TIMEOUT_US)
@@ -118,8 +121,7 @@ class H264Encoder(width: Int, height: Int, fps: Int, bitrateBps: Int) {
         val isConfig = bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
         val isKeyframe = isConfig || (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0)
         try {
-          WireFraming.writePacket(
-            out,
+          sink.writePacket(
             if (isConfig) WireFraming.TYPE_CONFIG else WireFraming.TYPE_FRAME,
             isKeyframe,
             seq++,

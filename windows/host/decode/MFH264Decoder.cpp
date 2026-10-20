@@ -255,7 +255,7 @@ bool MFH264Decoder::DeliverSample(IMFSample* sample, const FrameCallback& onFram
     }
 
     // Try IMF2DBuffer first (needed for a real hardware/D3D-backed decoder
-    // later -- see Phase 6 in docs/architecture.md), but it is NOT a given:
+    // later -- see docs/architecture.md), but it is NOT a given:
     // confirmed empirically that this software decoder's client-allocated
     // buffers (MFCreateMemoryBuffer, the providesSamples_ == false path
     // exercised today) don't implement it at all (E_NOINTERFACE every time)
