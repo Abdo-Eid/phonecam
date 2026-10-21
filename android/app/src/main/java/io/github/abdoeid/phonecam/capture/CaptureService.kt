@@ -14,6 +14,7 @@ import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.abdoeid.phonecam.MainActivity
@@ -166,6 +167,10 @@ class CaptureService : Service() {
     channel.pairingCodeProvider = { pairing.code }
     channel.trustedPcKeyProvider = { TrustedPcs(this).key(it) }
     channel.stoppedProvider = { userStopped }
+    // While the phone scans a PC's QR it must not accept a network login (the camera
+    // is being used for the scan). The block is time-limited: an abandoned scan must
+    // not leave the phone refusing every PC afterwards.
+    channel.networkLoginBlocked = { scanningPcQr && SystemClock.elapsedRealtime() < scanDeadlineMs }
     // The controller pushes state changes (CurrentSettings/Stats/LensChanged) back to the PC
     // through this channel, so it needs the reference.
     controller.bindControlChannel(channel)
@@ -257,6 +262,7 @@ class CaptureService : Service() {
    * there is no address to type on the phone and no discovery protocol to speak of.
    */
   @Volatile private var scanningPcQr = false
+  @Volatile private var scanDeadlineMs = 0L
   @Synchronized private fun startSession(mode: Int, width: Int, height: Int, fps: Int, bitrateBps: Int, rtpPort: Int, explicitStart: Boolean = false): Byte {
     if (scanningPcQr) return AckResult.Busy
     if (explicitStart) persistStopIntent(false)
@@ -318,6 +324,7 @@ class CaptureService : Service() {
 
   fun beginQrScan() {
     scanningPcQr = true
+    scanDeadlineMs = SystemClock.elapsedRealtime() + SCAN_LOCK_TIMEOUT_MS
     controlChannel?.networkLoginAllowed = false
     stopRequested.set(true)
     lastError = null
@@ -328,7 +335,11 @@ class CaptureService : Service() {
     controlChannel?.disconnectClient()
   }
 
-  fun endQrScan() { scanningPcQr = false; controlChannel?.networkLoginAllowed = true }
+  fun endQrScan() {
+    scanningPcQr = false
+    controlChannel?.networkLoginAllowed = true
+  }
+
   fun forgetPc(id: String) {
     TrustedPcs(this).forget(id)
     controlChannel?.revokeForgottenPc()
@@ -541,6 +552,10 @@ class CaptureService : Service() {
   companion object {
     private const val TAG = "CaptureService"
     private const val CONTROL_RETRY_DELAY_MS = 2000L
+
+    // How long a QR scan may hold off network logins. An abandoned scan (the user
+    // backs out without scanning) must not leave the phone refusing every PC.
+    private const val SCAN_LOCK_TIMEOUT_MS = 120_000L
 
     // The ports the phone listens on, reported to the PC by the discovery responder.
     // Must match windows/host/control/ControlTransport.cpp (27184) and

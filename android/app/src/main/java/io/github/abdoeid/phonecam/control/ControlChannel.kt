@@ -101,6 +101,9 @@ class ControlChannel(private val context: Context, private val listener: Control
   val isConnected: Boolean get() = authenticated && output != null
   val clientId: String get() = activeClientId
   @Volatile var networkLoginAllowed = true
+  // True while the phone is scanning a PC's QR and must not accept a network login.
+  // Time-limited by the caller, so an abandoned scan cannot lock the phone out.
+  var networkLoginBlocked: () -> Boolean = { false }
   @Volatile private var activeClientId = ""
   @Volatile private var activeKey = ""
 
@@ -425,7 +428,7 @@ class ControlChannel(private val context: Context, private val listener: Control
           envelope.payload(t)
           val clientId = t.clientId ?: ""
           val code = if (clientId.isEmpty()) pairingCodeProvider() else trustedPcKeyProvider(clientId)
-          if (networkLoginAllowed && checkAuthResponse(code, t.nonce ?: "", t.hmac ?: "")) {
+          if (networkLoginAllowed && !networkLoginBlocked() && checkAuthResponse(code, t.nonce ?: "", t.hmac ?: "")) {
             server.finishAuthentication()
             authenticated = true
             activeClientId = clientId
