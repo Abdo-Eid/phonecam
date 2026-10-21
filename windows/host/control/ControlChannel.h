@@ -23,6 +23,8 @@ namespace phonecam::control {
 // check it against an independent implementation.
 std::string ComputeAuthHmac(const std::string& code, const std::string& phoneNonce,
                              const std::string& pcNonce);
+std::string ComputeVideoAuthHmac(const std::string& code, const std::string& phoneNonce,
+                                 const std::string& pcNonce, const std::string& videoNonce);
 
 struct LensInfo {
     std::string cameraId;
@@ -152,6 +154,10 @@ public:
     // sent before that are rejected by the phone, so anything that wants to start a
     // session should wait for this rather than for the connection itself.
     void SetSessionReadyHandler(std::function<void()> handler);
+
+    // Empty unless the current network control session has completed authentication.
+    // Used only at TCP video connect time, never per frame.
+    std::string VideoAuthProof(const std::string& challenge) const;
 
     // Blocks until disconnect; invokes onMessage for each decoded envelope.
     void RunReceiveLoop(const ControlMessageHandler& onMessage);

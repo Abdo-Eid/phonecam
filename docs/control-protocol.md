@@ -8,8 +8,9 @@ the socket.
 
 ## Capability-driven UI (read this first)
 
-The phone is the source of truth for what it can do. On connect it sends
-`CapabilityDescriptor` (`wire.fbs`) once, before anything else. **The host UI
+The phone is the source of truth for what it can do. After network authentication
+(or immediately on a trusted ADB connection), it sends `CapabilityDescriptor`
+(`wire.fbs`). **The host UI
 is generated from this descriptor — it must never render a control that isn't
 backed by a matching capability, and must never send a command the descriptor
 doesn't support.** This is what keeps the tool honest on a mid-range
@@ -24,7 +25,18 @@ Concretely, on `CapabilityDescriptor` receipt the host:
    is present/non-empty (e.g. zoom slider bounds = `zoom_ratio_range`; EV
    slider bounds = `ev_compensation_range` × `ev_step`).
 3. Re-does step 2 whenever `LensChanged` arrives (a different lens can have
-   different capabilities — e.g. front camera often lacks torch).
+    different capabilities — e.g. front camera often lacks torch).
+
+## Authentication and video access
+
+Network sessions first exchange `AuthChallenge` / `AuthResponse`; no camera
+commands are honored before a valid pairing-code HMAC. Capabilities mark the
+session ready. Protocol v4 additionally requires a fresh session-bound proof on
+each framed-TCP video socket, not just a successful control login. Closing
+control revokes its video connection/capture. Local ADB/AOA behavior is unchanged.
+
+**Video remains unencrypted by explicit decision.** Full handshake, threat model,
+lifecycle, tests, and accepted interception/MITM limits: [security.md](security.md).
 
 ## Commands (PC → phone)
 
@@ -56,7 +68,7 @@ Each is sent inside a `ControlEnvelope` with a fresh, monotonically increasing
 
 | Message | `cmd_id` | Meaning |
 |---|---|---|
-| `CapabilityDescriptor` | 0 | sent once, first message after connect |
+| `CapabilityDescriptor` | 0 | sent after successful network login, or immediately over trusted ADB |
 | `Ack` | echoes the command's `cmd_id` | `result` = `Ok` / `Unsupported` / `OutOfRange` / `Busy` / `Error`, with a human-readable `message` for the last two |
 | `CurrentSettings` | 0 (unsolicited) or the triggering `cmd_id` | full state snapshot; see reconciliation below |
 | `Stats` | 0 | pushed ~1/sec: encode fps, bitrate, dropped frames, `thermal_status` |
@@ -94,7 +106,7 @@ Each is sent inside a `ControlEnvelope` with a fresh, monotonically increasing
 ## Implementation status (Phase 4)
 
 Implemented and verified against the real device: the whole handshake
-(`CapabilityDescriptor` on connect), `SetZoomRatio`, `SetEv`, `SetTorch`,
+(`CapabilityDescriptor` after login, immediately for ADB), `SetZoomRatio`, `SetEv`, `SetTorch`,
 `SetFocusMode`, `TapToFocus`, `RequestKeyframe`, `SetBitrate`, `SetLens`
 (with `LensChanged` + `CurrentSettings` confirmation), `StartVideo` /
 `StopVideo`, and `Ack` for all of

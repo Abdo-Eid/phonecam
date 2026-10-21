@@ -9,6 +9,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.SocketTimeoutException
+import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import phonecam.control.Ack
@@ -104,6 +105,10 @@ class ControlChannel(private val context: Context, private val listener: Control
 
   // When the unanswered challenge stops being waited for.
   private var authDeadlineMs = 0L
+  private val networkVideoAuth = NetworkVideoAuth()
+
+  fun authenticateVideoConnection(socket: Socket, isCancelled: () -> Boolean): Boolean =
+    networkVideoAuth.authenticate(socket, isCancelled)
 
   /**
    * The address of the PC this session is connected to, or null when the connection came
@@ -159,6 +164,7 @@ class ControlChannel(private val context: Context, private val listener: Control
         break
       }
       val (input, out) = session
+      networkVideoAuth.clear()
       sessionRejected = false
       output = out
       peerAddress = server.lastAcceptedAddress
@@ -182,6 +188,7 @@ class ControlChannel(private val context: Context, private val listener: Control
       } catch (e: IOException) {
         if (!stopped.get()) Log.w(TAG, "control session failed", e)
       } finally {
+        networkVideoAuth.clear()
         Log.i(TAG, "control session ended")
         output = null
         peerAddress = null
@@ -195,6 +202,7 @@ class ControlChannel(private val context: Context, private val listener: Control
   }
 
   fun stop() {
+    networkVideoAuth.clear()
     if (!stopped.compareAndSet(false, true)) return
     server.close() // unblocks a pending accept() or receiveLoop's read
     output = null
@@ -291,8 +299,7 @@ class ControlChannel(private val context: Context, private val listener: Control
    * HMAC over both nonces; because both are fresh per session, a recorded exchange cannot be
    * replayed, and the code itself never crosses the wire.
    */
-  private fun checkAuthResponse(pcNonce: String, hmac: String): Boolean {
-    val code = pairingCodeProvider()
+  private fun checkAuthResponse(code: String, pcNonce: String, hmac: String): Boolean {
     val phoneNonce = authPhoneNonce
     if (code.isNullOrEmpty() || phoneNonce == null) return false
     val expected = SessionAuth.computeHmac(code, phoneNonce, pcNonce)
@@ -386,15 +393,21 @@ class ControlChannel(private val context: Context, private val listener: Control
         ControlPayload.AuthResponse -> {
           val t = AuthResponse()
           envelope.payload(t)
-          if (checkAuthResponse(t.nonce ?: "", t.hmac ?: "")) {
+          val code = pairingCodeProvider()
+          if (checkAuthResponse(code, t.nonce ?: "", t.hmac ?: "")) {
             server.finishAuthentication()
             authenticated = true
+            val peer = peerAddress
+            if (peer != null) {
+              networkVideoAuth.startSession(peer, code, authPhoneNonce!!, t.nonce ?: "")
+            }
             Log.i(TAG, "the PC proved it knows the pairing code")
             // The capabilities follow the successful authentication: the PC is told what the
             // camera can do only once it is allowed to ask.
             output?.let { sendCapabilities(it) }
             AckResult.Ok
           } else {
+            networkVideoAuth.clear()
             Log.w(TAG, "the PC's authentication answer did not match -- refusing the session")
             sendError("not authorized: wrong pairing code")
             sessionRejected = true

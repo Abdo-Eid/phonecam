@@ -50,6 +50,8 @@ public:
     // address discovered a moment ago) and may return an empty string to say "not yet".
     // Without one, the tethered-phone discovery is used.
     void SetHostProvider(std::function<std::string()> provider);
+    // Returns a hex HMAC for the fresh video challenge, or empty while control is not ready.
+    void SetAuthenticator(std::function<std::string(const std::string&)> authenticator);
 
     bool Connect() override;
     void Disconnect() override;

@@ -36,7 +36,7 @@ Three USB transports exist side by side, auto-detected at startup in this order:
 - **ADB** — needs Developer Options → USB debugging on. The original, fully proven path; still the fallback when tethering isn't available but debugging is.
 - **AOA** (Android Open Accessory) — no Developer Options either, but it needs a Windows driver bound to the phone (handled automatically, one admin prompt, no Zadig) which makes file transfer unavailable until reverted, and it carries video only. Kept as the last resort for devices where the carrier gates USB tethering.
 
-A **wireless** transport also exists: `phonecam-host --rtp` finds the phone by itself (the phone answers a discovery probe), streams the camera as RTP/H.264 over UDP to the PC's port 27185, and keeps the control channel over TCP to the same address. Put the phone on the same Wi-Fi (or on the PC's own hotspot) and no cable, driver, or Developer Options is involved. `--wifi` does the same over the phone's framed TCP socket instead. Over a network the phone only talks to a PC that knows its pairing code, which the app displays.
+A **wireless** transport also exists: `phonecam-host --rtp` finds the phone by itself (the phone answers a discovery probe), streams the camera as RTP/H.264 over UDP to the PC's port 27185, and keeps the control channel over TCP to the same address. Put the phone on the same Wi-Fi (or on the PC's own hotspot) and no cable, driver, or Developer Options is involved. `--wifi` does the same over the phone's framed TCP socket instead. Network control and each TCP video connection require proof of the pairing code shown in the app. **Video is deliberately unencrypted:** this blocks unauthorized direct connections, not traffic interception. Pass the code with `--secret CODE` or `PHONECAM_SECRET`.
 
 Measured on the reference phone (Redmi Note 8, Android 11), with the phone on the laptop's Windows Mobile Hotspot — one radio hop, not two:
 
@@ -49,6 +49,8 @@ Measured on the reference phone (Redmi Note 8, Android 11), with the phone on th
 These figures measure changes in delay relative to a reference frame, not absolute camera-to-PC or glass-to-glass latency. The clock-offset calculation also cancels the reference frame's pipeline delay; absolute latency still needs a separate measurement.
 
 Full design and phased roadmap: [`docs/architecture.md`](docs/architecture.md).
+Current execution plan and explicit security tradeoffs: [`docs/plan.md`](docs/plan.md).
+Network protection and accepted plaintext-video limits: [`docs/security.md`](docs/security.md).
 
 ## Status
 
@@ -59,7 +61,7 @@ Not yet a finished product — actively developed, most of the core pipeline wor
 - Live camera controls from the PC (zoom, exposure, focus incl. tap-to-focus, torch, lens switch, bitrate) with capability-driven UI (never shows a control the phone doesn't actually support).
 - Adaptive bitrate, thermal-aware, with live stats telemetry.
 - Reconnect/robustness: survives USB replug and the phone backgrounding without restarting either side.
-- **USB tethering transport — the one to use.** No Developer Options, no driver install, no admin prompt, and nothing else on the phone displaced. Flip the phone's USB tethering toggle and open the app; that's the entire setup. Windows binds its own built-in RNDIS driver automatically, and the host discovers the phone deterministically (it's the tethered link's gateway — no IP to type, no pairing). Measured at 2-5ms round-trip. Verified live with USB debugging off, end to end: video *and* controls, 1080p and 720p, with `adb forward --list` empty proving nothing routed through adb.
+- **USB tethering transport — the one to use.** No Developer Options, no driver install, no admin prompt, and nothing else on the phone displaced. Flip the phone's USB tethering toggle and open the app. Windows binds its own built-in RNDIS driver automatically, and the host discovers the phone deterministically (it's the tethered link's gateway — no IP to type). Network pairing is required: give the host the code shown in the app. Measured at 2-5ms round-trip. Verified live with USB debugging off, end to end: video *and* controls, 1080p and 720p, with `adb forward --list` empty proving nothing routed through adb.
 - **Camera controls work without USB debugging** for the first time, over that same tethered link — the control channel was always just TCP; it only ever used adb to get a route. All seven tray controls populate from the phone's real reported capabilities.
 - **Recovers unattended.** Observed following the phone across three different tethered addresses in one session (every USB reconfiguration hands out a new subnet) and surviving USB debugging being toggled off mid-stream — both channels reconnected with no restart, because discovery re-runs per attempt rather than caching.
 - AOA transport (also no USB debugging): proven end-to-end, kept as the fallback for devices where a carrier gates USB tethering. Its Windows driver step is one click in the tray behind a single admin prompt — no Zadig, ever — with a matching "Remove USB driver" that fully undoes it. Note the tradeoff tethering avoids entirely: binding that driver makes the phone's file transfer unavailable until reverted, and AOA carries video only, so camera controls don't work over it.

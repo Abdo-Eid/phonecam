@@ -31,7 +31,7 @@ namespace {
 // number turns that into a legible error instead.
 //
 // Bump this whenever proto/control.fbs's ControlPayload union changes shape.
-constexpr uint16_t kSupportedProtocolVersion = 3;
+constexpr uint16_t kSupportedProtocolVersion = 4;
 
 // A fresh random nonce, hex-encoded. Used on the PC side of the pairing handshake.
 std::string RandomHexNonce() {
@@ -249,6 +249,9 @@ struct ControlChannel::Impl {
     std::function<void()> sessionReadyHandler;
 
     mutable std::mutex cacheMutex;
+    std::string authPhoneNonce;
+    std::string authPcNonce;
+    bool videoSessionReady = false;
     CapabilityInfo lastCapabilities;
     bool hasCapabilities = false;
     SettingsInfo lastSettings;
@@ -275,13 +278,36 @@ std::string ComputeAuthHmac(const std::string& code, const std::string& phoneNon
     return ComputeHmacSha256Hex(code, phoneNonce + "|" + pcNonce);
 }
 
+std::string ComputeVideoAuthHmac(const std::string& code, const std::string& phoneNonce,
+                                 const std::string& pcNonce, const std::string& videoNonce) {
+    return ComputeHmacSha256Hex(code, "phonecam-video-v1|" + phoneNonce + "|" + pcNonce + "|" + videoNonce);
+}
+
 ControlChannel::ControlChannel() : impl_(std::make_unique<Impl>()) {}
 ControlChannel::~ControlChannel() = default;
 
 bool ControlChannel::Connect(uint16_t port, const std::string& host) {
+    {
+        std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+        impl_->videoSessionReady = false;
+        impl_->authPhoneNonce.clear();
+        impl_->authPcNonce.clear();
+    }
     return impl_->transport.Connect(port, host);
 }
-void ControlChannel::Disconnect() { impl_->transport.Disconnect(); }
+void ControlChannel::Disconnect() {
+    {
+        std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+        impl_->videoSessionReady = false;
+    }
+    impl_->transport.Disconnect();
+}
+
+std::string ControlChannel::VideoAuthProof(const std::string& challenge) const {
+    std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+    if (!impl_->videoSessionReady || impl_->authPhoneNonce.empty() || impl_->authPcNonce.empty()) return {};
+    return ComputeVideoAuthHmac(impl_->pairingCode, impl_->authPhoneNonce, impl_->authPcNonce, challenge);
+}
 
 void ControlChannel::SetPairingCode(std::string code) {
     // The app groups the generated code as ABCD-EFGH-IJKL for readability.
@@ -307,6 +333,12 @@ void ControlChannel::RunReceiveLoop(const ControlMessageHandler& onMessage) {
                 // A fresh nonce per challenge, so the answer can't be replayed and both
                 // sides contribute entropy.
                 const std::string pcNonce = RandomHexNonce();
+                {
+                    std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+                    impl_->videoSessionReady = false;
+                    impl_->authPhoneNonce = msg.authChallenge.nonce;
+                    impl_->authPcNonce = pcNonce;
+                }
                 const std::string hmac = ComputeAuthHmac(impl_->pairingCode, msg.authChallenge.nonce, pcNonce);
                 const uint32_t cmdId = impl_->NextCmdId();
                 fb::FlatBufferBuilder fbb;
@@ -345,6 +377,10 @@ void ControlChannel::RunReceiveLoop(const ControlMessageHandler& onMessage) {
                 }
                 return;
             }
+            {
+                std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+                impl_->videoSessionReady = true;
+            }
             if (impl_->sessionReadyHandler) impl_->sessionReadyHandler();
         } else if (msg.kind == ControlMsgKind::Settings) {
             std::lock_guard<std::mutex> lock(impl_->cacheMutex);
@@ -353,6 +389,8 @@ void ControlChannel::RunReceiveLoop(const ControlMessageHandler& onMessage) {
         }
         onMessage(msg);
     });
+    std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+    impl_->videoSessionReady = false;
 }
 
 uint32_t ControlChannel::SendSetZoomRatio(float ratio) {

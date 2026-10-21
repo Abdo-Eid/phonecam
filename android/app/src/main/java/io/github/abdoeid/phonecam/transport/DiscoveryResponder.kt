@@ -98,7 +98,7 @@ class DiscoveryResponder(
     const val REPLY_MAGIC = "PHONECAM_HERE"
 
     // The control protocol version this build speaks (proto/control.fbs).
-    const val PROTOCOL_VERSION = 3
+    const val PROTOCOL_VERSION = 4
 
     private const val RECEIVE_TIMEOUT_MS = 1000
   }

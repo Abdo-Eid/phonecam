@@ -110,7 +110,7 @@ table Error { code: uint16; message: string; }
 table AuthChallenge { nonce: string; }
 table AuthResponse {
   nonce: string;         // the PC's own nonce, so both sides contribute entropy
-  hmac: string;          // hex HMAC-SHA256(code, phone_nonce || pc_nonce)
+  hmac: string;          // hex HMAC-SHA256(code, phone_nonce + "|" + pc_nonce)
 }
 
 // ---- envelope ----

@@ -19,8 +19,8 @@ import java.security.SecureRandom
  * It is generated on first run and stored in the app's preferences. The user sees it in the
  * app (that's how it gets onto the PC) and can replace it with their own.
  *
- * This authenticates control sessions only; it does not encrypt or authenticate media or
- * subsequent commands. Use a trusted network: WPA2 is link protection, not end-to-end
+ * Control and TCP video connections are authenticated; subsequent commands and media are
+ * not encrypted or individually authenticated. Use a trusted network: WPA2 is not end-to-end
  * protection against a compromised access point or an active peer.
  */
 class PairingCode(context: Context) {
@@ -75,10 +75,13 @@ class PairingCode(context: Context) {
  */
 object SessionAuth {
   fun computeHmac(code: String, phoneNonce: String, pcNonce: String): String {
+    return computeMessageHmac(code, "$phoneNonce|$pcNonce")
+  }
+
+  fun computeMessageHmac(code: String, message: String): String {
     val mac = javax.crypto.Mac.getInstance("HmacSHA256")
     mac.init(javax.crypto.spec.SecretKeySpec(code.toByteArray(Charsets.UTF_8), "HmacSHA256"))
-    val message = (phoneNonce + "|" + pcNonce).toByteArray(Charsets.UTF_8)
-    return toHex(mac.doFinal(message))
+    return toHex(mac.doFinal(message.toByteArray(Charsets.UTF_8)))
   }
 
   /** Constant-time comparison: a timing difference would leak the expected value. */

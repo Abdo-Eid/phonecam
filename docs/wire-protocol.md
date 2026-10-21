@@ -172,11 +172,19 @@ out of the process list).
 abstract socket is the local USB link, which the phone already trusts, and
 asking for a code there would be friction for no gain.
 
-**What this protects, and what it doesn't.** It gates control commands, including
-starting a stream. It does not encrypt/authenticate media or subsequent commands,
-authenticate the phone to the PC, or separately authenticate the framed-TCP video
-socket. Use a trusted network. WPA2 protects the radio link, not end-to-end traffic
-against a compromised access point or an active network peer.
+**Network video access (protocol v4).** The framed-TCP video socket separately
+requires a fresh HMAC proof bound to the current authenticated control session
+and its peer. Before the existing video framing, the phone sends `PCV1` plus a
+16-byte nonce; the PC returns 64 lowercase ASCII hex bytes of
+`HMAC-SHA256(code, "phonecam-video-v1|" + phoneNonce + "|" + pcNonce + "|" + videoNonceHex)`.
+An acceptance byte `0x01` precedes the first ordinary video packet. Missing/wrong,
+replayed, or old-session proofs are closed without media. ADB/AOA stay unchanged.
+
+**Video remains unencrypted by explicit product decision.** Connection access
+control does not prevent interception or active MITM, authenticate the phone to
+the PC, or authenticate each subsequent command/media packet. Use a trusted
+network. Full protection model, lifecycle, limits, and test procedure:
+[security.md](security.md).
 
 ## Versioning
 

@@ -16,7 +16,7 @@ import java.net.SocketTimeoutException
 
 /**
  * Listens for the PC's video connection on **two** listeners at once, returning whichever one
- * connects first:
+ * connects first (network clients must authenticate before they are returned):
  *
  *  - the `phonecam_video` abstract socket, bridged via `adb forward tcp:27183
  *    localabstract:phonecam_video` (the USB path, needs USB debugging), and
@@ -42,11 +42,12 @@ import java.net.SocketTimeoutException
 class VideoSocketServer(
   private val name: String = "phonecam_video",
   private val tcpPort: Int = DEFAULT_TCP_PORT,
+  private val authenticateTcp: (Socket) -> Boolean = { false },
 ) {
   private var serverSocket: LocalServerSocket? = null
   private var clientSocket: LocalSocket? = null
   private var tcpServer: ServerSocket? = null
-  private var tcpClient: Socket? = null
+  @Volatile private var tcpClient: Socket? = null
 
   /**
    * Binds both listeners. The abstract socket retries briefly on "Address already in use" -- a
@@ -145,6 +146,12 @@ class VideoSocketServer(
           // small tail back waiting for more data to coalesce with.
           socket.tcpNoDelay = true
           tcpClient = socket
+          if (!authenticateTcp(socket) || isCancelled()) {
+            Log.w(TAG, "$name: rejected unauthorized TCP video connection")
+            socket.close()
+            tcpClient = null
+            continue
+          }
           Log.i(TAG, "$name: accepted over TCP from ${socket.inetAddress?.hostAddress}")
           return socket.getOutputStream()
         } catch (_: SocketTimeoutException) {
@@ -176,6 +183,15 @@ class VideoSocketServer(
     closeTcpServer()
     clientSocket = null
     tcpClient = null
+  }
+
+  /** Revoke a network viewer even if capture was originally started on the phone. */
+  fun closeNetworkClient() {
+    try {
+      tcpClient?.close()
+    } catch (_: IOException) {
+      // already disconnected
+    }
   }
 
   private fun closeTcpServer() {

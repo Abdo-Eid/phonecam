@@ -2311,3 +2311,53 @@ timeouts also close the client rather than abandoning a live socket, and normal
 authenticated reads do not restart framing after partial-read timeouts. Host
 watchdog/keyframe commands wait until authentication is complete. New HMAC unit
 tests cover the independent vector, wrong codes, and changed challenges.
+
+## Network video access closed; video stays plaintext (protocol v4)
+
+**Explicit product decision, 2026-10-21:** close the unauthenticated framed-TCP
+video socket, but do not encrypt video. The full protection model, exact wire
+handshake, lifecycle/revocation behavior, accepted threat limits, and repeatable
+tests are in [security.md](security.md). The execution checklist and subsequent
+work are in [plan.md](plan.md). This supersedes the earlier "TCP video socket has
+no separate authentication" limitation, not the plaintext/interception limits.
+
+The phone now requires the video client's IP to match the current authenticated
+network control peer and challenges that socket with a fresh random nonce. The
+HMAC proof binds the pairing code, both control nonces, and this video nonce
+under a video-specific domain prefix. A control proof cannot substitute for a
+video proof, and neither a saved video proof nor credentials from an expired
+control session can reopen the video socket. No encoder/config/frame bytes are
+returned before successful authorization. Rejections/timeouts close that client
+only; the listeners keep serving. ADB/AOA remain trusted local paths.
+
+This adds connection-time authorization, **not per-frame encryption or MACs**.
+RTP still starts only through paired control and goes to its peer, but remains
+plaintext/unauthenticated on the wire. Interception, active MITM/relaying, and
+compromised endpoints/access points remain outside the chosen protection scope.
+
+Testing prompt revocation also exposed a pre-existing camera cancellation race:
+`onOpened` could call `createCaptureSession` after `stop()` had closed the device,
+crashing the process with `CameraDevice was already closed`. Camera callbacks
+now check cancellation, safely close late sessions, and handle a close racing
+the Camera2 call. Old capture-generation write/error callbacks are ignored after
+their cancellation token is set, so they cannot tear down a replacement session.
+
+Verification on the Redmi Note 8 / Android 11 over router Wi-Fi:
+
+- Eight network-video JVM tests plus the two existing control-HMAC tests passed;
+  Debug/Release Windows host builds and the Android debug build passed.
+- Windows, Android, and independent .NET HMACSHA256 agree on the video proof
+  vector documented in `security.md`.
+- The final live access probe passed three consecutive rounds: missing/wrong
+  proofs, fresh-socket replay, expired-control credentials, valid current proof
+  receiving video, and video closure when control disconnects. No app restart
+  was needed between negative attempts.
+- Normal Windows Wi-Fi/TCP received 440 decoded frames in the final sample, and
+  FFmpeg obtained a 1920x1080 DirectShow frame from the virtual camera.
+- Secret-free ADB regression delivered 441 decoded frames in its sample. AOA's
+  path was not changed or re-tested in this run.
+- RTP delivered frames in the Debug regression. One later Release startup
+  received access units but decoded no frames; restarting the host recovered
+  immediately (587 decoded frames, zero reported RTP loss in the retry sample).
+  This intermittent decoder/startup issue is not claimed fixed by the video
+  access work. The recovered RTP host was left running.

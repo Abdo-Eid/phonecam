@@ -147,6 +147,10 @@ class CaptureService : Service() {
       if (sessionStartedByPc) {
         Log.i(TAG, "the PC disconnected -- stopping the session it asked for")
         stopCaptureInternal()
+      } else {
+        // A phone-started capture can also have an authenticated network viewer.
+        // Its video socket must not outlive the control session that authorized it.
+        controller.disconnectNetworkVideo()
       }
     }
     controlRunning.set(true)

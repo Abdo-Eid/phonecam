@@ -40,6 +40,7 @@ class CameraCapture(private val context: Context) {
   private var requestBuilder: CaptureRequest.Builder? = null
   private var targetSurface: Surface? = null
   private var fps: Int = 30
+  @Volatile private var stopped = true
 
   var currentCameraId: String? = null
     private set
@@ -55,6 +56,7 @@ class CameraCapture(private val context: Context) {
     onError: (Throwable) -> Unit,
     lensFacing: Int = CameraCharacteristics.LENS_FACING_BACK,
   ) {
+    stopped = false
     this.targetSurface = targetSurface
     this.fps = fps
     val bgThread = HandlerThread("CameraCapture").apply { start() }
@@ -99,6 +101,10 @@ class CameraCapture(private val context: Context) {
         cameraId,
         object : CameraDevice.StateCallback() {
           override fun onOpened(camera: CameraDevice) {
+            if (stopped) {
+              camera.close()
+              return
+            }
             device = camera
             currentCameraId = cameraId
             onCameraReady?.invoke(cameraId)
@@ -111,7 +117,7 @@ class CameraCapture(private val context: Context) {
 
           override fun onError(camera: CameraDevice, error: Int) {
             camera.close()
-            onError(IllegalStateException("Camera error code $error"))
+            if (!stopped) onError(IllegalStateException("Camera error code $error"))
           }
         },
         bgHandler,
@@ -121,9 +127,9 @@ class CameraCapture(private val context: Context) {
       // on this device via a SetLens command that crashed the whole app before this catch
       // existed: uncaught on the control channel's receive thread takes the whole process down,
       // not just this capture session). SecurityException alone doesn't cover it.
-      onError(e)
+      if (!stopped) onError(e)
     } catch (e: SecurityException) {
-      onError(e)
+      if (!stopped) onError(e)
     }
   }
 
@@ -132,29 +138,45 @@ class CameraCapture(private val context: Context) {
     val stateCallback =
       object : CameraCaptureSession.StateCallback() {
         override fun onConfigured(configuredSession: CameraCaptureSession) {
-          session = configuredSession
-          val builder =
-            camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-              addTarget(surface)
-              set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-              set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
-            }
-          requestBuilder = builder
-          configuredSession.setRepeatingRequest(builder.build(), null, bgHandler)
+          if (stopped || device !== camera) {
+            configuredSession.close()
+            return
+          }
+          try {
+            session = configuredSession
+            val builder =
+              camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                addTarget(surface)
+                set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
+              }
+            requestBuilder = builder
+            configuredSession.setRepeatingRequest(builder.build(), null, bgHandler)
+          } catch (e: Exception) {
+            configuredSession.close()
+            if (!stopped && device === camera) onError(e)
+          }
         }
 
         override fun onConfigureFailed(configuredSession: CameraCaptureSession) {
-          onError(IllegalStateException("Camera capture session configuration failed"))
+          if (!stopped && device === camera) onError(IllegalStateException("Camera capture session configuration failed"))
         }
       }
 
     val executor = Executor { command -> bgHandler.post(command) }
     val sessionConfig =
       SessionConfiguration(SessionConfiguration.SESSION_REGULAR, listOf(OutputConfiguration(surface)), executor, stateCallback)
-    camera.createCaptureSession(sessionConfig)
+    try {
+      if (!stopped && device === camera) camera.createCaptureSession(sessionConfig)
+    } catch (e: Exception) {
+      // stop() can close the device after the check, before the Camera2 call. That
+      // is ordinary cancellation, not an uncaught callback exception/app crash.
+      if (!stopped && device === camera) onError(e)
+    }
   }
 
   fun stop() {
+    stopped = true
     session?.close()
     session = null
     device?.close()

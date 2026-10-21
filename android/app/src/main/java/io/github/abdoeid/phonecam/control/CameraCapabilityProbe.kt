@@ -41,11 +41,11 @@ object CameraCapabilityProbe {
     CapabilityDescriptor.addLenses(builder, lensesOffset)
     CapabilityDescriptor.addAndroidRelease(builder, androidReleaseOffset)
     CapabilityDescriptor.addDeviceModel(builder, deviceModelOffset)
-    // Protocol version 3 = the session authentication messages exist. Bump this
+    // Protocol version 4 requires session-bound TCP video authentication. Bump this
     // whenever proto/control.fbs's ControlPayload union changes shape: FlatBuffers
     // assigns union payload types by declaration order, so a new command renumbers
     // the existing ones and mismatched builds misread each other silently.
-    CapabilityDescriptor.addProtocolVersion(builder, 3u)
+    CapabilityDescriptor.addProtocolVersion(builder, 4u)
     return CapabilityDescriptor.endCapabilityDescriptor(builder)
   }
 

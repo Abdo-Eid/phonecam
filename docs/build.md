@@ -90,7 +90,7 @@ task in `android/app/build.gradle.kts` invoking `flatc --kotlin`) -- no manual s
 ## Wireless transport (RTP over UDP)
 
 ```
-windows\build\host\Debug\phonecam-host.exe --rtp <phone-ip> [udp-port]
+windows\build\host\Debug\phonecam-host.exe --rtp <phone-ip> [udp-port] --secret <code>
 ```
 
 The phone's address is the one it shows on its Wi-Fi (or hotspot) connection; the
@@ -109,6 +109,7 @@ windows\build\host\Debug\phonecam-host.exe --rtp            # find the phone, st
 windows\build\host\Debug\phonecam-host.exe --rtp 192.168.1.5 # explicit address
 windows\build\host\Debug\phonecam-host.exe --wifi            # framed TCP instead of RTP
 windows\build\host\Debug\phonecam-host.exe --rtp --secret ABCD-EFGH-IJKL
+windows\build\host\Debug\phonecam-host.exe --wifi --secret ABCD-EFGH-IJKL
 ```
 
 With no address, the phone is found by discovery (it answers a broadcast probe),
@@ -118,7 +119,12 @@ spikes.
 
 Over a network the phone only accepts a PC that knows its **pairing code** (shown
 in the phone's app). Pass it with `--secret` or the `PHONECAM_SECRET` environment
-variable. Over the local USB link no code is needed.
+variable. The first three examples assume that environment variable is set.
+ADB/AOA need no code; USB tethering uses network sockets and requires the code.
+Both applications must speak protocol v4: network TCP video now has its own
+session-bound authentication prelude, with no unauthenticated fallback. Video
+remains plaintext by explicit choice; see [security.md](security.md) for the
+complete protection model and live-test procedure.
 
 Windows' firewall blocks inbound connections on a "Public" network profile, so
 allow `phonecam-host.exe` (or open the ports) when running over Wi-Fi.
@@ -127,6 +133,7 @@ allow `phonecam-host.exe` (or open the ports) when running over Wi-Fi.
 
 ```
 windows\build\host\Debug\phonecam-host.exe --test-auth <code> <phone-nonce> <pc-nonce>
+windows\build\host\Debug\phonecam-host.exe --test-video-auth <code> <phone-nonce> <pc-nonce> <video-nonce-hex>
 ```
 
 Prints the HMAC the host would answer a pairing challenge with, so it can be

@@ -413,7 +413,8 @@ int wmain(int argc, wchar_t* argv[]) {
         return result;
     }
 
-    if (argc > 3 && std::wstring(argv[1]) == L"--test-auth") {
+    if (argc > 3 && (std::wstring(argv[1]) == L"--test-auth" ||
+                     std::wstring(argv[1]) == L"--test-video-auth")) {
         // Prints the HMAC the host would answer a pairing challenge with, so the two
         // implementations (this one and the phone's) can be compared against an
         // independent one without needing the phone at all.
@@ -428,7 +429,17 @@ int wmain(int argc, wchar_t* argv[]) {
         const std::string code = narrow(argv[2]);
         const std::string phoneNonce = narrow(argv[3]);
         const std::string pcNonce = argc > 4 ? narrow(argv[4]) : "";
-        std::printf("%s\n", phonecam::control::ComputeAuthHmac(code, phoneNonce, pcNonce).c_str());
+        if (std::wstring(argv[1]) == L"--test-video-auth") {
+            if (argc < 6) {
+                std::fprintf(stderr, "usage: --test-video-auth <code> <phone-nonce> <pc-nonce> <video-nonce>\n");
+                MFShutdown();
+                CoUninitialize();
+                return 1;
+            }
+            std::printf("%s\n", phonecam::control::ComputeVideoAuthHmac(code, phoneNonce, pcNonce, narrow(argv[5])).c_str());
+        } else {
+            std::printf("%s\n", phonecam::control::ComputeAuthHmac(code, phoneNonce, pcNonce).c_str());
+        }
         MFShutdown();
         CoUninitialize();
         return 0;
@@ -611,13 +622,20 @@ int wmain(int argc, wchar_t* argv[]) {
         // loop runs -- so the transport asks for it on every connect rather than being handed a
         // fixed address at startup.
         auto net = std::make_unique<phonecam::transport::NetVideoTransport>();
+        net->SetAuthenticator([&controlChannel](const std::string& challenge) {
+            return controlChannel.VideoAuthProof(challenge);
+        });
         net->SetHostProvider([&wirelessMutex, &discoveredHost]() {
             std::lock_guard<std::mutex> lock(wirelessMutex);
             return discoveredHost;
         });
         videoTransport = std::move(net);
     } else if (useNet) {
-        videoTransport = std::make_unique<phonecam::transport::NetVideoTransport>(netHostOverride);
+        auto net = std::make_unique<phonecam::transport::NetVideoTransport>(netHostOverride);
+        net->SetAuthenticator([&controlChannel](const std::string& challenge) {
+            return controlChannel.VideoAuthProof(challenge);
+        });
+        videoTransport = std::move(net);
     } else if (useAoa) {
         videoTransport = std::make_unique<phonecam::transport::AoaVideoTransport>();
     } else {

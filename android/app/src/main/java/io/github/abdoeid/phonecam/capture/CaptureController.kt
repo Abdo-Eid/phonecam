@@ -35,7 +35,7 @@ private const val MIN_ADAPTIVE_BITRATE_BPS = 1_000_000
 class CaptureController(private val context: Context) {
   private var encoder: H264Encoder? = null
   private var camera: CameraCapture? = null
-  private var videoServer: VideoSocketServer? = null
+  @Volatile private var videoServer: VideoSocketServer? = null
   private var startTimeMs: Long = 0
   private var acceptThread: Thread? = null
 
@@ -154,6 +154,10 @@ class CaptureController(private val context: Context) {
     controlChannel = channel
   }
 
+  fun disconnectNetworkVideo() {
+    videoServer?.closeNetworkClient()
+  }
+
   /**
    * [videoPacketSink], when non-null, replaces [VideoSocketServer] entirely as the video packet
    * destination -- used by transports whose session is already established by the time [start] is
@@ -205,7 +209,9 @@ class CaptureController(private val context: Context) {
             // channel and there is no accept step at all).
             out = videoPacketSink
           } else {
-            val server = VideoSocketServer()
+            val server = VideoSocketServer(authenticateTcp = { socket ->
+              controlChannel?.authenticateVideoConnection(socket, myCancelToken::get) == true
+            })
             try {
               server.open(isCancelled = myCancelToken::get)
             } catch (e: IOException) {
@@ -247,8 +253,10 @@ class CaptureController(private val context: Context) {
           val enc = H264Encoder(width, height, fps, bitrateBps)
           encoder = enc
           enc.start(out) { writeError ->
-            state = CaptureState.IDLE
-            onError(writeError)
+            if (!myCancelToken.get()) {
+              state = CaptureState.IDLE
+              onError(writeError)
+            }
           }
 
           val cam = CameraCapture(context)
@@ -260,7 +268,7 @@ class CaptureController(private val context: Context) {
           startTimeMs = SystemClock.elapsedRealtime()
           state = CaptureState.STREAMING
           statsThread = Thread({ runStatsLoop(enc, fps, myCancelToken::get) }, "StatsLoop").apply { start() }
-          cam.start(enc.inputSurface, fps, onError, lensFacing)
+          cam.start(enc.inputSurface, fps, { error -> if (!myCancelToken.get()) onError(error) }, lensFacing)
         }, "VideoServer-accept")
         .apply { start() }
 

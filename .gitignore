@@ -47,6 +47,10 @@ android/.cxx/
 # --- Generated protocol code ---
 proto/generated/
 
+# --- Python diagnostic scripts ---
+__pycache__/
+*.pyc
+
 # --- Editors / OS ---
 .idea/
 .vscode/

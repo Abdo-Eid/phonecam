@@ -91,6 +91,7 @@ std::string DiscoverTetheredPhoneAddress() {
 struct NetVideoTransport::Impl {
     std::string host;  // empty == rediscover per Connect()
     std::function<std::string()> hostProvider;  // when set, replaces the tethered-phone discovery
+    std::function<std::string(const std::string&)> authenticator;
     SOCKET sock = INVALID_SOCKET;
     bool wsaOk = false;
     // Guards sock, and the cancelled flag lets a Disconnect() arriving mid-Connect() win rather
@@ -165,6 +166,40 @@ bool NetVideoTransport::Connect() {
     BOOL noDelay = TRUE;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
 
+    // No media is sent until this connection proves membership in the current control
+    // session. This fixed-size handshake runs once per connection, not per video packet.
+    const DWORD timeoutMs = 2000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+    uint8_t challenge[20];
+    if (!impl_->authenticator || !ReadExact(s, challenge, sizeof(challenge)) ||
+        std::memcmp(challenge, "PCV1", 4) != 0 || impl_->cancelled.load()) {
+        closesocket(s);
+        return false;
+    }
+    static const char hex[] = "0123456789abcdef";
+    std::string nonce;
+    for (size_t i = 4; i < sizeof(challenge); ++i) {
+        nonce.push_back(hex[challenge[i] >> 4]);
+        nonce.push_back(hex[challenge[i] & 15]);
+    }
+    const std::string proof = impl_->authenticator(nonce);
+    size_t sent = 0;
+    while (proof.size() == 64 && sent < proof.size() && !impl_->cancelled.load()) {
+        const int count = send(s, proof.data() + sent, static_cast<int>(proof.size() - sent), 0);
+        if (count <= 0) break;
+        sent += static_cast<size_t>(count);
+    }
+    uint8_t accepted = 0;
+    if (sent != 64 || !ReadExact(s, &accepted, 1) || accepted != 1 || impl_->cancelled.load()) {
+        closesocket(s);
+        phonecam::log::Info("NetVideoTransport: video authorization not ready or rejected");
+        return false;
+    }
+    const DWORD noTimeout = 0;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&noTimeout), sizeof(noTimeout));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&noTimeout), sizeof(noTimeout));
+
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->cancelled.load()) {
         closesocket(s);
@@ -177,6 +212,10 @@ bool NetVideoTransport::Connect() {
 
 void NetVideoTransport::SetHostProvider(std::function<std::string()> provider) {
     impl_->hostProvider = std::move(provider);
+}
+
+void NetVideoTransport::SetAuthenticator(std::function<std::string(const std::string&)> authenticator) {
+    impl_->authenticator = std::move(authenticator);
 }
 
 void NetVideoTransport::Disconnect() {
