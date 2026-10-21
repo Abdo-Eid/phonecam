@@ -2291,6 +2291,11 @@ On the Redmi Note 8, Android 11, over router Wi-Fi (`192.168.1.29`):
   1,978 decoded frames with zero reported RTP loss in the observed interval.
 - Switching to MIUI Settings for 16 seconds did not interrupt capture; the
   decoded-frame counter continued advancing while Settings had focus.
+- Locking the phone after capture was established also preserved streaming.
+  `isKeyguardShowing=true` was confirmed before and after a 15-second interval;
+  decoded frames advanced from 8,197 to 8,652 (about 30 fps). One RTP datagram
+  loss was reported over the longer session, with no additional loss in this
+  interval. DirectShow also delivered a 1920x1080 frame while the phone was locked.
 - FFmpeg captured a real 1920x1080 frame through DirectShow's
   `PhoneCam (Windows Virtual Camera)`, verifying the wireless feed reaches the
   same virtual webcam endpoint used by third-party camera apps.
