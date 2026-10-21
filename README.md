@@ -48,6 +48,9 @@ Measured on the reference phone (Redmi Note 8, Android 11), with the phone on th
 
 These figures measure changes in delay relative to a reference frame, not absolute camera-to-PC or glass-to-glass latency. The clock-offset calculation also cancels the reference frame's pipeline delay; absolute latency still needs a separate measurement.
 
+A separate [router Wi-Fi versus laptop-hotspot measurement](docs/measurements/2026-10-21-wireless-links.md)
+compares network RTT, delivery rate, and loss while streaming; it is not a glass-to-glass latency test.
+
 Full design and phased roadmap: [`docs/architecture.md`](docs/architecture.md).
 Current execution plan and explicit security tradeoffs: [`docs/plan.md`](docs/plan.md).
 Network protection and accepted plaintext-video limits: [`docs/security.md`](docs/security.md).

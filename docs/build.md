@@ -129,6 +129,32 @@ complete protection model and live-test procedure.
 Windows' firewall blocks inbound connections on a "Public" network profile, so
 allow `phonecam-host.exe` (or open the ports) when running over Wi-Fi.
 
+## Comparing router Wi-Fi with the laptop hotspot
+
+Keep the phone and laptop stationary, open PhoneCam, and keep USB/ADB connected
+for metadata/pairing-code access (video itself uses Wi-Fi). From the repository root:
+
+```powershell
+.\scripts\measure_wireless_link.ps1 -Label router-wifi
+# After this run finishes, join the phone to the laptop hotspot, then:
+.\scripts\measure_wireless_link.ps1 -Label laptop-hotspot
+```
+
+Each run restarts only this repository's host, uses RTP/H.264 at 1920x1080,
+30 fps, 6 Mbps, allows 15 seconds of warmup, and samples for 60 seconds.
+The script records ICMP RTT percentiles while streaming, decoded frame delivery,
+receiver loss-event counts, and available phone radio information. It leaves the
+host running and writes JSON/raw logs under `windows/build/link-comparison/`.
+Do not switch networks during a run. If startup produces no decoded frames, the
+run fails rather than recording an invalid video benchmark.
+
+ICMP RTT is **network round-trip**, not one-way video or glass-to-glass latency.
+Receiver "lost" counts are loss/reassembly events, not an exact packet-loss
+percentage. The host's reference-relative delay numbers are saved only as
+diagnostics and must not be used to rank absolute baseline latency across runs.
+Radio band, signal strength, congestion, and hotspot implementation can differ;
+this compares the observed configurations, not an isolated router-hop effect.
+
 ## Checking the pairing handshake without the phone
 
 ```
