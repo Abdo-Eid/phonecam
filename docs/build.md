@@ -9,7 +9,8 @@
   `proto/wire.fbs` and `proto/control.fbs` on both sides (see below)
 - JDK 21, Android SDK (`ANDROID_HOME`) for the Gradle build
 - `git submodule update --init --recursive` -- pulls in `third_party/reference/VCamSample`
-  and `third_party/flatbuffers` (the C++/Java FlatBuffers runtime, vendored because `flatc`'s
+  and `third_party/qr-code-generator` (Nayuki's MIT C++ QR encoder, pinned to
+  `3c6d0b3cefb4e049dc337e82237c9644399716a8`), plus `third_party/flatbuffers` (the C++/Java FlatBuffers runtime, vendored because `flatc`'s
   installed version is newer than any published `flatbuffers-java` Maven artifact -- see
   `docs/architecture.md`'s Phase 4 section for why)
 - Inno Setup (winget `JRSoftware.InnoSetup`) -- only needed to build the installer
@@ -87,7 +88,24 @@ Bash's `gradlew` invocations to a broken sandbox path missing `gradle-wrapper.ja
 The Kotlin FlatBuffers bindings are generated automatically as part of the build (a Gradle `Exec`
 task in `android/app/build.gradle.kts` invoking `flatc --kotlin`) -- no manual step needed.
 
-## Wireless transport (RTP over UDP)
+## Normal Wi-Fi use (tray GUI)
+
+1. Run `phonecam-host.exe` normally, without flags. Open its tray menu.
+2. Choose **Connect over Wi-Fi...** and scan the QR with PhoneCam's **Scan PC QR**.
+3. The QR window closes after both sides save the pairing. A brief notification
+   confirms actual video arrival. Next time, open both apps on the same network.
+
+The phone hides pairing controls under **Connection settings** once paired.
+**Stop** on either device turns off capture, keeps the control/pairing, and clears
+the Windows output to black; **Start** resumes without rescanning. A deliberate
+Stop survives app/host restart and automatic recovery. USB transport changes keep
+the virtual camera registered. The QR is valid for two minutes; don't share it.
+
+**Use code instead** opens the manual discovery/code dialog and offers RTP or TCP.
+Optionally remembered manual codes and QR keys use Windows Credential Manager.
+Both apps must speak **protocol v6**; rebuild/update them together.
+
+## Developer wireless transport commands (RTP over UDP)
 
 ```
 windows\build\host\Debug\phonecam-host.exe --rtp <phone-ip> [udp-port] --secret <code>
@@ -121,10 +139,32 @@ Over a network the phone only accepts a PC that knows its **pairing code** (show
 in the phone's app). Pass it with `--secret` or the `PHONECAM_SECRET` environment
 variable. The first three examples assume that environment variable is set.
 ADB/AOA need no code; USB tethering uses network sockets and requires the code.
-Both applications must speak protocol v4: network TCP video now has its own
+Both applications must speak protocol v6: network TCP video has its own
 session-bound authentication prelude, with no unauthenticated fallback. Video
 remains plaintext by explicit choice; see [security.md](security.md) for the
 complete protection model and live-test procedure.
+
+### Live UX regression (development only)
+
+With the real phone already paired and a tray host running, build/install the debug
+app and its Android test APK (never uninstall or clear app data):
+
+```powershell
+cd android
+.\gradlew.bat assembleDebug assembleDebugAndroidTest testDebugUnitTest
+adb install -r app\build\outputs\apk\debug\app-debug.apk
+adb install -r app\build\outputs\apk\androidTest\debug\app-debug-androidTest.apk
+adb shell am instrument -w -e class io.github.abdoeid.phonecam.ConnectionUxTest#stopStaysStoppedAndHidesPairing io.github.abdoeid.phonecam.test/androidx.test.runner.AndroidJUnitRunner
+# Restart the tray host and reopen the phone app; confirm it remains stopped.
+adb shell am instrument -w -e class io.github.abdoeid.phonecam.ConnectionUxTest#explicitStartResumesRememberedConnection io.github.abdoeid.phonecam.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+The first test exercises real Compose buttons, cancels Connecting, checks secondary
+connection settings, waits four watchdog intervals after Stop, and recreates the
+activity. The second requires Stopped, checks the simplified Streaming screen, and
+tests Stop/Start again. Neither changes pairing keys. The Windows equivalent is
+`scripts/test_stopped_gui.ps1` (Stop/Resume actions, black output, remembered reconnect,
+automatic window dismissal, unchanged virtual-camera registration).
 
 Windows' firewall blocks inbound connections on a "Public" network profile, so
 allow `phonecam-host.exe` (or open the ports) when running over Wi-Fi.

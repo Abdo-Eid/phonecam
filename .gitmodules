@@ -4,3 +4,6 @@
 [submodule "third_party/flatbuffers"]
 	url = https://github.com/google/flatbuffers.git
 	path = third_party/flatbuffers
+[submodule "third_party/qr-code-generator"]
+	path = third_party/qr-code-generator
+	url = https://github.com/nayuki/QR-Code-generator.git

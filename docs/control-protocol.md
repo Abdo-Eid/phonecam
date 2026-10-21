@@ -31,7 +31,7 @@ Concretely, on `CapabilityDescriptor` receipt the host:
 
 Network sessions first exchange `AuthChallenge` / `AuthResponse`; no camera
 commands are honored before a valid pairing-code HMAC. Capabilities mark the
-session ready. Protocol v4 additionally requires a fresh session-bound proof on
+session ready. Current protocol **v6** retains v4's fresh session-bound proof on
 each framed-TCP video socket, not just a successful control login. Closing
 control revokes its video connection/capture. Local ADB/AOA behavior is unchanged.
 
@@ -103,16 +103,16 @@ Each is sent inside a `ControlEnvelope` with a fresh, monotonically increasing
    Capability-driven UI) rather than relying on `Ack{Unsupported}` — the
    latter is a correctness backstop, not a UI mechanism.
 
-## Implementation status (Phase 4)
+## Implementation status
 
 Implemented and verified against the real device: the whole handshake
 (`CapabilityDescriptor` after login, immediately for ADB), `SetZoomRatio`, `SetEv`, `SetTorch`,
 `SetFocusMode`, `TapToFocus`, `RequestKeyframe`, `SetBitrate`, `SetLens`
 (with `LensChanged` + `CurrentSettings` confirmation), `StartVideo` /
 `StopVideo`, and `Ack` for all of
-the above. The host side is a console command surface
-(`windows/host/control/ConsoleControlUi`), not a GUI yet — see
-`docs/architecture.md`'s Phase 4 section for why.
+the above. Normal host use is the native tray GUI, including transport changes,
+QR/manual pairing and Start/Stop. `windows/host/control/ConsoleControlUi` remains
+a developer command surface alongside it.
 
 **The control channel is durable**: it is owned by the phone's `CaptureService`,
 not by the capture session, so it keeps serving across a video Stop/Start and
@@ -129,3 +129,30 @@ capability — a live capability probe now shows this device actually
 supports `MANUAL_SENSOR` on both lenses), `Start`, `Stop` (video
 start/stop is driven by the PC's `StartVideo`/`StopVideo` or the phone's own
 UI). `Stats` telemetry is pushed roughly once a second while streaming.
+
+## QR identities and user Stop (v5/v6)
+
+v5 adds `AuthResponse.client_id`: nonempty selects the PC's QR-paired key;
+empty retains manual-code authentication. See [security.md](security.md) for
+enrollment/discovery. Current compatible versions are v6 on both devices.
+
+v6 sends authenticated `StreamIntent{stopped}` **before capabilities** on every
+control connection, and pushes it when the user changes intent. The phone stores
+this independently of capture/error state. The host consumes it before its ready
+handler can request video; its watchdog does not restart a stopped stream.
+
+- `StartVideo.explicit_start=false` is automatic startup/recovery. While stopped,
+  the phone returns Busy and re-publishes intent; no camera is opened.
+- `explicit_start=true` is reserved for the tray's explicit Start. A phone Start
+  clears intent and pushes it so the host can resume its known transport.
+- `StopVideo.user_requested=true` latches Stop. False means transport teardown,
+  not a user pause; switching connections does not clear an existing Stop.
+- Stop preserves authenticated control and remembered keys. The Windows output
+  gate discards late decoded frames and publishes black without re-registering
+  the virtual camera. Ready/Connecting/Streaming/Stopped labels describe the
+  normal UI; actual encoded/decoded frames, not mere authentication, confirm video.
+- Success notifications are one-shot for initial connection or deliberate resume,
+  not repeated by stats polling or transient automatic recovery.
+- `GetStreamIntent` is an authenticated, camera-free heartbeat every two seconds.
+  Six seconds without control replies retires a stale socket and reconnects,
+  including while stopped (when no media/stats would otherwise reveal a dead peer).

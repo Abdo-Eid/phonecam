@@ -25,6 +25,7 @@ std::string ComputeAuthHmac(const std::string& code, const std::string& phoneNon
                              const std::string& pcNonce);
 std::string ComputeVideoAuthHmac(const std::string& code, const std::string& phoneNonce,
                                  const std::string& pcNonce, const std::string& videoNonce);
+std::string ComputeMessageHmac(const std::string& key, const std::string& message);
 
 struct LensInfo {
     std::string cameraId;
@@ -109,6 +110,7 @@ enum class ControlMsgKind {
     LensChanged,
     Orientation,
     Error,
+    StreamIntent,
     Unknown,
 };
 
@@ -124,6 +126,7 @@ struct ControlMessage {
     LensChangedInfo lensChanged;
     OrientationChangedInfo orientation;
     ErrorInfo error;
+    bool stopped = false;
 };
 
 using ControlMessageHandler = std::function<void(const ControlMessage&)>;
@@ -148,6 +151,7 @@ public:
     // An empty code means "no code configured": the host then cannot answer a
     // challenge, and a phone that asks for one will refuse the session.
     void SetPairingCode(std::string code);
+    void SetClientId(std::string id);
 
     // Called when the session is ready for commands -- i.e. when the phone has sent
     // its capabilities, which it only does after a successful authentication. Commands
@@ -191,10 +195,11 @@ public:
     // (the phone binds its video socket and the video transport connects to
     // it), Rtp for the UDP one.
     uint32_t SendStartVideo(uint16_t width, uint16_t height, uint16_t fps, uint32_t bitrateBps, uint16_t rtpPort,
-                            uint8_t mode = 0);
+                            uint8_t mode = 0, bool explicitStart = false);
 
     // Stops a wireless session (the phone keeps its control channel open).
-    uint32_t SendStopVideo();
+    uint32_t SendStopVideo(bool userRequested = false);
+    uint32_t SendGetStreamIntent();
 
     // Tray controls: a cache of the last-seen Capabilities/CurrentSettings messages,
     // populated inside RunReceiveLoop before the message reaches the caller's handler -- moved
@@ -207,6 +212,7 @@ public:
     bool HasCapabilities() const;
     SettingsInfo GetLastSettings() const;
     bool HasSettings() const;
+    void ClearCaches();
 
 private:
     struct Impl;

@@ -1,0 +1,18 @@
+#pragma once
+#include "../../common/resources/resource.h"
+#define IDD_WIFI_CONNECT 201
+#define IDC_WIFI_PHONES 1001
+#define IDC_WIFI_REFRESH 1002
+#define IDC_WIFI_CODE 1003
+#define IDC_WIFI_REMEMBER 1004
+#define IDC_WIFI_TRANSPORT 1005
+#define IDC_WIFI_STATUS 1006
+#define IDC_WIFI_CONNECT 1007
+#define IDC_WIFI_FORGET 1008
+#define IDD_QR_PAIR 202
+#define IDC_QR_IMAGE 1101
+#define IDC_QR_STATUS 1102
+#define IDC_QR_REFRESH 1103
+#define IDC_QR_MANUAL 1104
+#define IDC_QR_RECONNECT 1105
+#define IDC_QR_FORGET 1106

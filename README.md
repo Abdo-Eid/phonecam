@@ -36,7 +36,16 @@ Three USB transports exist side by side, auto-detected at startup in this order:
 - **ADB** — needs Developer Options → USB debugging on. The original, fully proven path; still the fallback when tethering isn't available but debugging is.
 - **AOA** (Android Open Accessory) — no Developer Options either, but it needs a Windows driver bound to the phone (handled automatically, one admin prompt, no Zadig) which makes file transfer unavailable until reverted, and it carries video only. Kept as the last resort for devices where the carrier gates USB tethering.
 
-A **wireless** transport also exists: `phonecam-host --rtp` finds the phone by itself (the phone answers a discovery probe), streams the camera as RTP/H.264 over UDP to the PC's port 27185, and keeps the control channel over TCP to the same address. Put the phone on the same Wi-Fi (or on the PC's own hotspot) and no cable, driver, or Developer Options is involved. `--wifi` does the same over the phone's framed TCP socket instead. Network control and each TCP video connection require proof of the pairing code shown in the app. **Video is deliberately unencrypted:** this blocks unauthorized direct connections, not traffic interception. Pass the code with `--secret CODE` or `PHONECAM_SECRET`.
+**Wi-Fi: open the laptop tray app → Connect over Wi-Fi → scan its QR inside PhoneCam.**
+The pairing window closes when the pairing is saved; video arrival produces a brief
+Connected notification. Both devices remember the pairing, including across IP changes.
+No terminal, cable, driver, or Developer Options is needed. Use the same Wi-Fi or laptop
+hotspot. The normal path is RTP/H.264 over UDP; **Use code instead** also offers TCP.
+Phone connection settings contain the manual code, change-PC scanner, and Forget PC.
+**Stop stays stopped until Start**, retaining the pairing and the Windows virtual camera.
+**Video is deliberately unencrypted:** authenticated access does not prevent interception.
+See [security.md](docs/security.md) for credentials and accepted limits. CLI transport
+flags remain available for development, not the normal connection workflow.
 
 Measured on the reference phone (Redmi Note 8, Android 11), with the phone on the laptop's Windows Mobile Hotspot — one radio hop, not two:
 

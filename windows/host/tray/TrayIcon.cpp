@@ -11,7 +11,7 @@ namespace phonecam::tray {
 namespace {
 constexpr UINT kCallbackMessage = WM_APP + 1;
 constexpr UINT kTimerId = 1;
-constexpr UINT kTimerIntervalMs = 3000;
+constexpr UINT kTimerIntervalMs = 250;
 constexpr UINT kIconId = 1;
 constexpr UINT kMenuIdStatus = 100;  // disabled, display-only
 constexpr UINT kMenuIdExit = 101;
@@ -24,6 +24,7 @@ struct TrayIcon::Impl {
     HICON icon = nullptr;
     std::function<std::string()> statusProvider;
     std::function<std::vector<MenuItem>()> itemsProvider;
+    std::function<std::string()> notificationProvider;
     // Rebuilt at the top of every ShowContextMenu() call, indexed by (menu ID - kMenuIdDynamicBase)
     // -- WM_COMMAND looks a clicked dynamic item's callback up here rather than needing a
     // permanent, ever-growing table, since the menu itself is already rebuilt fresh each time.
@@ -68,6 +69,22 @@ struct TrayIcon::Impl {
         const std::string status = statusProvider ? statusProvider() : std::string();
         const std::wstring tip = L"PhoneCam - " + std::wstring(status.begin(), status.end());
         wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+        if (notificationProvider) {
+            const auto message = notificationProvider();
+            if (!message.empty()) Notify(message);
+        }
+    }
+
+    void Notify(const std::string& message) {
+        if (!iconAdded) return;
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid); nid.hWnd = hwnd; nid.uID = kIconId;
+        nid.uFlags = NIF_INFO;
+        nid.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
+        nid.uTimeout = 3000;
+        wcsncpy_s(nid.szInfoTitle, L"PhoneCam", _TRUNCATE);
+        wcsncpy_s(nid.szInfo, std::wstring(message.begin(), message.end()).c_str(), _TRUNCATE);
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
@@ -166,6 +183,11 @@ void TrayIcon::SetMenuItems(std::function<std::vector<MenuItem>()> itemsProvider
     impl_->itemsProvider = std::move(itemsProvider);
 }
 
+void TrayIcon::SetNotificationProvider(std::function<std::string()> provider) {
+    impl_->notificationProvider = std::move(provider);
+}
+void TrayIcon::Notify(const std::string& message) { impl_->Notify(message); }
+
 bool TrayIcon::Create(std::function<std::string()> statusProvider) {
     impl_->statusProvider = std::move(statusProvider);
 
@@ -219,6 +241,10 @@ bool TrayIcon::Create(std::function<std::string()> statusProvider) {
 void TrayIcon::RunMessageLoop() {
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        const HWND active = GetActiveWindow();
+        wchar_t className[32] = {};
+        if (active && GetClassNameW(active, className, 32) && wcscmp(className, L"#32770") == 0 &&
+            IsDialogMessageW(active, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

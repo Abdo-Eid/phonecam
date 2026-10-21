@@ -45,7 +45,7 @@ def main():
     sys.path.insert(0, str(GENERATED))
     import flatbuffers
     from phonecam.control import (Ack, AuthChallenge, AuthResponse, ControlEnvelope,
-                                  ControlPayload, StartVideo, StopVideo)
+                                  ControlPayload, StartVideo, StopVideo, StreamIntent)
 
     payload = ControlPayload.ControlPayload
 
@@ -54,6 +54,7 @@ def main():
             self.sock = socket.create_connection((args.host, 27184), 5)
             self.sock.settimeout(8)
             self.command = 0
+            self.stopped = None
             env = self.receive()
             assert env.PayloadType() == payload.AuthChallenge
             table = env.Payload()
@@ -69,8 +70,16 @@ def main():
             AuthResponse.AddNonce(builder, nonce)
             AuthResponse.AddHmac(builder, mac)
             self.send(builder, payload.AuthResponse, AuthResponse.End(builder))
-            while self.receive().PayloadType() != payload.phonecam_wire_CapabilityDescriptor:
-                pass
+            while True:
+                env = self.receive()
+                if env.PayloadType() == payload.StreamIntent:
+                    table = env.Payload()
+                    intent = StreamIntent.StreamIntent()
+                    intent.Init(table.Bytes, table.Pos)
+                    self.stopped = intent.Stopped()
+                if env.PayloadType() == payload.phonecam_wire_CapabilityDescriptor:
+                    assert self.stopped is not None, "missing initial intent before capabilities"
+                    break
 
         def receive(self):
             size, = struct.unpack("<I", exact(self.sock, 4))
@@ -87,17 +96,17 @@ def main():
             data = bytes(builder.Output())
             self.sock.sendall(struct.pack("<I", len(data)) + data)
 
-        def ack(self):
+        def ack(self, expected=0):
             while True:
                 env = self.receive()
                 if env.PayloadType() == payload.Ack and env.CmdId() == self.command:
                     table = env.Payload()
                     response = Ack.Ack()
                     response.Init(table.Bytes, table.Pos)
-                    assert response.Result() == 0, "session command rejected"
+                    assert response.Result() == expected, "unexpected session command result"
                     return
 
-        def start(self):
+        def start(self, explicit=True, expected=0):
             builder = flatbuffers.Builder(128)
             StartVideo.Start(builder)
             StartVideo.AddMode(builder, 0)
@@ -105,12 +114,14 @@ def main():
             StartVideo.AddHeight(builder, 720)
             StartVideo.AddFps(builder, 30)
             StartVideo.AddBitrateBps(builder, 4000000)
+            StartVideo.AddExplicitStart(builder, explicit)
             self.send(builder, payload.StartVideo, StartVideo.End(builder))
-            self.ack()
+            self.ack(expected)
 
-        def stop(self):
+        def stop(self, user_requested=False):
             builder = flatbuffers.Builder(64)
             StopVideo.Start(builder)
+            StopVideo.AddUserRequested(builder, user_requested)
             self.send(builder, payload.StopVideo, StopVideo.End(builder))
             self.ack()
 
@@ -127,7 +138,7 @@ def main():
                 header = exact(sock, 20)
                 assert header[:4] == b"PCV1", "missing mandatory video authentication"
                 return sock, header[4:].hex()
-            except ConnectionRefusedError:
+            except (ConnectionRefusedError, TimeoutError):
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.2)
@@ -142,6 +153,19 @@ def main():
 
     control = Control()
     try:
+        control.stop(user_requested=True)
+        control.sock.close()
+        control = Control()
+        assert control.stopped is True, "Stop was lost across control reconnect"
+        control.start(explicit=False, expected=3)
+        try:
+            unexpected = socket.create_connection((args.host, 27183), 1)
+        except (ConnectionRefusedError, TimeoutError):
+            pass
+        else:
+            unexpected.close()
+            raise AssertionError("automatic Start opened video while stopped")
+        print("PASS deliberate Stop survives reconnect and rejects automatic Start")
         control.start()
         sock, _ = video()
         denied(sock)

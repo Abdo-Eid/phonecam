@@ -54,8 +54,11 @@ table StartVideo {
   fps: uint16;
   bitrate_bps: uint32;
   rtp_port: uint16;      // PC-side UDP listen port (RTP mode only)
+  explicit_start: bool; // only a user's Start may clear a deliberate Stop
 }
-table StopVideo {}
+table StopVideo { user_requested: bool; } // false for transport teardown
+table StreamIntent { stopped: bool; } // authenticated snapshot before capabilities, and on change
+table GetStreamIntent {} // lightweight heartbeat; never opens the camera
 
 // ---- phone -> PC status / telemetry ----
 
@@ -111,6 +114,7 @@ table AuthChallenge { nonce: string; }
 table AuthResponse {
   nonce: string;         // the PC's own nonce, so both sides contribute entropy
   hmac: string;          // hex HMAC-SHA256(code, phone_nonce + "|" + pc_nonce)
+  client_id: string;     // paired PC identity (QR); absent means manual pairing-code login
 }
 
 // ---- envelope ----
@@ -133,6 +137,8 @@ union ControlPayload {
 
   // PC -> phone
   AuthResponse,
+  StreamIntent,
+  GetStreamIntent,
 }
 
 // Every control-channel message on the wire is one length-prefixed ControlEnvelope

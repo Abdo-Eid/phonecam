@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "log/Log.h"
+#include "transport/SocketConnect.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
@@ -90,6 +91,7 @@ std::string DiscoverTetheredPhoneAddress() {
 
 struct NetVideoTransport::Impl {
     std::string host;  // empty == rediscover per Connect()
+    uint16_t port = kPort;
     std::function<std::string()> hostProvider;  // when set, replaces the tethered-phone discovery
     std::function<std::string(const std::string&)> authenticator;
     SOCKET sock = INVALID_SOCKET;
@@ -143,7 +145,7 @@ bool NetVideoTransport::Connect() {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(kPort);
+    addr.sin_port = htons(impl_->port);
     if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
         phonecam::log::Error(std::format("NetVideoTransport: bad host address '{}'", host));
         closesocket(s);
@@ -155,7 +157,7 @@ bool NetVideoTransport::Connect() {
     // connect means the phone app simply isn't capturing yet, which the supervise loop's own
     // backoff already handles -- retrying here too would just hold this call for 5s per attempt
     // and make Disconnect() sluggish.
-    if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    if (!ConnectSocket(s, addr, [&]() { return impl_->cancelled.load(); })) {
         closesocket(s);
         return false;
     }
@@ -206,7 +208,7 @@ bool NetVideoTransport::Connect() {
         return false;
     }
     impl_->sock = s;
-    phonecam::log::Info(std::format("NetVideoTransport: connected to {}:{}", host, kPort));
+    phonecam::log::Info(std::format("NetVideoTransport: connected to {}:{}", host, impl_->port));
     return true;
 }
 
@@ -217,6 +219,8 @@ void NetVideoTransport::SetHostProvider(std::function<std::string()> provider) {
 void NetVideoTransport::SetAuthenticator(std::function<std::string(const std::string&)> authenticator) {
     impl_->authenticator = std::move(authenticator);
 }
+
+void NetVideoTransport::SetPort(uint16_t port) { impl_->port = port; }
 
 void NetVideoTransport::Disconnect() {
     impl_->cancelled.store(true);

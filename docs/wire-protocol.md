@@ -154,25 +154,28 @@ doesn't hardcode them and can tell a mismatched pair apart from a working one.
 ## Session authentication (pairing)
 
 Over a network, anyone on the link can reach the phone's control port. The phone
-therefore challenges, and the PC proves it knows the shared **pairing code**:
+therefore challenges, and the PC proves it knows its QR-derived **pairing key**
+(or the manual pairing code):
 
 ```
 phone -> PC:  AuthChallenge { nonce }         (a fresh random nonce)
-PC  -> phone: AuthResponse { nonce, hmac }     hmac = HMAC-SHA256(code, phone_nonce + "|" + pc_nonce)
+PC  -> phone: AuthResponse { nonce, hmac, client_id }  hmac = HMAC-SHA256(key, phone_nonce + "|" + pc_nonce)
 ```
 
 Both nonces are fresh per session, so a recorded exchange cannot be replayed, and
 the code itself never crosses the wire — only a keyed hash of it.
 
-The phone shows its pairing code in the app; the PC is given it with
-`--secret <code>` (or the `PHONECAM_SECRET` environment variable, which keeps it
-out of the process list).
+Normal pairing uses the laptop's tray QR and the in-app phone scanner. `client_id`
+selects the remembered PC key; empty retains the manual-code fallback. The manual
+code is under phone Connection settings and entered in the tray's **Use code instead**
+dialog. Developer CLI/environment options remain available. QR enrollment and
+challenge-bound remembered discovery use UDP 27186; details: [security.md](security.md).
 
 **Only network sessions are challenged.** A session over the adb-forwarded
 abstract socket is the local USB link, which the phone already trusts, and
 asking for a code there would be friction for no gain.
 
-**Network video access (protocol v4).** The framed-TCP video socket separately
+**Network video access (introduced in v4; current v6).** The framed-TCP video socket separately
 requires a fresh HMAC proof bound to the current authenticated control session
 and its peer. Before the existing video framing, the phone sends `PCV1` plus a
 16-byte nonce; the PC returns 64 lowercase ASCII hex bytes of
@@ -181,12 +184,16 @@ An acceptance byte `0x01` precedes the first ordinary video packet. Missing/wron
 replayed, or old-session proofs are closed without media. ADB/AOA stay unchanged.
 
 **Video remains unencrypted by explicit product decision.** Connection access
-control does not prevent interception or active MITM, authenticate the phone to
-the PC, or authenticate each subsequent command/media packet. Use a trusted
+control does not prevent interception or active MITM, provide certificate-based
+phone identity, or authenticate each subsequent command/media packet. Use a trusted
 network. Full protection model, lifecycle, limits, and test procedure:
 [security.md](security.md).
 
 ## Versioning
+
+Current protocol: **v6**. v5 adds QR identities; v6 adds explicit-user Start/Stop
+intent and an authenticated `StreamIntent` snapshot before capabilities. Both
+apps must be updated together. See [control-protocol.md](control-protocol.md).
 
 `CapabilityDescriptor.protocol_version` and any future breaking change bump a
 single integer. The host refuses to proceed (shows an "update the app on your

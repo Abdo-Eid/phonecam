@@ -57,6 +57,15 @@ add_executable(phonecam-host WIN32
     control/ConsoleControlUi.cpp
     tray/TrayIcon.h
     tray/TrayIcon.cpp
+    tray/WifiDialog.h
+    tray/WifiDialog.cpp
+    tray/QrPairDialog.h
+    tray/QrPairDialog.cpp
+    ../../third_party/qr-code-generator/cpp/qrcodegen.cpp
+    connection/ConnectionManager.h
+    connection/ConnectionManager.cpp
+    connection/PairingStore.h
+    connection/PairingStore.cpp
     resources/phonecam.rc
 )
 
@@ -71,11 +80,16 @@ target_include_directories(phonecam-host PRIVATE
     ${PHONECAM_PROTO_GEN_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/flatbuffers/include
     ${LIBUSB_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/qr-code-generator/cpp
 )
-target_link_libraries(phonecam-host PRIVATE phonecam_common mfplat mfuuid ole32 ws2_32 shell32 bcrypt
+target_link_libraries(phonecam-host PRIVATE phonecam_common mfplat mfuuid ole32 ws2_32 shell32 bcrypt advapi32
     ${LIBUSB_DIR}/lib/libusb-1.0.lib)
 target_compile_features(phonecam-host PRIVATE cxx_std_20)
 target_link_options(phonecam-host PRIVATE "/ENTRY:wmainCRTStartup")
+
+add_executable(phonecam-pairing-tests connection/PairingStoreTests.cpp connection/PairingStore.cpp)
+target_include_directories(phonecam-pairing-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(phonecam-pairing-tests PRIVATE advapi32 bcrypt)
 
 # libusb-1.0.dll must sit next to the exe at runtime -- same reasoning as
 # aoa_probe's own copy and adb.exe's PostBuildEvent copy for phonecam-vcam.dll.

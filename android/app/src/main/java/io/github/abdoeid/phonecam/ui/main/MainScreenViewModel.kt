@@ -12,18 +12,22 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.abdoeid.phonecam.capture.CaptureService
 import io.github.abdoeid.phonecam.capture.CaptureState
+import io.github.abdoeid.phonecam.control.TrustedPcs
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlin.math.round
 
 sealed interface CaptureUiState {
   data object Idle : CaptureUiState
 
   data object WaitingForConnection : CaptureUiState
+  data object Stopped : CaptureUiState
 
   data class Streaming(val elapsedSeconds: Double, val measuredFps: Double) : CaptureUiState
 
@@ -47,10 +51,18 @@ sealed interface CaptureUiState {
 class MainScreenViewModel(application: Application) : AndroidViewModel(application) {
   private val _uiState = MutableStateFlow<CaptureUiState>(CaptureUiState.Idle)
   val uiState: StateFlow<CaptureUiState> = _uiState.asStateFlow()
+  val pairedPcs = MutableStateFlow<List<TrustedPcs.Pc>>(emptyList())
+  val pairingMessage = MutableStateFlow("")
+  val connectedPc = MutableStateFlow("")
+  private val notices = Channel<String>(Channel.BUFFERED)
+  val notifications = notices.receiveAsFlow()
+  private var announcedStream = false
+  private var lastPairStatus = ""
 
   private var boundService: CaptureService? = null
   private var isBound = false
   private var statsJob: Job? = null
+  private var scanningQr = false
 
   private val connection =
     object : ServiceConnection {
@@ -69,6 +81,13 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     statsJob =
       viewModelScope.launch {
         while (true) {
+          pairedPcs.value = TrustedPcs(context).list()
+          val pairStatus = TrustedPcs.status()
+          if (pairStatus.isNotEmpty() && pairStatus != lastPairStatus) {
+            pairingMessage.value = pairStatus
+            lastPairStatus = pairStatus
+            if (pairStatus.startsWith("Paired with")) notices.trySend(pairStatus)
+          }
           val service = boundService
           if (service == null) {
             // Bind hasn't completed yet -- init{} kicked it off, but onServiceConnected is async.
@@ -76,12 +95,18 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
             continue
           }
           val error = service.lastError
-          if (error != null) {
+          connectedPc.value = service.connectedPc
+          if (service.userStopped) {
+            if (_uiState.value != CaptureUiState.Stopped) notices.trySend("Stopped")
+            _uiState.value = CaptureUiState.Stopped
+            announcedStream = false
+          } else if (error != null) {
             _uiState.value = CaptureUiState.Error(error.message ?: error.toString())
           } else {
             _uiState.value =
               when (service.state) {
-                CaptureState.IDLE -> CaptureUiState.Idle
+                CaptureState.IDLE -> if (connectedPc.value.isNotEmpty() || TrustedPcs.isPairingPending())
+                  CaptureUiState.WaitingForConnection else CaptureUiState.Idle
                 CaptureState.WAITING_FOR_CONNECTION -> CaptureUiState.WaitingForConnection
                 // Quantized to the precision OsdReadout actually renders -- whole seconds
                 // (formatElapsed truncates anyway) and 0.1 fps ("%.1f"). The poll runs twice a
@@ -90,13 +115,17 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
                 // for the same pixels. At this precision consecutive ticks compare equal and
                 // StateFlow conflates them.
                 CaptureState.STREAMING ->
-                  CaptureUiState.Streaming(
+                  if (!service.hasVideoFrames) CaptureUiState.WaitingForConnection else CaptureUiState.Streaming(
                     elapsedSeconds = service.elapsedSeconds.toLong().toDouble(),
                     measuredFps = round(service.measuredFps * 10.0) / 10.0,
                   )
               }
           }
-          delay(500)
+          if (_uiState.value is CaptureUiState.Streaming && !announcedStream) {
+            announcedStream = true
+            notices.trySend("Connected · streaming")
+          }
+          delay(150)
         }
       }
   }
@@ -114,6 +143,7 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     bitrateBps: Int = 6_000_000,
     lensFacing: Int = CameraCharacteristics.LENS_FACING_BACK,
   ) {
+    if (scanningQr) return
     _uiState.value = CaptureUiState.WaitingForConnection
     val context = getApplication<Application>()
     val intent =
@@ -131,15 +161,37 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
   fun stopCapture() {
     val context = getApplication<Application>()
     context.startService(Intent(context, CaptureService::class.java).setAction(CaptureService.ACTION_STOP))
-    _uiState.value = CaptureUiState.Idle
+    _uiState.value = CaptureUiState.Stopped
+    announcedStream = false
+    notices.trySend("Stopped")
   }
+
+  fun beginQrScan(): Boolean {
+    val service = boundService ?: run { pairingMessage.value = "PhoneCam is starting. Try Scan PC QR again."; return false }
+    scanningQr = true
+    TrustedPcs.cancelPending()
+    pairingMessage.value = ""
+    service.beginQrScan()
+    return true
+  }
+  fun qrScanned(payload: String?) {
+    try {
+      if (payload != null) TrustedPcs(getApplication()).scan(payload)
+    } catch (_: IllegalArgumentException) {
+      pairingMessage.value = "This is not a valid PhoneCam PC QR code."
+    } finally {
+      scanningQr = false
+      boundService?.endQrScan()
+    }
+  }
+  fun forgetPc(id: String) { boundService?.forgetPc(id) }
 
   override fun onCleared() {
     super.onCleared()
     statsJob?.cancel()
     // Deliberately not stopping capture here -- CaptureService outliving this ViewModel (e.g. the
     // Activity being destroyed while backgrounded) is the entire point of the foreground
-    // service. Only unbind; the service keeps running until an explicit ACTION_STOP.
+    // service. Only unbind; Stop releases capture but retains control/discovery for resume.
     if (isBound) {
       getApplication<Application>().unbindService(connection)
       isBound = false

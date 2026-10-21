@@ -65,11 +65,11 @@ interface ControlCommandListener {
    * knows nothing about sessions, while the service that owns the capture lifecycle
    * implements both.
    */
-  fun onStartVideo(mode: Int, width: Int, height: Int, fps: Int, bitrateBps: Int, rtpPort: Int): Byte =
+  fun onStartVideo(mode: Int, width: Int, height: Int, fps: Int, bitrateBps: Int, rtpPort: Int, explicitStart: Boolean = false): Byte =
     AckResult.Unsupported
 
   /** Stop a wireless session started by [onStartVideo]. The control channel stays open. */
-  fun onStopVideo(): Byte = AckResult.Unsupported
+  fun onStopVideo(userRequested: Boolean = false): Byte = AckResult.Unsupported
 }
 
 /**
@@ -96,10 +96,26 @@ class ControlChannel(private val context: Context, private val listener: Control
    * over the adb-forwarded abstract socket is a local USB link and is trusted without one.
    */
   var pairingCodeProvider: () -> String = { "" }
+  var trustedPcKeyProvider: (String) -> String = { "" }
+  var stoppedProvider: () -> Boolean = { false }
+  val isConnected: Boolean get() = authenticated && output != null
+  val clientId: String get() = activeClientId
+  @Volatile var networkLoginAllowed = true
+  @Volatile private var activeClientId = ""
+  @Volatile private var activeKey = ""
+
+  fun disconnectClient() {
+    networkVideoAuth.clear()
+    server.closeClient()
+  }
+
+  fun revokeForgottenPc() {
+    if (activeClientId.isNotEmpty() && trustedPcKeyProvider(activeClientId) != activeKey) disconnectClient()
+  }
 
   // Whether the current session has proved it may drive the camera. A local (USB) session is
   // trusted from the start; a network session has to answer the challenge first.
-  private var authenticated = false
+  @Volatile private var authenticated = false
   private var authPhoneNonce: String? = null
   private var sessionRejected = false
 
@@ -176,7 +192,7 @@ class ControlChannel(private val context: Context, private val listener: Control
         val isLocalUsbSession = server.lastAcceptedAddress == null
         authenticated = isLocalUsbSession
         if (isLocalUsbSession) {
-          sendCapabilities(out)
+          sendCapabilities()
         } else {
           val nonce = SessionAuth.newNonce()
           authPhoneNonce = nonce
@@ -194,6 +210,8 @@ class ControlChannel(private val context: Context, private val listener: Control
         peerAddress = null
         authenticated = false
         authPhoneNonce = null
+        activeClientId = ""
+        activeKey = ""
         server.closeClient()
         // Capture started by this PC ends with its control connection.
         onSessionEnded?.invoke()
@@ -261,7 +279,8 @@ class ControlChannel(private val context: Context, private val listener: Control
     sendBytes(builder)
   }
 
-  private fun sendCapabilities(out: OutputStream) {
+  private fun sendCapabilities() {
+    sendStreamIntent()
     val builder = FlatBufferBuilder(1024)
     val capsOffset = CameraCapabilityProbe.buildCapabilityDescriptor(context, builder)
     val envelope =
@@ -269,14 +288,16 @@ class ControlChannel(private val context: Context, private val listener: Control
         builder, 0u, ControlPayload.phonecam_wire_CapabilityDescriptor, capsOffset,
       )
     ControlEnvelope.finishControlEnvelopeBuffer(builder, envelope)
-    try {
-      val buf = builder.dataBuffer()
-      val bytes = ByteArray(buf.remaining())
-      buf.get(bytes)
-      ControlFraming.writeEnvelope(out, bytes)
-    } catch (_: IOException) {
-      // handled by the receive loop's own EOF/IO handling once it starts
-    }
+    sendBytes(builder)
+  }
+
+  fun sendStreamIntent() {
+    if (!authenticated) return
+    val builder = FlatBufferBuilder(64)
+    val payload = phonecam.control.StreamIntent.createStreamIntent(builder, stoppedProvider())
+    val envelope = ControlEnvelope.createControlEnvelope(builder, 0u, ControlPayload.StreamIntent, payload)
+    ControlEnvelope.finishControlEnvelopeBuffer(builder, envelope)
+    sendBytes(builder)
   }
 
   /**
@@ -390,13 +411,25 @@ class ControlChannel(private val context: Context, private val listener: Control
 
   private fun dispatchToListener(envelope: ControlEnvelope): Byte =
     when (envelope.payloadType) {
+        ControlPayload.GetStreamIntent -> {
+          sendStreamIntent()
+          AckResult.Ok
+        }
+        ControlPayload.StopVideo -> {
+          val t = StopVideo()
+          envelope.payload(t)
+          listener.onStopVideo(t.userRequested)
+        }
         ControlPayload.AuthResponse -> {
           val t = AuthResponse()
           envelope.payload(t)
-          val code = pairingCodeProvider()
-          if (checkAuthResponse(code, t.nonce ?: "", t.hmac ?: "")) {
+          val clientId = t.clientId ?: ""
+          val code = if (clientId.isEmpty()) pairingCodeProvider() else trustedPcKeyProvider(clientId)
+          if (networkLoginAllowed && checkAuthResponse(code, t.nonce ?: "", t.hmac ?: "")) {
             server.finishAuthentication()
             authenticated = true
+            activeClientId = clientId
+            activeKey = code
             val peer = peerAddress
             if (peer != null) {
               networkVideoAuth.startSession(peer, code, authPhoneNonce!!, t.nonce ?: "")
@@ -404,7 +437,7 @@ class ControlChannel(private val context: Context, private val listener: Control
             Log.i(TAG, "the PC proved it knows the pairing code")
             // The capabilities follow the successful authentication: the PC is told what the
             // camera can do only once it is allowed to ask.
-            output?.let { sendCapabilities(it) }
+            sendCapabilities()
             AckResult.Ok
           } else {
             networkVideoAuth.clear()
@@ -454,9 +487,13 @@ class ControlChannel(private val context: Context, private val listener: Control
           val t = StartVideo()
           envelope.payload(t)
           listener.onStartVideo(t.mode.toInt(), t.width.toInt(), t.height.toInt(), t.fps.toInt(),
-            t.bitrateBps.toInt(), t.rtpPort.toInt())
+            t.bitrateBps.toInt(), t.rtpPort.toInt(), t.explicitStart)
         }
-        ControlPayload.StopVideo -> listener.onStopVideo()
+        ControlPayload.StopVideo -> {
+          val t = StopVideo()
+          envelope.payload(t)
+          listener.onStopVideo(t.userRequested)
+        }
       else -> AckResult.Unsupported
     }
 

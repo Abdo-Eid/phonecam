@@ -37,6 +37,11 @@ public:
     // phone has necessarily started capture (reconnect robustness).
     bool Start();
     void Stop();
+    bool Prepare();
+    // Serialized by ConnectionManager after the old session is stopped; ring/virtual camera stay up.
+    void SetTransport(std::unique_ptr<phonecam::transport::VideoTransport> transport);
+    void ClearFrame();
+    void SetOutputEnabled(bool enabled);
 
     // Cheap, thread-safe status snapshot for the tray icon -- true only while the phone
     // connection is actually up, not while the supervise loop is retrying.
@@ -75,6 +80,9 @@ private:
     void RecordLatency(uint64_t phoneTimestampUs, uint64_t pcNowUs);
 
     phonecam::shm::SharedFrameRing ring_;
+    bool ringOpen_ = false;
+    std::mutex outputMutex_;
+    bool outputEnabled_ = true;
     std::unique_ptr<phonecam::transport::VideoTransport> transport_;
     phonecam::decode::MFH264Decoder decoder_;
     std::thread thread_;

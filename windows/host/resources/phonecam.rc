@@ -1,3 +1,45 @@
-#include "../../common/resources/resource.h"
+#include <windows.h>
+#include "resource.h"
 
 IDI_APPICON ICON "../../common/resources/phonecam.ico"
+
+IDD_WIFI_CONNECT DIALOGEX 0, 0, 334, 274
+STYLE DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_CONTROLPARENT
+CAPTION "PhoneCam - Connect over Wi-Fi"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "Open PhoneCam on your phone. Join the same Wi-Fi as this laptop, or connect the phone to the laptop's hotspot.", -1, 10, 8, 314, 28
+    LTEXT "Available phones", -1, 10, 39, 240, 12
+    LISTBOX IDC_WIFI_PHONES, 10, 53, 246, 62, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP | WS_BORDER
+    PUSHBUTTON "Scan again", IDC_WIFI_REFRESH, 263, 53, 61, 17
+    LTEXT "Pairing code shown on the phone", -1, 10, 121, 250, 12
+    EDITTEXT IDC_WIFI_CODE, 10, 135, 207, 15, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
+    PUSHBUTTON "Forget saved code", IDC_WIFI_FORGET, 224, 135, 100, 17
+    CONTROL "Remember this code on this PC", IDC_WIFI_REMEMBER, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 156, 310, 13
+    LTEXT "Video connection", -1, 10, 175, 100, 12
+    COMBOBOX IDC_WIFI_TRANSPORT, 115, 172, 209, 50, CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL
+    LTEXT "Video is not encrypted. Use a trusted Wi-Fi network or hotspot.", -1, 10, 195, 314, 20
+    LTEXT "Scanning for phones...", IDC_WIFI_STATUS, 10, 219, 314, 23
+    DEFPUSHBUTTON "Connect", IDC_WIFI_CONNECT, 177, 247, 70, 18
+    PUSHBUTTON "Close", IDCANCEL, 254, 247, 70, 18
+END
+
+IDD_QR_PAIR DIALOGEX 0, 0, 374, 251
+STYLE DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_CONTROLPARENT
+CAPTION "PhoneCam - Scan to connect"
+FONT 9, "Segoe UI"
+BEGIN
+    CONTROL "", IDC_QR_IMAGE, "Static", SS_BITMAP | SS_CENTERIMAGE, 10, 10, 174, 174
+    LTEXT "On your phone:", -1, 196, 14, 168, 14
+    LTEXT "1. Open PhoneCam.\n2. Tap Scan PC QR.\n3. Scan this QR.", -1, 196, 35, 168, 52
+    LTEXT "Both devices must use the same Wi-Fi or laptop hotspot.\n\nThis PC will be remembered. Next time, just open both apps.", -1, 196, 93, 168, 65
+    LTEXT "Do not share this QR. Video stays unencrypted; use a trusted network.", -1, 10, 188, 354, 21
+    LTEXT "Preparing QR...", IDC_QR_STATUS, 10, 211, 354, 14
+    PUSHBUTTON "New QR", IDC_QR_REFRESH, 10, 229, 51, 16
+    PUSHBUTTON "Use code instead", IDC_QR_MANUAL, 66, 229, 80, 16
+    PUSHBUTTON "Reconnect", IDC_QR_RECONNECT, 151, 229, 64, 16
+    PUSHBUTTON "Forget phone", IDC_QR_FORGET, 220, 229, 78, 16
+    PUSHBUTTON "Close", IDCANCEL, 303, 229, 61, 16
+END

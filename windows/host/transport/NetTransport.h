@@ -52,6 +52,7 @@ public:
     void SetHostProvider(std::function<std::string()> provider);
     // Returns a hex HMAC for the fresh video challenge, or empty while control is not ready.
     void SetAuthenticator(std::function<std::string(const std::string&)> authenticator);
+    void SetPort(uint16_t port);
 
     bool Connect() override;
     void Disconnect() override;

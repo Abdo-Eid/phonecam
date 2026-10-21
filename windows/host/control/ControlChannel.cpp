@@ -31,7 +31,7 @@ namespace {
 // number turns that into a legible error instead.
 //
 // Bump this whenever proto/control.fbs's ControlPayload union changes shape.
-constexpr uint16_t kSupportedProtocolVersion = 4;
+constexpr uint16_t kSupportedProtocolVersion = 6;
 
 // A fresh random nonce, hex-encoded. Used on the PC side of the pairing handshake.
 std::string RandomHexNonce() {
@@ -152,6 +152,10 @@ ControlMessage DecodeEnvelope(const uint8_t* data, size_t size) {
     }
     const auto* envelope = GetControlEnvelope(data);
     switch (envelope->payload_type()) {
+        case pcc::ControlPayload::StreamIntent:
+            msg.kind = ControlMsgKind::StreamIntent;
+            msg.stopped = envelope->payload_as_StreamIntent()->stopped();
+            break;
         case pcc::ControlPayload::phonecam_wire_CapabilityDescriptor:
             msg.kind = ControlMsgKind::Capabilities;
             msg.capabilities = DecodeCapabilities(envelope->payload_as_phonecam_wire_CapabilityDescriptor());
@@ -244,6 +248,7 @@ struct ControlChannel::Impl {
     std::atomic<uint32_t> nextCmdId{1};
     // The pairing code, when one is configured (see SetPairingCode).
     std::string pairingCode;
+    std::string clientId;
     // Called once per session, when the phone's capabilities arrive (which it only
     // sends after a successful authentication).
     std::function<void()> sessionReadyHandler;
@@ -277,6 +282,9 @@ std::string ComputeAuthHmac(const std::string& code, const std::string& phoneNon
                              const std::string& pcNonce) {
     return ComputeHmacSha256Hex(code, phoneNonce + "|" + pcNonce);
 }
+std::string ComputeMessageHmac(const std::string& key, const std::string& message) {
+    return ComputeHmacSha256Hex(key, message);
+}
 
 std::string ComputeVideoAuthHmac(const std::string& code, const std::string& phoneNonce,
                                  const std::string& pcNonce, const std::string& videoNonce) {
@@ -303,6 +311,14 @@ void ControlChannel::Disconnect() {
     impl_->transport.Disconnect();
 }
 
+void ControlChannel::ClearCaches() {
+    std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+    impl_->hasCapabilities = impl_->hasSettings = false;
+    impl_->videoSessionReady = false;
+    impl_->lastCapabilities = {};
+    impl_->lastSettings = {};
+}
+
 std::string ControlChannel::VideoAuthProof(const std::string& challenge) const {
     std::lock_guard<std::mutex> lock(impl_->cacheMutex);
     if (!impl_->videoSessionReady || impl_->authPhoneNonce.empty() || impl_->authPcNonce.empty()) return {};
@@ -314,6 +330,7 @@ void ControlChannel::SetPairingCode(std::string code) {
     code.erase(std::remove(code.begin(), code.end(), '-'), code.end());
     impl_->pairingCode = std::move(code);
 }
+void ControlChannel::SetClientId(std::string id) { impl_->clientId = std::move(id); }
 
 void ControlChannel::SetSessionReadyHandler(std::function<void()> handler) {
     impl_->sessionReadyHandler = std::move(handler);
@@ -344,7 +361,7 @@ void ControlChannel::RunReceiveLoop(const ControlMessageHandler& onMessage) {
                 fb::FlatBufferBuilder fbb;
                 const fb::Offset<void> payload =
                     pcc::CreateAuthResponse(fbb, fbb.CreateString(pcNonce.c_str()),
-                                            fbb.CreateString(hmac.c_str()))
+                                            fbb.CreateString(hmac.c_str()), fbb.CreateString(impl_->clientId))
                         .Union();
                 const auto envelope =
                     pcc::CreateControlEnvelope(fbb, cmdId, pcc::ControlPayload::AuthResponse, payload);
@@ -375,6 +392,8 @@ void ControlChannel::RunReceiveLoop(const ControlMessageHandler& onMessage) {
                                          " but this host speaks v" + hostVersion +
                                          " -- update the phone app, or the two will misread each other");
                 }
+                onMessage(msg);
+                impl_->transport.Disconnect();
                 return;
             }
             {
@@ -439,16 +458,22 @@ uint32_t ControlChannel::SendSetLens(const std::string& cameraId) {
 }
 
 uint32_t ControlChannel::SendStartVideo(uint16_t width, uint16_t height, uint16_t fps, uint32_t bitrateBps,
-                                         uint16_t rtpPort, uint8_t mode) {
+                                         uint16_t rtpPort, uint8_t mode, bool explicitStart) {
     return impl_->SendCommand(pcc::ControlPayload::StartVideo, [&](fb::FlatBufferBuilder& fbb) {
         return pcc::CreateStartVideo(fbb, static_cast<pcc::VideoTransportMode>(mode), width, height, fps, bitrateBps,
-                                     rtpPort).Union();
+                                     rtpPort, explicitStart).Union();
     });
 }
 
-uint32_t ControlChannel::SendStopVideo() {
+uint32_t ControlChannel::SendStopVideo(bool userRequested) {
     return impl_->SendCommand(pcc::ControlPayload::StopVideo, [&](fb::FlatBufferBuilder& fbb) {
-        return pcc::CreateStopVideo(fbb).Union();
+        return pcc::CreateStopVideo(fbb, userRequested).Union();
+    });
+}
+
+uint32_t ControlChannel::SendGetStreamIntent() {
+    return impl_->SendCommand(pcc::ControlPayload::GetStreamIntent, [&](fb::FlatBufferBuilder& fbb) {
+        return pcc::CreateGetStreamIntent(fbb).Union();
     });
 }
 

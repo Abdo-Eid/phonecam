@@ -1,6 +1,7 @@
 package io.github.abdoeid.phonecam.transport
 
 import android.util.Log
+import io.github.abdoeid.phonecam.control.TrustedPcs
 import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -27,6 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class DiscoveryResponder(
   private val controlPort: Int,
   private val videoPort: Int,
+  private val trustedPcs: TrustedPcs,
 ) {
   private val socket = DatagramSocket(null)
   private val running = AtomicBoolean(false)
@@ -75,9 +77,8 @@ class DiscoveryResponder(
       if (!running.get()) break
 
       val request = String(packet.data, 0, packet.length, StandardCharsets.UTF_8)
-      if (!request.trim().startsWith(PROBE_MAGIC)) continue
-
-      val reply = "$REPLY_MAGIC $PROTOCOL_VERSION $controlPort $videoPort\n"
+      val reply = trustedPcs.reply(request, controlPort, videoPort)
+        ?: if (request.trim() == PROBE_MAGIC) "$REPLY_MAGIC $PROTOCOL_VERSION $controlPort $videoPort\n" else continue
       val replyBytes = reply.toByteArray(StandardCharsets.UTF_8)
       val out = DatagramPacket(replyBytes, replyBytes.size, packet.address, packet.port)
       try {
@@ -98,7 +99,7 @@ class DiscoveryResponder(
     const val REPLY_MAGIC = "PHONECAM_HERE"
 
     // The control protocol version this build speaks (proto/control.fbs).
-    const val PROTOCOL_VERSION = 4
+    const val PROTOCOL_VERSION = 6
 
     private const val RECEIVE_TIMEOUT_MS = 1000
   }

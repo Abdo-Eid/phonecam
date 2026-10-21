@@ -13,6 +13,8 @@
 #include <vector>
 
 #include "log/Log.h"
+#include "control/ControlChannel.h"
+#include "connection/PairingStore.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
@@ -94,18 +96,19 @@ bool ParseReply(const std::string& text, DiscoveredPhone& out) {
 
 }  // namespace
 
-bool DiscoverPhone(int timeoutMs, DiscoveredPhone& out) {
+std::vector<DiscoveredPhone> DiscoverPhones(int timeoutMs, const std::function<bool()>& cancelled) {
+    std::vector<DiscoveredPhone> phones;
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         phonecam::log::Error("Discovery: WSAStartup failed");
-        return false;
+        return phones;
     }
 
     const SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock == INVALID_SOCKET) {
         phonecam::log::Error("Discovery: socket() failed");
         WSACleanup();
-        return false;
+        return phones;
     }
     BOOL broadcast = TRUE;
     setsockopt(sock, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&broadcast), sizeof(broadcast));
@@ -121,7 +124,7 @@ bool DiscoverPhone(int timeoutMs, DiscoveredPhone& out) {
         phonecam::log::Error("Discovery: bind() failed");
         closesocket(sock);
         WSACleanup();
-        return false;
+        return phones;
     }
 
     const std::string probe = std::string(kDiscoveryProbe) + "\n";
@@ -130,9 +133,8 @@ bool DiscoverPhone(int timeoutMs, DiscoveredPhone& out) {
         phonecam::log::Info("Discovery: probing " + target);
     }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-    bool found = false;
-
-    while (!found && std::chrono::steady_clock::now() < deadline) {
+    const auto stopped = [&]() { return cancelled && cancelled(); };
+    while (!stopped() && std::chrono::steady_clock::now() < deadline) {
         // Re-send periodically: a datagram can be lost, and the phone may not
         // have been listening yet when the first one went out.
         for (const auto& target : broadcasts) {
@@ -149,7 +151,7 @@ bool DiscoverPhone(int timeoutMs, DiscoveredPhone& out) {
         }
 
         // Collect replies until the deadline.
-        while (std::chrono::steady_clock::now() < deadline) {
+        while (!stopped() && std::chrono::steady_clock::now() < deadline) {
             DWORD timeout = 250;
             setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
             char buffer[256];
@@ -169,19 +171,133 @@ bool DiscoverPhone(int timeoutMs, DiscoveredPhone& out) {
             char address[INET_ADDRSTRLEN]{};
             if (inet_ntop(AF_INET, &from.sin_addr, address, sizeof(address)) == nullptr) continue;
             candidate.address = address;
-            out = candidate;
-            found = true;
-            phonecam::log::Info("Discovery: found a PhoneCam at " + out.address + " (protocol v" +
-                                 std::to_string(out.protocolVersion) + ", control port " +
-                                 std::to_string(out.controlPort) + ", video port " + std::to_string(out.videoPort) +
-                                 ")");
-            break;
+            bool duplicate = false;
+            for (const auto& phone : phones) {
+                if (phone.address == candidate.address && phone.controlPort == candidate.controlPort) duplicate = true;
+            }
+            if (!duplicate) phones.push_back(candidate);
         }
     }
 
     closesocket(sock);
     WSACleanup();
-    return found;
+    return phones;
+}
+
+bool DiscoverPhone(int timeoutMs, DiscoveredPhone& out) {
+    auto phones = DiscoverPhones(timeoutMs);
+    if (phones.empty()) return false;
+    out = phones.front();
+    phonecam::log::Info("Discovery: found a PhoneCam at " + out.address + " (protocol v" +
+                         std::to_string(out.protocolVersion) + ", control port " +
+                         std::to_string(out.controlPort) + ", video port " + std::to_string(out.videoPort) + ")");
+    return true;
+}
+
+namespace {
+bool Hex(const std::string& value, size_t size) {
+    return value.size() == size && value.find_first_not_of("0123456789abcdef") == std::string::npos;
+}
+bool SameProof(const std::string& a, const std::string& b) {
+    if (a.size() != 64 || b.size() != 64) return false;
+    unsigned diff = 0;
+    for (size_t i = 0; i < a.size(); ++i) diff |= static_cast<unsigned>(a[i] ^ b[i]);
+    return diff == 0;
+}
+std::string Unhex(const std::string& value) {
+    if (value.size() > 256 || value.size() % 2 || value.find_first_not_of("0123456789abcdef") != std::string::npos) return {};
+    std::string result;
+    for (size_t i = 0; i < value.size(); i += 2) result.push_back(static_cast<char>(std::stoi(value.substr(i, 2), nullptr, 16)));
+    return result;
+}
+// The existing discovery port carries pairing; no new PC listening port/firewall rule.
+bool Exchange(const std::string& probe, int timeoutMs, const std::function<bool()>& cancelled,
+              const std::function<bool(SOCKET, const sockaddr_in&, const std::string&)>& reply) {
+    WSADATA data;
+    if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return false;
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) { WSACleanup(); return false; }
+    BOOL broadcast = TRUE;
+    setsockopt(s, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<char*>(&broadcast), sizeof(broadcast));
+    DWORD timeout = 200;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<char*>(&timeout), sizeof(timeout));
+    sockaddr_in local{}; local.sin_family = AF_INET;
+    if (bind(s, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0) { closesocket(s); WSACleanup(); return false; }
+    const auto addresses = BroadcastAddresses();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    bool found = false;
+    while (!cancelled() && std::chrono::steady_clock::now() < deadline && !found) {
+        for (const auto& address : addresses) {
+            sockaddr_in target{}; target.sin_family = AF_INET; target.sin_port = htons(kDiscoveryPort);
+            if (inet_pton(AF_INET, address.c_str(), &target.sin_addr) == 1)
+                sendto(s, probe.data(), static_cast<int>(probe.size()), 0, reinterpret_cast<sockaddr*>(&target), sizeof(target));
+        }
+        for (int i = 0; i < 8 && !cancelled() && std::chrono::steady_clock::now() < deadline; ++i) {
+            char bytes[1024]; sockaddr_in from{}; int size = sizeof(from);
+            const int count = recvfrom(s, bytes, sizeof(bytes), 0, reinterpret_cast<sockaddr*>(&from), &size);
+            if (count <= 0) break;
+            if (reply(s, from, std::string(bytes, count))) { found = true; break; }
+        }
+    }
+    closesocket(s); WSACleanup(); return found;
+}
+std::string Address(const sockaddr_in& from) {
+    char address[INET_ADDRSTRLEN] = {};
+    inet_ntop(AF_INET, &from.sin_addr, address, sizeof(address));
+    return address;
+}
+}
+
+bool PairQrPhone(const std::string& pcId, const std::string& token, int timeoutMs, QrPairedPhone& out,
+                  const std::function<bool()>& cancelled) {
+    if (!Hex(pcId, 32) || !Hex(token, 64)) return false;
+    const auto challenge = phonecam::connection::RandomHex(16);
+    if (challenge.empty()) return false;
+    std::string phoneId, phoneNonce, key;
+    sockaddr_in offered{};
+    return Exchange("PHONECAM_PAIR " + pcId + " " + challenge + "\n", timeoutMs, cancelled,
+        [&](SOCKET socket, const sockaddr_in& from, const std::string& text) {
+            std::istringstream input(text);
+            std::string kind; input >> kind;
+            if (kind == "PHONECAM_OFFER") {
+                std::string id, nonce, nameHex, proof;
+                int control = 0, video = 0;
+                if (!(input >> id >> nonce >> control >> video >> nameHex >> proof) || !Hex(id, 32) || !Hex(nonce, 32) ||
+                    control < 1 || control > 65535 || video < 1 || video > 65535) return false;
+                const auto candidateKey = phonecam::control::ComputeMessageHmac(token, "pair-key|" + pcId + "|" + id + "|" + nonce);
+                const auto expected = phonecam::control::ComputeMessageHmac(candidateKey, "offer|" + pcId + "|" + id + "|" + nonce + "|" +
+                    challenge + "|" + std::to_string(control) + "|" + std::to_string(video) + "|" + nameHex);
+                if (!SameProof(proof, expected)) return false;
+                phoneId = id; phoneNonce = nonce; key = candidateKey; offered = from;
+                out.id = id; out.key = key; out.name = Unhex(nameHex);
+                out.endpoint = {Address(from), 6, static_cast<uint16_t>(control), static_cast<uint16_t>(video)};
+                const auto confirm = "PHONECAM_CONFIRM " + pcId + " " + id + " " + nonce + " " + challenge + " " +
+                    phonecam::control::ComputeMessageHmac(key, "confirm|" + pcId + "|" + id + "|" + nonce + "|" + challenge) + "\n";
+                sendto(socket, confirm.data(), static_cast<int>(confirm.size()), 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));
+            } else if (kind == "PHONECAM_PAIRED" && !key.empty() && from.sin_addr.s_addr == offered.sin_addr.s_addr) {
+                std::string id, proof; input >> id >> proof;
+                return id == phoneId && SameProof(proof, phonecam::control::ComputeMessageHmac(key,
+                    "paired|" + pcId + "|" + phoneId + "|" + phoneNonce + "|" + challenge));
+            }
+            return false;
+        });
+}
+
+bool DiscoverPairedPhone(const std::string& pcId, const std::string& phoneId, const std::string& key,
+                          int timeoutMs, DiscoveredPhone& out, const std::function<bool()>& cancelled) {
+    const auto challenge = phonecam::connection::RandomHex(16);
+    if (!Hex(pcId, 32) || !Hex(phoneId, 32) || !Hex(key, 64) || challenge.empty()) return false;
+    return Exchange("PHONECAM_KNOWN " + pcId + " " + challenge + "\n", timeoutMs, cancelled,
+        [&](SOCKET, const sockaddr_in& from, const std::string& text) {
+            std::istringstream input(text);
+            std::string kind, id, proof; int control = 0, video = 0;
+            if (!(input >> kind >> id >> control >> video >> proof) || kind != "PHONECAM_KNOWN_HERE" || id != phoneId ||
+                control < 1 || control > 65535 || video < 1 || video > 65535) return false;
+            if (!SameProof(proof, phonecam::control::ComputeMessageHmac(key, "known|" + pcId + "|" + id + "|" + challenge + "|" +
+                std::to_string(control) + "|" + std::to_string(video)))) return false;
+            out = {Address(from), 6, static_cast<uint16_t>(control), static_cast<uint16_t>(video)};
+            return true;
+        });
 }
 
 }  // namespace phonecam::transport

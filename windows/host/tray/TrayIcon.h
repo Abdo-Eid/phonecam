@@ -48,6 +48,8 @@ public:
     // time. Items appear between the status line and Exit, in the order returned. Optional --
     // if never called, the menu is just status + Exit, unchanged from before this existed.
     void SetMenuItems(std::function<std::vector<MenuItem>()> itemsProvider);
+    void SetNotificationProvider(std::function<std::string()> provider);
+    void Notify(const std::string& message);
 
     // Blocks running the Win32 message loop on the calling thread until the user picks Exit from
     // the tray menu, or Close() is called (from any thread). Meant to replace a plain

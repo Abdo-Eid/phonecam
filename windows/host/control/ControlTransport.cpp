@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "log/Log.h"
+#include "transport/SocketConnect.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -118,7 +119,7 @@ bool ControlTransport::Connect(uint16_t port, const std::string& host) {
     const int maxAttempts = host.empty() ? 20 : 1;
     bool connected = false;
     for (int attempt = 0; attempt < maxAttempts && !impl_->cancelled.load(); ++attempt) {
-        if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+        if (phonecam::transport::ConnectSocket(s, addr, [&]() { return impl_->cancelled.load(); })) {
             connected = true;
             break;
         }
@@ -133,6 +134,8 @@ bool ControlTransport::Connect(uint16_t port, const std::string& host) {
     // Nagle decides enough bytes have accumulated) -- matches the phone side's own tcpNoDelay.
     BOOL noDelay = TRUE;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+    const DWORD sendTimeout = 2000;
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&sendTimeout), sizeof(sendTimeout));
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->cancelled.load()) {

@@ -22,6 +22,8 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
+#include <functional>
 
 namespace phonecam::transport {
 
@@ -42,5 +44,13 @@ struct DiscoveredPhone {
 // phone, they are equivalent for our purposes, and picking the first keeps
 // this simple and predictable.
 bool DiscoverPhone(int timeoutMs, DiscoveredPhone& out);
+
+// Collect/deduplicate all replies for a picker; cancellation is checked between short reads.
+std::vector<DiscoveredPhone> DiscoverPhones(int timeoutMs, const std::function<bool()>& cancelled = {});
+struct QrPairedPhone { DiscoveredPhone endpoint; std::string id, name, key; };
+bool PairQrPhone(const std::string& pcId, const std::string& token, int timeoutMs, QrPairedPhone& out,
+                  const std::function<bool()>& cancelled);
+bool DiscoverPairedPhone(const std::string& pcId, const std::string& phoneId, const std::string& key,
+                          int timeoutMs, DiscoveredPhone& out, const std::function<bool()>& cancelled);
 
 }  // namespace phonecam::transport

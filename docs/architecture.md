@@ -6,6 +6,37 @@ detail see [`wire-protocol.md`](wire-protocol.md) and
 
 ## Overview
 
+### Current connection UX (2026-10-21)
+
+The running host owns a `ConnectionManager` that serializes transport changes,
+authentication, reconnect and video recovery without recreating the virtual
+camera. Normal Wi-Fi use is tray **Connect over Wi-Fi → in-app phone QR scan**;
+manual discovery/code entry is a secondary dialog. The QR dialog dismisses on
+durable enrollment; remembered reconnect and successful manual connection dismiss
+their dialogs too. Initial video and deliberate resume notify once, not on every
+telemetry tick or automatic retry.
+
+Protocol v6 separates persistent **user-stopped intent** from capture/error state.
+The phone publishes it before capabilities on every authenticated connection.
+Automatic startup/watchdog requests cannot clear it; only explicit Start can.
+Stop keeps pairing and control, releases capture and gates the Windows output to
+black, including late decoded frames. The phone presents Ready, Connecting,
+Streaming and Stopped, with codes/change-PC/forget under Connection settings.
+User actions run on a serial worker rather than performing socket I/O or camera
+teardown on Android's UI thread.
+
+Verified on the existing Redmi Note 8 pairing: remembered rediscovery without
+rescan, tray Stop across four watchdog intervals, black DirectShow output while
+the camera endpoint remains registered, explicit tray resume, automatic remembered
+reconnect-window dismissal, Stop across phone update/host restart, and the real
+phone's Connecting cancellation/settings/Stop persistence through activity recreation.
+Tests preserve the original phone pairing-preference hash and PC identity.
+Fresh physical QR scanning was confirmed before this UX change; the new
+post-enrollment dismissal branch has not required replacing that real pairing.
+
+See [build.md](build.md) for live UX tests and [security.md](security.md) for
+QR credentials and the explicit decision to leave video unencrypted.
+
 ```
 [Android APK]  Camera2 → MediaCodec H.264 (low-latency, zero-copy Surface)
                        │            (+ AudioRecord → Opus, Phase 8)

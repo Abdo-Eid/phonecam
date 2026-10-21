@@ -8,10 +8,12 @@ user's request (2026-10-21). This closes the direct-connect video socket bypass;
 it is not a claim of complete network confidentiality or protection from every
 network attack. The execution checklist is in [plan.md](plan.md).
 
-Use a trusted LAN or a personal hotspot. The pairing code is a shared secret,
+Use a trusted LAN or a personal hotspot. Normal use is tray QR pairing (below).
+The optional manual pairing code is a shared secret,
 not a per-PC identity/allow-list. Anyone given the code can act as a paired PC.
 It is generated randomly on the phone, stored in private app preferences, and
-shown in the app. `--secret CODE` or `PHONECAM_SECRET` supplies it to Windows;
+shown under Connection settings. The tray's **Use code instead** supplies it to Windows;
+developer options `--secret CODE` or `PHONECAM_SECRET` also remain available;
 the displayed grouping hyphens are ignored by the host. The environment avoids
 putting it directly in command-line arguments, but is not protection from local
 process inspection by a sufficiently privileged user.
@@ -20,8 +22,8 @@ process inspection by a sufficiently privileged user.
 
 | Entry point | Protection |
 |---|---|
-| Discovery, UDP 27186 | Public probe/reply with protocol and port information only; not authenticated and not proof of the phone's identity. |
-| Network control, TCP 27184 on phone | Pairing-code HMAC challenge/response before commands, including `StartVideo`, are allowed. |
+| Discovery, UDP 27186 | Generic probe/reply is public and unauthenticated. QR enrollment and remembered-phone replies require HMAC proofs as described below. |
+| Network control, TCP 27184 on phone | Per-PC QR key or manual-code HMAC challenge/response before commands, including `StartVideo`, are allowed. |
 | Network video, TCP 27183 on phone | Current authenticated network control session **and** matching peer address **and** a fresh session-bound HMAC proof, before encoder/config/frame bytes. No unauthenticated fallback. |
 | RTP video, UDP 27185 on PC by default | Phone sends only after authenticated `StartVideo`, to the control peer's address and requested port. There is no phone-side RTP video socket for viewers to connect to. RTP packets themselves are plaintext and unauthenticated. |
 | ADB abstract sockets | Trusted local path, unchanged; requires access to the phone's ADB interface. No network-video bypass is granted by a trusted ADB control session. |
@@ -47,9 +49,38 @@ not the listeners. A silent control handshake times out (10-second socket read
 timeout); listeners remain available for the next attempt. The pairing code
 itself is not sent over the network. Nonces/proofs are not secret bearer tokens.
 
-## TCP video connection: protocol v4
+## QR enrollment and remembered discovery (v5+, current v6)
 
-Both apps must be rebuilt together. Protocol v4 requires this video prelude;
+The laptop creates a random 32-byte token and a persistent random 16-byte PC ID.
+Its QR payload is `phonecam-pair:1:<pcId>:<token>:<UTF-8-PC-name-hex>`.
+The enrollment window is 120 seconds. Scanning happens inside PhoneCam and
+temporarily releases the capture camera. The token is transient, not the stored key.
+
+Over the existing UDP discovery port, fresh laptop challenges bind the phone's
+offer, confirmation, and final acknowledgement. The per-PC/per-phone key is
+`HMAC-SHA256(token, "pair-key|pcId|phoneId|phoneNonce")` (UTF-8 lowercase hex
+strings, HMAC output lowercase hex). Offer proofs also bind the reported ports
+and phone name. Both sides durably save the derived key before the laptop closes
+the pairing window. Scanning is enrollment approval: protect the displayed QR
+from screenshots, sharing, or shoulder-surfing during its validity window.
+
+Windows saves keys in Credential Manager (`PhoneCam/QR/<phoneId>`), not plaintext
+settings. HKCU holds only identity/preference metadata. Android saves per-PC keys
+in private preferences, excluded from cloud backup and device transfer. These
+are endpoint storage protections, not protection from a compromised user/device.
+Remembered discovery signs a fresh challenge, identities, and ports with this key
+before the laptop selects a changed IP address. No extra laptop listening port
+is introduced. The normal host uses the tray GUI, not command-line secrets.
+
+`AuthResponse.client_id` selects the paired-PC key on the phone. Empty means the
+manual-code fallback. **Forget PC** on the phone removes that key and disconnects
+its active session; forgetting on Windows alone removes the local credential but
+does not remotely revoke it. Manual-code credentials remain a separate access path.
+Stop retains keys but persists a stopped intent; reconnect/watchdog cannot clear it.
+
+## TCP video connection: prelude introduced in v4
+
+Both apps must be rebuilt together (current protocol v6). This video prelude is required;
 ordinary video packet framing is unchanged after authentication.
 
 1. Phone looks up the current authorized network control session. A missing
@@ -57,7 +88,7 @@ ordinary video packet framing is unchanged after authentication.
 2. Phone generates a fresh cryptographically random 16-byte video nonce and sends
    exactly 20 bytes: ASCII `PCV1` followed by the raw nonce.
 3. PC requires its current network control session to be ready, then sends exactly
-   64 ASCII bytes: lowercase hexadecimal HMAC-SHA256, with the pairing code as key
+   64 ASCII bytes: lowercase hexadecimal HMAC-SHA256, with the selected pairing key/code as key
    and this UTF-8 message (no trailing newline):
 
    ```text
@@ -106,8 +137,9 @@ ongoing video encryption cost.
 - **No end-to-end integrity:** authenticated control commands afterward and media
   packets are not individually MACed/signed. Active injection/hijacking, MITM,
   real-time relaying, and compromised access points are not solved.
-- **No authenticated phone identity:** discovery replies and the phone's identity
-  are not verified to the PC by certificate/pinning.
+- **No certificate-based phone identity:** generic discovery/manual-code login does
+  not pin a certificate. Remembered discovery verifies a shared-key proof, but this
+  is not a substitute for encrypted, mutually authenticated transport or MITM defense.
 - **No denial-of-service guarantee:** timeouts/recovery bound an individual video
   handshake, but flooding connections or saturating the network can disrupt use.
 - **No protection from compromised endpoints or a stolen/shared pairing code.**
@@ -145,7 +177,9 @@ python scripts/test_network_video_auth.py <phone-ip>
 windows\build\host\Debug\phonecam-host.exe --test-video-auth ABCDEFGHJKLM phone-nonce-123 pc-nonce-456 00112233445566778899aabbccddeeff
 ```
 
-The live probe intentionally starts/stops capture and reconnects control. It
+The live probe intentionally starts/stops capture and reconnects control (its
+explicit Start clears a deliberate Stop for the duration of the test). It
+first verifies Stop survives control reconnect and rejects an automatic Start. It
 checks no video is returned for missing/wrong/replayed/old-session proofs,
 checks a valid current session receives framed video, and checks control
 disconnect closes video. It never prints the actual pairing code. Three

@@ -8,7 +8,7 @@ import java.io.OutputStream
  * H264Encoder/CaptureController program against: every byte that leaves the
  * encoder passes through [writePacket], so a new transport only needs to
  * implement this interface -- no encoder/controller change (that decoupling is
- * what let the AOA transport (Phase 7) and now the RTP transport (Phase 9)
+ * what let the AOA transport and now the RTP transport
  * work: the AOA path tags one write() call as the video channel, RTP turns
  * each framed packet into one or more UDP datagrams).
  *

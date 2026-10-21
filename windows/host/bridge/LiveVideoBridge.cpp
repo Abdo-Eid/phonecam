@@ -23,12 +23,18 @@ LiveVideoBridge::LiveVideoBridge(std::unique_ptr<phonecam::transport::VideoTrans
 
 LiveVideoBridge::~LiveVideoBridge() { Stop(); }
 
-bool LiveVideoBridge::Start() {
+bool LiveVideoBridge::Prepare() {
+    if (ringOpen_) return true;
     if (!ring_.Open()) {
         phonecam::log::Error("LiveVideoBridge: failed to open SharedFrameRing (is phonecam-svc running?)");
         return false;
     }
-    if (!decoder_.Initialize()) {
+    ringOpen_ = true;
+    return true;
+}
+
+bool LiveVideoBridge::Start() {
+    if (!Prepare() || !decoder_.Initialize()) {
         phonecam::log::Error("LiveVideoBridge: decoder Initialize() failed");
         return false;
     }
@@ -44,6 +50,34 @@ void LiveVideoBridge::Stop() {
     if (thread_.joinable()) {
         thread_.join();
     }
+    connected_.store(false);
+    decoder_.Reset();
+}
+
+void LiveVideoBridge::SetTransport(std::unique_ptr<phonecam::transport::VideoTransport> transport) {
+    Stop();
+    transport_ = std::move(transport);
+    framesDecoded_.store(0);
+    std::lock_guard<std::mutex> lock(latencyMutex_);
+    latencyReferenceSet_ = false;
+    latencySampleCount_ = latencySampleIndex_ = 0;
+    latencyTotalSamples_ = 0;
+}
+
+void LiveVideoBridge::ClearFrame() {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    if (!ringOpen_) return;
+    std::vector<uint8_t> black(1920 * 1080 * 3 / 2, 128);
+    std::fill(black.begin(), black.begin() + 1920 * 1080, uint8_t{16});
+    ring_.WriteFrame(1920, 1080, 0, black.data());
+}
+
+void LiveVideoBridge::SetOutputEnabled(bool enabled) {
+    {
+        std::lock_guard<std::mutex> lock(outputMutex_);
+        outputEnabled_ = enabled;
+    }
+    if (!enabled) ClearFrame();
 }
 
 // Sleeps up to kReconnectBackoff, checking running_ every kReconnectPollInterval so Stop() isn't
@@ -92,7 +126,9 @@ void LiveVideoBridge::Run() {
                                            const phonecam::transport::VideoPacket& pkt) {
                 ++packets;
                 decoder_.Feed(pkt.payload, pkt.payloadSize, pkt.timestampUs,
-                               [this, &frames](const phonecam::decode::DecodedFrame& frame) {
+                                [this, &frames](const phonecam::decode::DecodedFrame& frame) {
+                                    std::lock_guard<std::mutex> outputLock(outputMutex_);
+                                    if (!outputEnabled_) return;
                                    // Latency: the wire carries the frame's capture timestamp
                                    // (the encoder's presentation time), so the difference to now
                                    // is the whole pipeline's cost -- camera, encoder, transport,

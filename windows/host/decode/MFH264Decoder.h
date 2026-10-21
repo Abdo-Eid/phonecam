@@ -43,6 +43,7 @@ public:
     MFH264Decoder& operator=(const MFH264Decoder&) = delete;
 
     bool Initialize();
+    void Reset();
 
     // data/size: one Annex-B chunk, starting at a NALU boundary (internal
     // start codes within the chunk are fine). timestampUs is attached to

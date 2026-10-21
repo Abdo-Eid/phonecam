@@ -3,6 +3,7 @@ package io.github.abdoeid.phonecam.ui.main
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -20,6 +21,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -44,6 +47,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -76,7 +81,8 @@ import io.github.abdoeid.phonecam.theme.PanelLine
 import io.github.abdoeid.phonecam.theme.StandbyAmber
 import io.github.abdoeid.phonecam.theme.StandbyDim
 import io.github.abdoeid.phonecam.theme.TallyRed
-import kotlinx.coroutines.delay
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 
 @Composable
 fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, viewModel: MainScreenViewModel = viewModel()) {
@@ -102,11 +108,27 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
   // it onto the other machine.
   val pairing = remember { PairingCode(context) }
   var pairingCode by remember { mutableStateOf(pairing.code) }
+  val pairedPcs by viewModel.pairedPcs.collectAsStateWithLifecycle()
+  val pairingMessage by viewModel.pairingMessage.collectAsStateWithLifecycle()
+  val connectedPc by viewModel.connectedPc.collectAsStateWithLifecycle()
+  var showSettings by remember { mutableStateOf(false) }
+  var forgetId by remember { mutableStateOf<String?>(null) }
+  val qrScanner = rememberLauncherForActivityResult(ScanContract()) {
+    hasCameraPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    viewModel.qrScanned(it.contents)
+  }
 
-  LaunchedEffect(state) {
-    if (state is CaptureUiState.Error) {
-      delay(1500)
-      viewModel.startCapture()
+  LaunchedEffect(viewModel) {
+    viewModel.notifications.collect { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
+  }
+  val streaming = state is CaptureUiState.Streaming
+  LaunchedEffect(streaming) { if (streaming) showSettings = false }
+  val scanQr = {
+    if (viewModel.beginQrScan()) {
+      showSettings = false
+      qrScanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+        .setPrompt("Scan the QR in PhoneCam on your PC").setBeepEnabled(false)
+        .setOrientationLocked(false).setCaptureActivity(QrScanActivity::class.java))
     }
   }
 
@@ -115,6 +137,11 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
     horizontalAlignment = Alignment.CenterHorizontally,
   ) {
     Nameplate(state = state)
+    if (connectedPc.isNotEmpty()) {
+      Text(connectedPc, color = Paper, modifier = Modifier.padding(top = 12.dp))
+    } else if (pairedPcs.isNotEmpty()) {
+      Text("Remembered: ${pairedPcs.joinToString { it.name }}", color = Dim, modifier = Modifier.padding(top = 12.dp))
+    }
 
     Spacer(Modifier.weight(1f))
 
@@ -126,16 +153,47 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
 
     Spacer(Modifier.weight(1f))
 
-    PairingCodeRow(
-      code = pairingCode,
-      onRegenerate = { pairingCode = pairing.regenerate() },
-    )
+    if (pairedPcs.isEmpty() && connectedPc.isEmpty() && state != CaptureUiState.WaitingForConnection && !streaming) {
+      TextButton(onClick = scanQr) { Text("SCAN PC QR", color = NoSignalBlue) }
+    }
+    if (pairingMessage.isNotEmpty() && !streaming && state != CaptureUiState.Stopped) {
+      Text(pairingMessage, color = Dim, style = MaterialTheme.typography.bodySmall)
+    }
+    TextButton(onClick = { showSettings = true }) { Text("CONNECTION SETTINGS", color = Dim) }
 
     Text(
-      "connects automatically when phonecam.exe is running on your pc",
+      "Wi-Fi / USB → Windows virtual camera",
       style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
       color = Dim,
       textAlign = TextAlign.Center,
+    )
+  }
+  if (showSettings) {
+    AlertDialog(
+      onDismissRequest = { showSettings = false },
+      title = { Text("Connection settings") },
+      text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+          TextButton(onClick = scanQr) { Text("Scan QR / change PC") }
+          Text("Manual pairing code", style = MaterialTheme.typography.labelMedium)
+          PairingCodeRow(pairingCode) { pairingCode = pairing.regenerate() }
+          for (pc in pairedPcs) {
+            Text(pc.name)
+            TextButton(onClick = { forgetId = pc.id }) { Text("Forget PC") }
+          }
+          Text("Video is not encrypted. Use a trusted Wi-Fi or hotspot.", style = MaterialTheme.typography.bodySmall)
+        }
+      },
+      confirmButton = { TextButton(onClick = { showSettings = false }) { Text("Done") } },
+    )
+  }
+  forgetId?.let { id ->
+    AlertDialog(
+      onDismissRequest = { forgetId = null },
+      title = { Text("Forget this PC?") },
+      text = { Text("It will need a new QR scan to connect again.") },
+      confirmButton = { TextButton(onClick = { viewModel.forgetPc(id); forgetId = null }) { Text("Forget") } },
+      dismissButton = { TextButton(onClick = { forgetId = null }) { Text("Cancel") } },
     )
   }
 }
@@ -191,7 +249,7 @@ private fun Nameplate(state: CaptureUiState) {
       )
     }
     Text(
-      "usb → windows  //  virtual camera",
+      "wi-fi / usb → windows",
       style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
       color = Dim,
       modifier = Modifier.padding(start = 19.dp, top = 2.dp),
@@ -251,9 +309,10 @@ private data class StatusVisual(val accent: Color, val label: String)
 
 private fun statusVisualFor(state: CaptureUiState): StatusVisual =
   when (state) {
-    CaptureUiState.Idle -> StatusVisual(StandbyDim, "STANDBY")
-    CaptureUiState.WaitingForConnection -> StatusVisual(StandbyAmber, "SEARCHING")
-    is CaptureUiState.Streaming -> StatusVisual(TallyRed, "ON AIR")
+    CaptureUiState.Idle -> StatusVisual(StandbyDim, "READY")
+    CaptureUiState.WaitingForConnection -> StatusVisual(StandbyAmber, "CONNECTING")
+    is CaptureUiState.Streaming -> StatusVisual(TallyRed, "STREAMING")
+    CaptureUiState.Stopped -> StatusVisual(StandbyDim, "STOPPED")
     is CaptureUiState.Error -> StatusVisual(NoSignalBlue, "NO SIGNAL")
   }
 
@@ -297,7 +356,8 @@ private fun ViewfinderPanel(state: CaptureUiState, onStart: () -> Unit, onStop: 
       ) { s ->
         when (s) {
           CaptureUiState.Idle ->
-            MonoCaption("tap start to begin transmitting")
+            MonoCaption("open PhoneCam on your PC, or tap Start for USB")
+          CaptureUiState.Stopped -> MonoCaption("camera off · tap Start to resume")
           CaptureUiState.WaitingForConnection ->
             MonoCaption("open phonecam on your pc")
           is CaptureUiState.Streaming -> OsdReadout(s.elapsedSeconds, s.measuredFps)
@@ -307,7 +367,8 @@ private fun ViewfinderPanel(state: CaptureUiState, onStart: () -> Unit, onStop: 
 
       when (state) {
         CaptureUiState.Idle -> PanelButton("START", TallyRed, onStart)
-        CaptureUiState.WaitingForConnection -> PanelButton("CANCEL", PanelLine, onStop, filled = false)
+        CaptureUiState.Stopped -> PanelButton("START", TallyRed, onStart)
+        CaptureUiState.WaitingForConnection -> PanelButton("STOP", PanelLine, onStop, filled = false)
         is CaptureUiState.Streaming -> PanelButton("STOP", PanelLine, onStop, filled = false)
         is CaptureUiState.Error -> PanelButton("RETRY NOW", NoSignalBlue, onStart)
       }

@@ -60,6 +60,7 @@ bool PackNv12FromStrided(const uint8_t* scanline0, LONG pitch, uint32_t width, u
 }  // namespace
 
 bool MFH264Decoder::Initialize() {
+    Reset();
     HRESULT hr = CoCreateInstance(kClsidCMSH264DecoderMFT, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&decoder_));
     if (FAILED(hr)) {
         phonecam::log::Error(std::format("MFH264Decoder: CoCreateInstance failed hr=0x{:08X}", static_cast<unsigned>(hr)));
@@ -91,6 +92,14 @@ bool MFH264Decoder::Initialize() {
     decoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
     decoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
     return true;
+}
+
+void MFH264Decoder::Reset() {
+    decoder_.Reset();
+    providesSamples_ = false;
+    outputSampleSize_ = 0;
+    width_ = height_ = codedHeight_ = 0;
+    packBuffer_.clear();
 }
 
 bool MFH264Decoder::Feed(const uint8_t* data, size_t size, uint64_t timestampUs, const FrameCallback& onFrame) {

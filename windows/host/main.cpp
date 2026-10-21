@@ -26,6 +26,10 @@
 #include "transport/Discovery.h"
 #include "transport/RtpVideoTransport.h"
 #include "tray/TrayIcon.h"
+#include "tray/WifiDialog.h"
+#include "tray/QrPairDialog.h"
+#include "connection/PairingStore.h"
+#include "connection/ConnectionManager.h"
 #include "vcam_ctl/VCamControl.h"
 
 #include "control_generated.h"
@@ -35,19 +39,6 @@ namespace {
 // d0255f4e-4471-47c4-91fc-0e74dcc93308 -- must match windows/vcam/dllmain.cpp
 constexpr GUID kVCamSourceClsid = {
     0xd0255f4e, 0x4471, 0x47c4, {0x91, 0xfc, 0x0e, 0x74, 0xdc, 0xc9, 0x33, 0x08}};
-
-// The capture parameters the PC asks for in the wireless StartVideo command.
-// They match the phone app's own capture defaults and the virtual camera's
-// declared stream size -- a mismatch on either side is exactly what silently
-// stretched the image on the PC side once before, so all three numbers have
-// to agree.
-constexpr uint16_t kWirelessWidth = 1920;
-constexpr uint16_t kWirelessHeight = 1080;
-constexpr uint16_t kWirelessFps = 30;
-constexpr uint32_t kWirelessBitrateBps = 6'000'000;
-
-// The phone's control port, as reported by discovery (the fallback when discovery isn't used).
-constexpr uint16_t kDefaultControlPort = 27184;
 
 // Set once, right before TrayIcon::RunMessageLoop() -- ConsoleHandler runs on a separate
 // OS-created thread (per SetConsoleCtrlHandler's contract), so Ctrl+C and the tray's own Exit
@@ -540,113 +531,41 @@ int wmain(int argc, wchar_t* argv[]) {
                              " on UDP port " + std::to_string(rtpPort));
     }
 
-    // Auto-detect prefers the network path above everything else when a
-    // USB-tethered phone is actually present. It's strictly the best of the three -- USB
-    // latency (3-5ms measured), Windows' own inbox RNDIS driver so nothing to install and no
-    // UAC, nothing displaced (unlike AOA, which must replace the MTP driver), and it's the only
-    // no-debugging path that carries the *control* channel too, not just video.
-    std::string netHost = netHostOverride;
-    if (!forceAoa && !forceAdb && !forceWireless && !useTestPattern && netHost.empty()) {
-        netHost = phonecam::transport::DiscoverTetheredPhoneAddress();
-    }
-    const bool useNet =
-        !forceWireless && (forceNet || (!forceAoa && !forceAdb && !useTestPattern && !netHost.empty()));
-
-    // With no explicit flag and no tethered phone, fall back to preferring adb when a
-    // debugging-enabled phone is present (the proven, no-extra-setup path), then AOA (which
-    // needs the driver from windows/usbdriver/ to have been set up; if it hasn't,
-    // AoaVideoTransport::Connect() just fails and retries, same as adb failing to find a phone
-    // streaming -- see LiveVideoBridge::Run()'s existing backoff).
-    const bool useAoa =
-        !forceWireless && (forceAoa || (!forceAdb && !useNet && !useTestPattern && !DetectAdbDevicePresent()));
-    if (!forceAoa && !forceAdb && !forceNet && !forceWireless && !useTestPattern) {
-        if (useNet) {
-            phonecam::log::Info("USB-tethered phone detected at " + netHost + " -- using the network transport");
-        } else {
-            phonecam::log::Info(useAoa ? "No tethered or debugging-enabled phone detected -- using AOA"
-                                        : "Debugging-enabled phone detected -- using adb");
-        }
-    }
-
-    // The control channel is created before the bridge so the RTP transport can be given a
-    // keyframe-request callback that reaches it: after a packet loss the decoder needs a fresh
-    // IDR, and only the PC can ask the phone for one (the phone owns the encoder).
-    phonecam::control::ControlChannel controlChannel;
-    std::atomic<bool> controlReady{false};
-    if (!pairingCode.empty()) {
-        controlChannel.SetPairingCode(pairingCode);
-    }
-    // Asked for as soon as the phone's session is ready -- which is after the pairing
-    // handshake has succeeded, so the request isn't rejected for being premature.
-    //
-    // This is also the wake-up: the phone can be sitting idle, and a phone-side start can't
-    // be automated (and shouldn't have to be). The transport is named explicitly -- the
-    // phone either binds its framed video socket (the socket transports connect to it) or
-    // streams RTP straight to this PC.
-    //
-    // Not sent over AOA: there the phone starts the session itself, when the USB accessory
-    // is attached (the accessory pipe *is* the video transport).
-    controlChannel.SetSessionReadyHandler([&]() {
-        controlReady.store(true);
-        controlChannel.SendRequestKeyframe();
-        if (useAoa) return;
-        // The mode is passed as a plain byte on purpose: ControlChannel.h keeps FlatBuffers
-        // types out of its interface (see that header's own rule), so the schema's enum is
-        // converted here, at the one place that includes it.
-        controlChannel.SendStartVideo(kWirelessWidth, kWirelessHeight, kWirelessFps, kWirelessBitrateBps,
-                                      rtpPort,
-                                      forceRtp ? static_cast<uint8_t>(phonecam::control::VideoTransportMode::Rtp)
-                                               : static_cast<uint8_t>(phonecam::control::VideoTransportMode::FramedTcp));
-    });
-
-    // The phone's address, once discovery has found one. Shared between the control channel
-    // (which connects to it) and the framed-TCP wireless transport (which pulls from it), and
-    // written by the control supervise loop -- the thread that runs discovery -- hence the
-    // mutex.
-    std::mutex wirelessMutex;
-    std::string discoveredHost = wirelessHost;
-    uint16_t discoveredControlPort = 0;
-    uint16_t discoveredVideoPort = 0;
+    phonecam::connection::ConnectionManager connection;
+    auto& controlChannel = connection.Control();
+    auto& bridge = connection.Bridge();
+    phonecam::control::ConsoleControlUi controlUi(controlChannel);
+    connection.SetMessageHandler([&](const phonecam::control::ControlMessage& message) { controlUi.OnMessage(message); });
 
     phonecam::bridge::TestPatternProducer producer;
-    // Kept as a raw pointer (not just inside the unique_ptr) so the keyframe-request callback
-    // can be installed after the transport has been handed to the bridge.
-    phonecam::transport::RtpVideoTransport* rtpTransport = nullptr;
-    std::unique_ptr<phonecam::transport::VideoTransport> videoTransport;
-    if (forceRtp) {
-        auto rtp = std::make_unique<phonecam::transport::RtpVideoTransport>(rtpPort);
-        rtpTransport = rtp.get();
-        videoTransport = std::move(rtp);
-    } else if (forceWifi) {
-        // Framed TCP over Wi-Fi: the address comes from discovery, which the control supervise
-        // loop runs -- so the transport asks for it on every connect rather than being handed a
-        // fixed address at startup.
-        auto net = std::make_unique<phonecam::transport::NetVideoTransport>();
-        net->SetAuthenticator([&controlChannel](const std::string& challenge) {
-            return controlChannel.VideoAuthProof(challenge);
-        });
-        net->SetHostProvider([&wirelessMutex, &discoveredHost]() {
-            std::lock_guard<std::mutex> lock(wirelessMutex);
-            return discoveredHost;
-        });
-        videoTransport = std::move(net);
-    } else if (useNet) {
-        auto net = std::make_unique<phonecam::transport::NetVideoTransport>(netHostOverride);
-        net->SetAuthenticator([&controlChannel](const std::string& challenge) {
-            return controlChannel.VideoAuthProof(challenge);
-        });
-        videoTransport = std::move(net);
-    } else if (useAoa) {
-        videoTransport = std::make_unique<phonecam::transport::AoaVideoTransport>();
-    } else {
-        videoTransport = std::make_unique<phonecam::transport::AdbVideoTransport>();
-    }
-    if (rtpTransport != nullptr) {
-        rtpTransport->SetKeyframeRequester([&]() {
-            if (controlReady.load()) controlChannel.SendRequestKeyframe();
-        });
-    }
-    phonecam::bridge::LiveVideoBridge bridge(std::move(videoTransport));
+    using phonecam::connection::Mode;
+    phonecam::connection::Target initial;
+    initial.mode = forceRtp ? Mode::WifiRtp : forceWifi ? Mode::WifiTcp : forceNet ? Mode::Tethered
+                   : forceAdb ? Mode::Adb : forceAoa ? Mode::Aoa : Mode::Automatic;
+    initial.address = forceWireless ? wirelessHost : netHostOverride;
+    initial.pairingCode = pairingCode;
+    initial.rtpPort = rtpPort;
+    auto resolveAutomatic = [pairingCode]() {
+        phonecam::connection::Target target;
+        if (phonecam::connection::RememberedWifiEnabled()) {
+            const auto phone = phonecam::connection::LoadPairedPhone();
+            if (!phone.key.empty()) {
+                target.mode = Mode::WifiRtp;
+                target.clientId = phone.pcId; target.phoneId = phone.phoneId; target.pairingCode = phone.key;
+                return target;
+            }
+        }
+        target.pairingCode = pairingCode;
+        target.address = phonecam::transport::DiscoverTetheredPhoneAddress();
+        target.mode = !target.address.empty() ? Mode::Tethered : DetectAdbDevicePresent() ? Mode::Adb : Mode::Aoa;
+        if (target.mode == Mode::Tethered && target.pairingCode.empty()) {
+            const auto phone = phonecam::connection::LoadPairedPhone();
+            target.clientId = phone.pcId;
+            target.phoneId = phone.phoneId;
+            target.pairingCode = phone.key;
+        }
+        return target;
+    };
     if (useTestPattern) {
         if (!producer.Start(1280, 960, 30)) {
             phonecam::log::Error("TestPatternProducer failed to start");
@@ -655,7 +574,7 @@ int wmain(int argc, wchar_t* argv[]) {
             return 1;
         }
     } else {
-        if (!bridge.Start()) {
+        if (!connection.Start(initial, resolveAutomatic)) {
             phonecam::log::Error("LiveVideoBridge failed to start");
             MFShutdown();
             CoUninitialize();
@@ -663,132 +582,7 @@ int wmain(int argc, wchar_t* argv[]) {
         }
     }
 
-    // Control channel (proto/control.fbs) on a second adb-forwarded
-    // port, alongside the video channel started above. This now
-    // supervises its own reconnect, mirroring LiveVideoBridge::Run() -- a USB
-    // replug or adb-server restart kills both channels' TCP connections
-    // together, so control needs the same connect-retry loop video got. A
-    // connect failure is still non-fatal to the video pipeline (e.g. an older
-    // phone app build predates control-channel support): the console UI just
-    // keeps retrying quietly in the background.
-    phonecam::control::ConsoleControlUi controlUi(controlChannel);
-    std::atomic<bool> controlRunning{true};
-    std::atomic<bool> controlConnected{false};  // tray-icon status text reads this
-    // Backoff applies after every disconnect, not just an outright Connect()
-    // failure -- adb forward's local TCP proxy can accept the PC-side
-    // connect() immediately and only then discover nothing is listening on
-    // the phone's abstract socket, so "connected" followed by an instant
-    // disconnect is a real case (confirmed live via LiveVideoBridge hitting
-    // exactly this), not just Connect() returning false outright. Without
-    // backing off there too, this busy-loops: no sleep, `adb forward` (a
-    // whole new adb.exe process per attempt) launched many times a second.
-    std::thread controlSuperviseThread([&]() {
-        while (controlRunning.load()) {
-            // On the network transport the control channel goes straight to the phone,
-            // no adb involved. Rediscovered per attempt (not captured once) so a replug that
-            // brings the RNDIS link back at a different address still reconnects. Empty host on
-            // every other transport == the unchanged adb-forward path. The RTP transport
-            // connects to the address the user gave on the command line.
-            std::string controlHost;
-            uint16_t controlPort = kDefaultControlPort;
-            if (forceWireless) {
-                // The wireless path: the phone's address comes from discovery, unless the user
-                // gave one on the command line. Discovery runs here rather than once at startup,
-                // so the phone can appear (or be opened) later -- the host simply starts working
-                // when the phone shows up.
-                {
-                    std::lock_guard<std::mutex> lock(wirelessMutex);
-                    controlHost = discoveredHost;
-                    if (discoveredControlPort != 0) controlPort = discoveredControlPort;
-                }
-                if (controlHost.empty()) {
-                    phonecam::transport::DiscoveredPhone found;
-                    if (phonecam::transport::DiscoverPhone(2000, found)) {
-                        std::lock_guard<std::mutex> lock(wirelessMutex);
-                        discoveredHost = found.address;
-                        discoveredControlPort = found.controlPort;
-                        discoveredVideoPort = found.videoPort;
-                        controlHost = found.address;
-                        controlPort = found.controlPort;
-                    } else {
-                        // Nothing answered -- wait and try again rather than giving up: the
-                        // phone app may not be open yet.
-                        for (int waitedMs = 0; waitedMs < 2000 && controlRunning.load(); waitedMs += 200) {
-                            Sleep(200);
-                        }
-                        continue;
-                    }
-                }
-            } else if (useNet) {
-                controlHost = netHostOverride.empty() ? phonecam::transport::DiscoverTetheredPhoneAddress()
-                                                       : netHostOverride;
-            }
-            if (useNet && controlHost.empty()) {
-                for (int waitedMs = 0; waitedMs < 2000 && controlRunning.load(); waitedMs += 200) Sleep(200);
-                continue;
-            }
-            if (controlChannel.Connect(controlPort, controlHost)) {
-                controlConnected.store(true);
-                // The session is only ready for commands once the phone has sent its
-                // capabilities, which it only does after a successful authentication --
-                // so that is when the session is asked for (see the session-ready handler
-                // below). Asking earlier would simply be rejected by the phone.
-                //
-                // Every (re)connect implies the video side may also just have
-                // reconnected onto a fresh encoder session (new SPS/PPS, no
-                // guaranteed keyframe yet) -- ask for one explicitly rather
-                // than waiting for the phone's own keyframe interval.
-                controlChannel.RunReceiveLoop(
-                    [&](const phonecam::control::ControlMessage& msg) { controlUi.OnMessage(msg); });
-                controlReady.store(false);
-                controlConnected.store(false);
-                controlChannel.Disconnect();
-                if (!controlRunning.load()) break;
-                phonecam::log::Info("Control channel disconnected, reconnecting");
-            }
-            for (int waitedMs = 0; waitedMs < 2000 && controlRunning.load(); waitedMs += 200) {
-                Sleep(200);
-            }
-        }
-    });
     std::thread controlUiThread([&]() { controlUi.RunCommandLoop(); });
-
-    // A session watchdog: while the control channel is up but no frames are arriving, the
-    // phone is asked again every few seconds.
-    //
-    // Why this is needed: the phone can only open the camera when Android lets it, and a
-    // request that arrives while the app is in the background is refused (the camera is
-    // "disabled by policy" / "cannot open camera from background"). The user bringing the
-    // app to the foreground is the thing that unblocks it -- and the phone is the only party
-    // that knows it has been refused, so the PC keeps asking rather than giving up.
-    //
-    // It also covers the ordinary case of a session that died for a reason the PC never sees
-    // (the phone's camera was taken by another app, the encoder was reconfigured).
-    std::thread sessionWatchdogThread([&]() {
-        uint64_t lastFrameCount = 0;
-        auto lastFrameChange = std::chrono::steady_clock::now();
-        while (controlRunning.load()) {
-            for (int waitedMs = 0; waitedMs < 1000 && controlRunning.load(); waitedMs += 100) {
-                Sleep(100);
-            }
-            if (!controlRunning.load()) break;
-            if (useAoa) continue;  // over AOA the phone starts the session itself
-            const uint64_t frames = bridge.FramesDecoded();
-            const auto now = std::chrono::steady_clock::now();
-            if (frames != lastFrameCount) {
-                lastFrameCount = frames;
-                lastFrameChange = now;
-                continue;
-            }
-            if (now - lastFrameChange < std::chrono::seconds(3)) continue;
-            lastFrameChange = now;
-            if (!controlReady.load()) continue;
-            controlChannel.SendStartVideo(kWirelessWidth, kWirelessHeight, kWirelessFps, kWirelessBitrateBps,
-                                          rtpPort,
-                                          forceRtp ? static_cast<uint8_t>(phonecam::control::VideoTransportMode::Rtp)
-                                                   : static_cast<uint8_t>(phonecam::control::VideoTransportMode::FramedTcp));
-        }
-    });
 
     phonecam::vcam_ctl::VCamControl vcam;
     hr = vcam.Start(L"PhoneCam", kVCamSourceClsid);
@@ -829,9 +623,34 @@ int wmain(int argc, wchar_t* argv[]) {
         // updated by the bridge and control-channel supervise loops above -- no polling thread of
         // its own needed, TrayIcon refreshes on its own timer and on menu-open.
         phonecam::tray::TrayIcon tray;
+        phonecam::tray::WifiDialog wifiDialog(connection);
+        phonecam::tray::QrPairDialog qrDialog(connection, [&]() { wifiDialog.Show(); },
+                                             [&]() { tray.Notify("Phone paired and remembered"); });
+        uint64_t lastStreamingEvent = 0;
+        tray.SetNotificationProvider([&]() -> std::string {
+            const auto state = connection.GetSnapshot();
+            if (state.streamingEvent == lastStreamingEvent) return {};
+            lastStreamingEvent = state.streamingEvent;
+            return "Connected - streaming";
+        });
         tray.SetMenuItems([&]() -> std::vector<phonecam::tray::MenuItem> {
             using phonecam::tray::MenuItem;
             std::vector<MenuItem> items;
+            const auto state = connection.GetSnapshot();
+            if (!useTestPattern) {
+                items.push_back({"Connect over Wi-Fi...", [&]() { qrDialog.Show(); }, false, {}});
+                items.push_back({"Use USB (automatic)", [&]() {
+                                      phonecam::connection::UseRememberedWifi(false);
+                                      connection.Connect({Mode::Automatic}); },
+                                  state.mode == Mode::Adb || state.mode == Mode::Aoa || state.mode == Mode::Tethered, {}});
+                items.push_back({"Disconnect", [&]() {
+                    phonecam::connection::UseRememberedWifi(false);
+                    connection.Connect({Mode::Disconnected}); }, false, {}});
+                if (state.controlReady) {
+                    const bool stopped = state.state == phonecam::connection::State::Stopped;
+                    items.push_back({stopped ? "Start" : "Stop", [&, stopped]() { connection.SetStreaming(stopped); }, false, {}});
+                }
+            }
 
             // Camera-content controls (lens/zoom/exposure/torch/focus): these are PC->phone
             // commands over the control channel (still adb-only today -- see AoaVideoTransport's
@@ -840,7 +659,7 @@ int wmain(int argc, wchar_t* argv[]) {
             // CurrentSettings, scoped to whichever lens is currently active -- nothing shown at
             // all until the phone has actually reported capabilities once, matching the existing
             // "never show a control the phone doesn't support" rule.
-            if (controlChannel.HasCapabilities()) {
+            if (state.controlReady && controlChannel.HasCapabilities()) {
                 const auto caps = controlChannel.GetLastCapabilities();
                 const bool hasSettings = controlChannel.HasSettings();
                 const auto settings = hasSettings ? controlChannel.GetLastSettings() : phonecam::control::SettingsInfo{};
@@ -946,7 +765,7 @@ int wmain(int argc, wchar_t* argv[]) {
                 // Only offered in AOA mode -- the adb path never needs this driver at all, and
                 // offering it there would be actively misleading (see AoaVideoTransport's own
                 // composite-device guard: installing this while debugging is on is refused anyway).
-                if (useAoa) {
+                if (state.mode == Mode::Aoa) {
                     items.push_back({"Set up USB driver for AOA...",
                                       [&]() { launchHelper(L"--install", "install"); }, false, {}});
                 }
@@ -958,12 +777,7 @@ int wmain(int argc, wchar_t* argv[]) {
         });
         const bool trayCreated = tray.Create([&]() -> std::string {
             if (useTestPattern) return "test pattern (dev mode)";
-            const bool video = bridge.IsConnected();
-            const bool control = controlConnected.load();
-            const char* videoLabel = useAoa ? "video via AOA" : "video";
-            if (video && control) return std::string("streaming (") + videoLabel + " + control)";
-            if (video) return std::string("streaming (") + videoLabel + " only)";
-            return "waiting for phone...";
+            return connection.GetSnapshot().message;
         });
         if (trayCreated) {
             g_tray = &tray;
@@ -986,14 +800,11 @@ int wmain(int argc, wchar_t* argv[]) {
         vcam.Stop();
     }
 
-    controlRunning.store(false);
-    controlChannel.Disconnect();  // unblocks a pending connect retry or the receive loop's blocking recv()
-    if (controlSuperviseThread.joinable()) controlSuperviseThread.join();
+    connection.Stop();
     // controlUiThread is blocked in std::getline(std::cin, ...), which
     // nothing here can interrupt -- detach it and let process exit reclaim
     // it, rather than hanging shutdown on an unblockable join.
     if (controlUiThread.joinable()) controlUiThread.detach();
-    if (sessionWatchdogThread.joinable()) sessionWatchdogThread.detach();
 
     if (useTestPattern) {
         producer.Stop();
