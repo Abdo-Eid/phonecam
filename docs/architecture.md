@@ -2286,6 +2286,18 @@ On the Redmi Note 8, Android 11, over router Wi-Fi (`192.168.1.29`):
   `the PC proved it knows the pairing code`, host received protocol-v3 capabilities.
 - Discovery found the phone without an IP argument; the displayed grouped code
   worked with `--rtp --secret CODE`.
+- After unlocking and opening PhoneCam, capture recovered on the existing
+  authenticated connection without restarting the host. Wi-Fi/RTP delivered
+  1,978 decoded frames with zero reported RTP loss in the observed interval.
+- Switching to MIUI Settings for 16 seconds did not interrupt capture; the
+  decoded-frame counter continued advancing while Settings had focus.
+- FFmpeg captured a real 1920x1080 frame through DirectShow's
+  `PhoneCam (Windows Virtual Camera)`, verifying the wireless feed reaches the
+  same virtual webcam endpoint used by third-party camera apps.
+  A three-second multi-frame smoke test also delivered frames, but FFmpeg
+  reported repeated/non-monotonic output timestamps and received more samples
+  than the advertised 30 fps. Virtual-camera pacing/timestamps need a separate
+  follow-up; this test proves frame delivery, not correct output cadence.
 
 The negative test exposed a lifecycle bug: rejecting one session set the channel's
 global stop flag, then retries attempted to bind listeners that were still held.
