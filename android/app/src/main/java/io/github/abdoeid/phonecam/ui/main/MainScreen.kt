@@ -50,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -69,6 +70,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
 import io.github.abdoeid.phonecam.control.PairingCode
@@ -88,13 +92,33 @@ import com.journeyapps.barcodescanner.ScanOptions
 fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, viewModel: MainScreenViewModel = viewModel()) {
   val state by viewModel.uiState.collectAsStateWithLifecycle()
   val context = LocalContext.current
+  val lifecycleOwner = LocalLifecycleOwner.current
+  DisposableEffect(lifecycleOwner, viewModel) {
+    val observer = LifecycleEventObserver { _, event ->
+      when (event) {
+        Lifecycle.Event.ON_START -> viewModel.bindUi()
+        Lifecycle.Event.ON_STOP -> viewModel.unbindUi()
+        else -> Unit
+      }
+    }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    onDispose {
+      lifecycleOwner.lifecycle.removeObserver(observer)
+      viewModel.unbindUi()
+    }
+  }
   var hasCameraPermission by remember {
     mutableStateOf(
       ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     )
   }
+  var startUsbAfterPermission by remember { mutableStateOf(false) }
   val permissionLauncher =
-    rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted -> hasCameraPermission = granted }
+    rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+      hasCameraPermission = granted
+      if (granted && startUsbAfterPermission) viewModel.startCapture()
+      startUsbAfterPermission = false
+    }
 
   val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
   LaunchedEffect(Unit) {
@@ -112,6 +136,7 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
   val pairingMessage by viewModel.pairingMessage.collectAsStateWithLifecycle()
   val connectedPc by viewModel.connectedPc.collectAsStateWithLifecycle()
   var showSettings by remember { mutableStateOf(false) }
+  var showManualCode by remember { mutableStateOf(false) }
   var forgetId by remember { mutableStateOf<String?>(null) }
   val qrScanner = rememberLauncherForActivityResult(ScanContract()) {
     hasCameraPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
@@ -122,7 +147,9 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
     viewModel.notifications.collect { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
   }
   val streaming = state is CaptureUiState.Streaming
-  LaunchedEffect(streaming) { if (streaming) showSettings = false }
+  LaunchedEffect(streaming) {
+    if (streaming) { showSettings = false; showManualCode = false }
+  }
   val scanQr = {
     if (viewModel.beginQrScan()) {
       showSettings = false
@@ -153,8 +180,20 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
 
     Spacer(Modifier.weight(1f))
 
-    if (pairedPcs.isEmpty() && connectedPc.isEmpty() && state != CaptureUiState.WaitingForConnection && !streaming) {
-      TextButton(onClick = scanQr) { Text("SCAN PC QR", color = NoSignalBlue) }
+    if (showConnectionChoices(state, connectedPc)) {
+      Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text("CONNECT TO YOUR PC", color = Paper, style = MaterialTheme.typography.labelMedium)
+        TextButton(onClick = scanQr) { Text("SCAN PC QR", color = NoSignalBlue) }
+        TextButton(onClick = { showManualCode = true }) { Text("USE PAIRING CODE", color = Paper) }
+        TextButton(onClick = {
+          if (hasCameraPermission) viewModel.startCapture() else {
+            startUsbAfterPermission = true
+            permissionLauncher.launch(Manifest.permission.CAMERA)
+          }
+        }) { Text("CONNECT WITH USB", color = Paper) }
+        Text("Cable connected? Open the PC tray → Use USB.", color = Dim,
+          style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
+      }
     }
     if (pairingMessage.isNotEmpty() && !streaming && state != CaptureUiState.Stopped) {
       Text(pairingMessage, color = Dim, style = MaterialTheme.typography.bodySmall)
@@ -166,6 +205,20 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
       style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
       color = Dim,
       textAlign = TextAlign.Center,
+    )
+  }
+  if (showManualCode) {
+    AlertDialog(
+      onDismissRequest = { showManualCode = false },
+      title = { Text("Connect with a code") },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+          Text("On the PC tray: Connect over Wi-Fi → Use code instead. Enter this phone's code there.")
+          PairingCodeRow(pairingCode) { pairingCode = pairing.regenerate() }
+          Text("Both devices must be on the same Wi-Fi or hotspot.", style = MaterialTheme.typography.bodySmall)
+        }
+      },
+      confirmButton = { TextButton(onClick = { showManualCode = false }) { Text("Done") } },
     )
   }
   if (showSettings) {

@@ -114,10 +114,18 @@ bool LiveVideoBridge::WaitBeforeRetry() {
 // reconnect attempts here will keep failing until the user taps "Start
 // capture" again -- there's no PC->phone wake command for that yet.
 void LiveVideoBridge::Run() {
+    const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     while (running_.load()) {
         if (!transport_->Connect()) {
             phonecam::log::Error("LiveVideoBridge: connect failed, will retry (is capture running on the phone?)");
         } else {
+            // A new socket session must not inherit the previous encoder's
+            // reference pictures or negotiated dimensions.
+            if (!decoder_.Initialize()) {
+                transport_->Disconnect();
+                if (!WaitBeforeRetry()) break;
+                continue;
+            }
             connected_.store(true);
             uint64_t packets = 0;
             uint64_t frames = 0;
@@ -125,6 +133,7 @@ void LiveVideoBridge::Run() {
             transport_->RunReceiveLoop([this, &packets, &frames, &lastReport](
                                            const phonecam::transport::VideoPacket& pkt) {
                 ++packets;
+                if (pkt.discontinuity && !decoder_.Initialize()) return;
                 decoder_.Feed(pkt.payload, pkt.payloadSize, pkt.timestampUs,
                                 [this, &frames](const phonecam::decode::DecodedFrame& frame) {
                                     std::lock_guard<std::mutex> outputLock(outputMutex_);
@@ -167,6 +176,8 @@ void LiveVideoBridge::Run() {
         if (!WaitBeforeRetry()) break;
     }
     phonecam::log::Info("LiveVideoBridge: supervise loop stopped");
+    decoder_.Reset();
+    if (SUCCEEDED(apartment)) CoUninitialize();
 }
 
 void LiveVideoBridge::RecordLatency(uint64_t phoneTimestampUs, uint64_t pcNowUs) {

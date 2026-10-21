@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][int]$ProcessId,
-    [ValidateSet('Stop', 'Resume')][string]$Action = 'Stop'
+    [ValidateSet('Stop', 'Resume')][string]$Action = 'Stop',
+    [string]$LogPath = ''
 )
 $ErrorActionPreference = 'Stop'
 Add-Type @'
@@ -33,7 +34,7 @@ function Tray-Command([int]$Id) {
     [void][StopUi]::PostMessageW($tray, 0x111, $Id, 0)
 }
 $root = Split-Path $PSScriptRoot -Parent
-$log = Join-Path $root 'windows\build\tray_gui.err.log'
+$log = if ($LogPath) { $LogPath } else { Join-Path $root 'windows\build\tray_gui.err.log' }
 $start = @(Get-Content $log).Count
 $before = (adb shell run-as io.github.abdoeid.phonecam cat shared_prefs/phonecam_session.xml 2>$null) -join "`n"
 if ($Action -eq 'Resume' -and $before -notmatch 'name="stopped" value="true"') { throw 'Resume test requires a stopped phone' }

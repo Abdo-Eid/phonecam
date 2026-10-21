@@ -41,7 +41,9 @@ The pairing window closes when the pairing is saved; video arrival produces a br
 Connected notification. Both devices remember the pairing, including across IP changes.
 No terminal, cable, driver, or Developer Options is needed. Use the same Wi-Fi or laptop
 hotspot. The normal path is RTP/H.264 over UDP; **Use code instead** also offers TCP.
-Phone connection settings contain the manual code, change-PC scanner, and Forget PC.
+When disconnected, PhoneCam directly offers **Scan PC QR**, **Use pairing code**,
+and **Connect with USB**—no Settings detour, even with a remembered PC.
+While connected, change-PC and pairing controls live in **Connection settings**.
 **Stop stays stopped until Start**, retaining the pairing and the Windows virtual camera.
 **Video is deliberately unencrypted:** authenticated access does not prevent interception.
 See [security.md](docs/security.md) for credentials and accepted limits. CLI transport

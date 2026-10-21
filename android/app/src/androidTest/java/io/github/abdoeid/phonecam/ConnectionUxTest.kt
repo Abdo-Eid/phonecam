@@ -1,5 +1,9 @@
 package io.github.abdoeid.phonecam
 
+import android.app.ActivityManager
+import android.app.NotificationManager
+import androidx.lifecycle.Lifecycle
+import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -59,5 +63,33 @@ class ConnectionUxTest {
     compose.onNodeWithText("STOPPED").assertIsDisplayed()
     compose.onNodeWithText("START").performClick()
     await("STREAMING")
+  }
+
+  @Test fun stoppedAppExitsWithoutAnOngoingNotification() {
+    compose.waitUntil(45_000) { present("START") || present("STOP") }
+    if (present("STOP")) compose.onNodeWithText("STOP").performClick()
+    // Ready -> Start -> Stop also works with no laptop running.
+    if (!present("STOPPED")) {
+      compose.onNodeWithText("START").performClick()
+      await("STOP")
+      compose.onNodeWithText("STOP").performClick()
+    }
+    await("STOPPED")
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val notifications = context.getSystemService(NotificationManager::class.java)
+    val activityManager = context.getSystemService(ActivityManager::class.java)
+    val pcs = context.getSharedPreferences("phonecam_trusted_pcs", 0).all
+    compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+    val deadline = System.currentTimeMillis() + 10_000
+    @Suppress("DEPRECATION")
+    fun serviceRunning() = activityManager.getRunningServices(Int.MAX_VALUE).any {
+      it.service.className == "io.github.abdoeid.phonecam.capture.CaptureService"
+    }
+    while (serviceRunning() && System.currentTimeMillis() < deadline) Thread.sleep(100)
+    org.junit.Assert.assertFalse("Stopped service must exit when UI closes", serviceRunning())
+    org.junit.Assert.assertTrue("No ongoing PhoneCam notification", notifications.activeNotifications.isEmpty())
+    org.junit.Assert.assertEquals("Pairing is preserved", pcs, context.getSharedPreferences("phonecam_trusted_pcs", 0).all)
+    compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+    await("STOPPED")
   }
 }

@@ -1,6 +1,7 @@
 #pragma once
+#include "SampleClock.h"
 
-struct MediaStream : winrt::implements<MediaStream, CBaseAttributes<IMFAttributes>, IMFMediaStream2, IKsControl>
+struct MediaStream : winrt::implements<MediaStream, CBaseAttributes<IMFAttributes>, IMFMediaStream2, IKsControl, IMFAsyncCallback>
 {
 public:
 	// IMFMediaEventGenerator
@@ -13,6 +14,8 @@ public:
 	STDMETHOD(GetMediaSource)(IMFMediaSource** ppMediaSource);
 	STDMETHOD(GetStreamDescriptor)(IMFStreamDescriptor** ppStreamDescriptor);
 	STDMETHOD(RequestSample)(IUnknown* pToken);
+	STDMETHOD(GetParameters)(DWORD*, DWORD*) { return E_NOTIMPL; }
+	STDMETHOD(Invoke)(IMFAsyncResult* result);
 
 	// IMFMediaStream2
 	STDMETHOD(SetStreamState)(MF_STREAM_STATE value);
@@ -36,6 +39,7 @@ public:
 	{
 		SetBaseAttributesTraceName(L"MediaStreamAtts");
 	}
+	~MediaStream() { if (_workQueue) MFUnlockWorkQueue(_workQueue); }
 
 	HRESULT Initialize(IMFMediaSource* source, int index);
 	HRESULT SetAllocator(IUnknown* allocator);
@@ -68,4 +72,7 @@ private:
 	wil::com_ptr_nothrow<IMFMediaSource> _source;
 	wil::com_ptr_nothrow<IMFVideoSampleAllocatorEx> _allocator;
 	int _index;
+	DWORD _workQueue = 0;
+	UINT64 _generation = 0;
+	SampleClock _clock;
 };

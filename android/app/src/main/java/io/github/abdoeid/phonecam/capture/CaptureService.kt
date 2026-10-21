@@ -125,7 +125,16 @@ class CaptureService : Service() {
 
   private val binder = LocalBinder()
 
-  override fun onBind(intent: Intent): IBinder = binder
+  override fun onBind(intent: Intent): IBinder {
+    if (userStopped) {
+      stopForeground(STOP_FOREGROUND_REMOVE)
+    } else {
+      // A PC-started capture must outlive the UI binding too. A foreground
+      // notification alone does not make a bound service a started service.
+      startService(Intent(this, CaptureService::class.java).setAction(ACTION_KEEP_ALIVE))
+    }
+    return binder
+  }
 
   override fun onCreate() {
     super.onCreate()
@@ -135,12 +144,9 @@ class CaptureService : Service() {
     createNotificationChannel()
     startControlChannel()
     startDiscovery()
-    // Promoted to a foreground service for as long as this service exists, not just while a
-    // capture is running. Android only lets an app open the camera while it is in the
-    // foreground, and a PC-driven session can arrive when the phone's screen is off and the
-    // app is in the background -- which is exactly when a webcam app has to keep working.
-    // (Confirmed live: the camera open was refused with CAMERA_DISABLED "cannot open camera
-    // from background" when the PC started a session with the phone locked.)
+    // Promote before serving any Start. Explicit Stop later removes foreground
+    // status; only the visible UI's binding then keeps control/discovery alive.
+    // Already-running capture remains foreground and survives screen lock.
     startForegroundInternal()
   }
 
@@ -170,7 +176,7 @@ class CaptureService : Service() {
     // While the phone scans a PC's QR it must not accept a network login (the camera
     // is being used for the scan). The block is time-limited: an abandoned scan must
     // not leave the phone refusing every PC afterwards.
-    channel.networkLoginBlocked = { scanningPcQr && SystemClock.elapsedRealtime() < scanDeadlineMs }
+    channel.networkLoginBlocked = { isScanningPcQr() }
     // The controller pushes state changes (CurrentSettings/Stats/LensChanged) back to the PC
     // through this channel, so it needs the reference.
     controller.bindControlChannel(channel)
@@ -264,7 +270,7 @@ class CaptureService : Service() {
   @Volatile private var scanningPcQr = false
   @Volatile private var scanDeadlineMs = 0L
   @Synchronized private fun startSession(mode: Int, width: Int, height: Int, fps: Int, bitrateBps: Int, rtpPort: Int, explicitStart: Boolean = false): Byte {
-    if (scanningPcQr) return AckResult.Busy
+    if (isScanningPcQr()) return AckResult.Busy
     if (explicitStart) persistStopIntent(false)
     if (userStopped) { controlChannel?.sendStreamIntent(); return AckResult.Busy }
     if (controller.state != CaptureState.IDLE) {
@@ -286,6 +292,7 @@ class CaptureService : Service() {
     sessionStartedByPc = true
     sessionMode = mode
     return try {
+      startService(Intent(this, CaptureService::class.java).setAction(ACTION_KEEP_ALIVE))
       if (mode == VideoTransportMode.Rtp.toInt()) {
         val peer = controlChannel?.peerAddress
         if (peer.isNullOrEmpty()) {
@@ -316,7 +323,6 @@ class CaptureService : Service() {
   }
 
   @Synchronized private fun stopWirelessSession(): Byte {
-    if (controller.state == CaptureState.IDLE) return AckResult.Ok
     stopRequested.set(true)
     stopCaptureInternal()
     return AckResult.Ok
@@ -325,7 +331,6 @@ class CaptureService : Service() {
   fun beginQrScan() {
     scanningPcQr = true
     scanDeadlineMs = SystemClock.elapsedRealtime() + SCAN_LOCK_TIMEOUT_MS
-    controlChannel?.networkLoginAllowed = false
     stopRequested.set(true)
     lastError = null
     controller.stop()
@@ -337,8 +342,9 @@ class CaptureService : Service() {
 
   fun endQrScan() {
     scanningPcQr = false
-    controlChannel?.networkLoginAllowed = true
   }
+
+  private fun isScanningPcQr() = scanningPcQr && SystemClock.elapsedRealtime() < scanDeadlineMs
 
   fun forgetPc(id: String) {
     TrustedPcs(this).forget(id)
@@ -377,9 +383,13 @@ class CaptureService : Service() {
   }
 
   @Synchronized private fun handleCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    if (scanningPcQr && (intent?.action == ACTION_START || intent?.action == ACTION_START_AOA)) return START_NOT_STICKY
+    if (isScanningPcQr() && (intent?.action == ACTION_START || intent?.action == ACTION_START_AOA)) return START_NOT_STICKY
     when (intent?.action) {
+      ACTION_KEEP_ALIVE -> {
+        if (userStopped) stopSelf() else startForegroundInternal()
+      }
       ACTION_START -> {
+        startForegroundInternal()
         // A network PC drives the session itself (it knows the transport and answers with
         // video), so the phone only clears its stop intent and lets the PC resume.
         if (resumeByUser()) return START_NOT_STICKY
@@ -460,10 +470,14 @@ class CaptureService : Service() {
     sessionStartedByPc = false
     sessionMode = -1
     releaseWakeLock()
-    // The service stays a foreground service (the notification goes back to "ready"): that
-    // is what keeps the camera openable for the next session, even with the screen off.
-    updateNotification(streaming = false)
-    // Keep control/discovery alive even after a phone-started Stop, for one-tap resume.
+    if (userStopped) {
+      // While the UI is bound, control stays available for one-tap Start. Once
+      // the UI closes/unbinds, Android destroys this now-unstarted service.
+      stopForeground(STOP_FOREGROUND_REMOVE)
+      stopSelf()
+    } else {
+      updateNotification(streaming = false)
+    }
   }
 
   private fun startForegroundInternal() {
@@ -546,6 +560,7 @@ class CaptureService : Service() {
     aoaTransport?.close()
     aoaTransport = null
     releaseWakeLock()
+    stopForeground(STOP_FOREGROUND_REMOVE)
     super.onDestroy()
   }
 
@@ -565,6 +580,7 @@ class CaptureService : Service() {
     const val ACTION_START = "io.github.abdoeid.phonecam.action.START"
     const val ACTION_START_AOA = "io.github.abdoeid.phonecam.action.START_AOA"
     const val ACTION_STOP = "io.github.abdoeid.phonecam.action.STOP"
+    private const val ACTION_KEEP_ALIVE = "io.github.abdoeid.phonecam.action.KEEP_ALIVE"
     const val EXTRA_WIDTH = "width"
     const val EXTRA_HEIGHT = "height"
     const val EXTRA_FPS = "fps"

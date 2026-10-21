@@ -2,6 +2,7 @@ package io.github.abdoeid.phonecam.rtp
 
 import android.util.Log
 import io.github.abdoeid.phonecam.transport.VideoPacketSink
+import io.github.abdoeid.phonecam.transport.WireFraming
 import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -46,6 +47,7 @@ class RtpVideoSink(
 
   private var rtpSeq = Random.nextInt(0, 0x10000)
   private val ssrc = Random.nextInt()
+  private var codecConfig: ByteArray? = null
 
   // Reused per packet (one frame can expand into dozens of RTP packets; the
   // largest is exactly RTP header + 2 FU bytes + maxRtpPayload).
@@ -63,6 +65,23 @@ class RtpVideoSink(
   ) {
     if (closed.get()) throw IOException("RtpVideoSink: already closed")
 
+    // MediaCodec's config buffer may have PTS=0, unrelated to camera time.
+    // Send SPS/PPS with every IDR, at that frame's timestamp: a receiver that
+    // joins late or loses startup packets can then decode the next keyframe.
+    if (type == WireFraming.TYPE_CONFIG) {
+      codecConfig = payload.copyOfRange(payloadOffset, payloadOffset + payloadLength)
+      return
+    }
+    val config = codecConfig
+    if (keyframe && config != null) {
+      val combined = config + payload.copyOfRange(payloadOffset, payloadOffset + payloadLength)
+      sendAccessUnit(ptsUs, combined, 0, combined.size)
+    } else {
+      sendAccessUnit(ptsUs, payload, payloadOffset, payloadLength)
+    }
+  }
+
+  private fun sendAccessUnit(ptsUs: Long, payload: ByteArray, payloadOffset: Int, payloadLength: Int) {
     // 90 kHz RTP clock (RFC 3551 H.264): ptsUs * 90000 / 1e6, integer math.
     // ptsUs saturates well below Long overflow even for multiday sessions.
     val timestamp = ptsUs * 9 / 100
@@ -87,7 +106,7 @@ class RtpVideoSink(
         val indicator = (nalHeader and 0xE0) or FU_TYPE
         val realType = nalHeader and 0x1F
         val chunkSize = maxRtpPayload - 2 // indicator + FU header
-        val chunks = (nalLen + chunkSize - 1) / chunkSize
+        val chunks = (nalLen - 1 + chunkSize - 1) / chunkSize
         var offset = nalStart + 1 // skip the NAL header byte, folded into extra bytes
         for (fragment in 0 until chunks) {
           val len = minOf(chunkSize, nalEnd - offset)

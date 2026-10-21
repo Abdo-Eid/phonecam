@@ -95,11 +95,20 @@ task in `android/app/build.gradle.kts` invoking `flatc --kotlin`) -- no manual s
 3. The QR window closes after both sides save the pairing. A brief notification
    confirms actual video arrival. Next time, open both apps on the same network.
 
-The phone hides pairing controls under **Connection settings** once paired.
+When no PC is connected, the phone directly offers **Scan PC QR**, **Use pairing
+code**, and **Connect with USB**, even if a PC is remembered. The code action
+shows the phone's code to enter in the tray's fallback dialog. While connected,
+pairing/change-PC/forget controls stay under **Connection settings**.
 **Stop** on either device turns off capture, keeps the control/pairing, and clears
 the Windows output to black; **Start** resumes without rescanning. A deliberate
 Stop survives app/host restart and automatic recovery. USB transport changes keep
 the virtual camera registered. The QR is valid for two minutes; don't share it.
+
+After **Stop**, the ongoing Android notification is removed. Control remains
+available while the phone app is visible; closing/backgrounding the stopped app
+shuts down its service and listeners. Open PhoneCam again to resume; pairing and
+the stopped state are retained. An already-running stream still continues when
+you background the app or lock the phone.
 
 **Use code instead** opens the manual discovery/code dialog and offers RTP or TCP.
 Optionally remembered manual codes and QR keys use Windows Credential Manager.
@@ -165,6 +174,54 @@ activity. The second requires Stopped, checks the simplified Streaming screen, a
 tests Stop/Start again. Neither changes pairing keys. The Windows equivalent is
 `scripts/test_stopped_gui.ps1` (Stop/Resume actions, black output, remembered reconnect,
 automatic window dismissal, unchanged virtual-camera registration).
+
+Targeted regressions for stopped-app cleanup and video timing:
+
+```powershell
+adb shell am instrument -w -e class io.github.abdoeid.phonecam.CaptureServiceLifecycleTest io.github.abdoeid.phonecam.test/androidx.test.runner.AndroidJUnitRunner
+cmake --build windows/build --target phonecam-video-tests --config Release
+windows/build/host/Release/phonecam-video-tests.exe
+```
+
+The Windows tests cover the 30 fps sample clock (including queued requests,
+late requests and restart), config PTS=0 followed by a high camera timestamp,
+RTP timestamp wrap, new sender sessions and missing markers. Android JVM tests
+check SPS/PPS repetition on keyframes and exact FU-A fragment boundaries.
+
+### Startup-order matrix (real phone and tray)
+
+```powershell
+.\scripts\test_startup_matrix.ps1 -Serial <adb-serial> -IncludeCleanData
+# MIUI with security debugging disabled: allow the camera manually after each reset.
+.\scripts\test_startup_matrix.ps1 -Serial <adb-serial> -IncludeCleanData -ManualPermissions
+```
+
+This is an explicitly destructive **PhoneCam-only test**, with automatic recovery:
+it first saves a verified, current-user DPAPI-encrypted backup under
+`%LocalAppData%\Temp\opencode`, then restores and verifies the original phone
+preferences/files, PC connection settings and `PhoneCam/*` credentials in `finally`.
+It does not reset Windows camera registration, drivers, other apps or credentials.
+The installed Android APK must be debuggable. Keep the phone unlocked and joined
+to the laptop's hotspot/Wi-Fi; leave the USB debugging cable attached.
+Install its Android test APK too: MIUI may require the opt-in `DataResetTest`
+to call Android's own `clearApplicationUserData()` API when shell `pm clear` is
+denied. This test is skipped unless explicitly passed `allowDataReset=true`.
+
+The 12 cases combine app-first/tray-first, Wi-Fi RTP/USB ADB, and existing data/
+cleared cache/cleared data on both sides. The native tray has no separate disk
+cache; cache cases leave its persistent connection settings untouched. Fresh
+Wi-Fi cases use the actual tray's manual-code fallback, not simulated QR scans.
+Clean-data cases normally grant camera permission for unattended transport testing.
+On MIUI, use `-ManualPermissions` and tap **Grant access → Allow** after each reset
+instead; no debugging-security setting needs changing. USB cases verify ADB video over the cable,
+not AOA or a physical unplug/replug. Logs and `results.json` go under
+`windows/build/startup-matrix/`. No pairing secrets are printed.
+
+For recovery after an interrupted test, stop the tray host and run:
+
+```powershell
+python scripts/phonecam_test_state.py restore --serial <adb-serial> --backup <printed-dpapi-backup-path> --manual-permissions
+```
 
 Windows' firewall blocks inbound connections on a "Public" network profile, so
 allow `phonecam-host.exe` (or open the ports) when running over Wi-Fi.

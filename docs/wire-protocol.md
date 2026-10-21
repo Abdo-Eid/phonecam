@@ -124,6 +124,14 @@ to guess where a frame ends. The receiver reassembles access units, detects a
 new picture by its first macroblock, and hands whole access units to the
 decoder, exactly as the framed transports do.
 
+For RTP, the sender caches the codec-config buffer and prepends SPS/PPS to every
+keyframe, using the picture's timestamp and setting the marker only on its final
+packet. Losing the initial config therefore does not require a session restart.
+Config-only timestamps (which may be zero) do not establish the receiver's video
+clock. A new SSRC resets decoder state, and natural 32-bit RTP timestamp wrap is
+extended monotonically. A timestamp change without the previous picture's marker
+discards the incomplete picture and requests a keyframe.
+
 The PC is the RTP *receiver* and the phone the *sender*. The phone learns the
 PC's address from the control connection itself (see
 [`control-protocol.md`](control-protocol.md)'s `StartVideo`), so there is no

@@ -6,9 +6,12 @@
 #include "FrameGenerator.h"
 #include "MediaStream.h"
 #include "MediaSource.h"
+#include <chrono>
+#include <thread>
 
 namespace
 {
+	constexpr GUID kRequestGeneration = {0x374ef01f, 0x8cac, 0x42e2, {0x9a, 0xf8, 0xbb, 0x85, 0xab, 0x3d, 0x84, 0x49}};
 	// Real, app-negotiated resolution: the vcam advertises multiple sizes and lets the
 	// consuming app (Zoom/OBS/Chrome/...) pick one via normal MF/DirectShow negotiation, exactly
 	// like a real UVC webcam -- there's no other mechanism, and forcing a live format change on a
@@ -70,6 +73,7 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 	RETURN_IF_FAILED(SetUINT32(MF_DEVICESTREAM_ATTRIBUTE_FRAMESOURCE_TYPES, MFFrameSourceTypes::MFFrameSourceTypes_Color));
 
 	RETURN_IF_FAILED(MFCreateEventQueue(&_queue));
+	RETURN_IF_FAILED(MFAllocateSerialWorkQueue(MFASYNC_CALLBACK_QUEUE_MULTITHREADED, &_workQueue));
 
 	// RGB32 then NV12, for each size in kSizes -- 8 types total. Must match what the phone can
 	// actually produce (720p/1080p, from CaptureController.kt's own supported set) -- FrameGenerator
@@ -99,7 +103,16 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 
 HRESULT MediaStream::Start(IMFMediaType* type)
 {
+	winrt::slim_lock_guard lock(_lock);
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue || !_allocator);
+	wil::com_ptr_nothrow<IMFMediaType> currentType;
+	if (!type)
+	{
+		wil::com_ptr_nothrow<IMFMediaTypeHandler> handler;
+		RETURN_IF_FAILED(_descriptor->GetMediaTypeHandler(&handler));
+		RETURN_IF_FAILED(handler->GetCurrentMediaType(&currentType));
+		type = currentType.get();
+	}
 
 	if (type)
 	{
@@ -130,16 +143,20 @@ HRESULT MediaStream::Start(IMFMediaType* type)
 	RETURN_IF_FAILED(_allocator->InitializeSampleAllocator(10, type));
 	RETURN_IF_FAILED(_queue->QueueEventParamVar(MEStreamStarted, GUID_NULL, S_OK, nullptr));
 	_state = MF_STREAM_STATE_RUNNING;
+	++_generation;
+	_clock.Reset(MFGetSystemTime());
 	return S_OK;
 }
 
 HRESULT MediaStream::Stop()
 {
+	winrt::slim_lock_guard lock(_lock);
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue || !_allocator);
 
 	RETURN_IF_FAILED(_allocator->UninitializeSampleAllocator());
 	RETURN_IF_FAILED(_queue->QueueEventParamVar(MEStreamStopped, GUID_NULL, S_OK, nullptr));
 	_state = MF_STREAM_STATE_STOPPED;
+	++_generation;
 	return S_OK;
 }
 
@@ -170,6 +187,9 @@ HRESULT MediaStream::SetD3DManager(IUnknown* manager)
 
 void MediaStream::Shutdown()
 {
+	winrt::slim_lock_guard lock(_lock);
+	++_generation;
+	if (_workQueue) { MFUnlockWorkQueue(_workQueue); _workQueue = 0; }
 	if (_queue)
 	{
 		LOG_IF_FAILED_MSG(_queue->Shutdown(), "Queue shutdown failed");
@@ -252,22 +272,47 @@ STDMETHODIMP MediaStream::GetStreamDescriptor(IMFStreamDescriptor** ppStreamDesc
 
 STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 {
-	//WINTRACE(L"MediaStream::RequestSample pToken:%p", pToken);
 	winrt::slim_lock_guard lock(_lock);
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_allocator || !_queue);
+	RETURN_HR_IF(MF_E_INVALIDREQUEST, _state != MF_STREAM_STATE_RUNNING);
+	wil::com_ptr_nothrow<IMFAttributes> request;
+	RETURN_IF_FAILED(MFCreateAttributes(&request, 2));
+	RETURN_IF_FAILED(request->SetUINT64(kRequestGeneration, _generation));
+	if (pToken) RETURN_IF_FAILED(request->SetUnknown(MFSampleExtension_Token, pToken));
+	return MFPutWorkItem2(_workQueue, 0, this, request.get());
+}
+
+STDMETHODIMP MediaStream::Invoke(IMFAsyncResult* result)
+{
+	wil::com_ptr_nothrow<IUnknown> state;
+	RETURN_IF_FAILED(result->GetState(&state));
+	wil::com_ptr_nothrow<IMFAttributes> request;
+	RETURN_IF_FAILED(state->QueryInterface(IID_PPV_ARGS(&request)));
+	UINT64 generation = 0;
+	RETURN_IF_FAILED(request->GetUINT64(kRequestGeneration, &generation));
+	winrt::slim_lock_guard lock(_lock);
+	// Queued requests from a stopped/restarted stream must not leak old tokens.
+	if (!_queue || !_allocator || _state != MF_STREAM_STATE_RUNNING || generation != _generation) return S_OK;
+	const auto tick = _clock.Next(MFGetSystemTime());
+	const auto wait = tick.time - MFGetSystemTime();
+	if (wait > 0) std::this_thread::sleep_for(std::chrono::nanoseconds(wait * 100));
 
 	wil::com_ptr_nothrow<IMFSample> sample;
 	RETURN_IF_FAILED(_allocator->AllocateSample(&sample));
-	RETURN_IF_FAILED(sample->SetSampleTime(MFGetSystemTime()));
-	RETURN_IF_FAILED(sample->SetSampleDuration(333333));
+	RETURN_IF_FAILED(sample->SetSampleTime(tick.time));
+	RETURN_IF_FAILED(sample->SetSampleDuration(tick.duration));
 
 	// generate frame
 	wil::com_ptr_nothrow<IMFSample> outSample;
 	RETURN_IF_FAILED(_generator.Generate(sample.get(), _format, &outSample));
+	// Stamp the final sample too: the GPU converter can return a new sample.
+	RETURN_IF_FAILED(outSample->SetSampleTime(tick.time));
+	RETURN_IF_FAILED(outSample->SetSampleDuration(tick.duration));
 
-	if (pToken)
+	wil::com_ptr_nothrow<IUnknown> token;
+	if (SUCCEEDED(request->GetUnknown(MFSampleExtension_Token, IID_PPV_ARGS(&token))))
 	{
-		RETURN_IF_FAILED(outSample->SetUnknown(MFSampleExtension_Token, pToken));
+		RETURN_IF_FAILED(outSample->SetUnknown(MFSampleExtension_Token, token.get()));
 	}
 	RETURN_IF_FAILED(_queue->QueueEventParamUnk(MEMediaSample, GUID_NULL, S_OK, outSample.get()));
 	return S_OK;

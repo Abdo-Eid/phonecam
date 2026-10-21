@@ -19,11 +19,32 @@ telemetry tick or automatic retry.
 Protocol v6 separates persistent **user-stopped intent** from capture/error state.
 The phone publishes it before capabilities on every authenticated connection.
 Automatic startup/watchdog requests cannot clear it; only explicit Start can.
-Stop keeps pairing and control, releases capture and gates the Windows output to
+Stop keeps pairing and (while the UI is visible) control, releases capture and gates the Windows output to
 black, including late decoded frames. The phone presents Ready, Connecting,
 Streaming and Stopped, with codes/change-PC/forget under Connection settings.
+Without a live PC, QR/code/USB choices are directly visible; remembered pairing
+alone must not hide them. The manual-code action shows the phone's code for entry
+on the PC, rather than asking the user to enter a PC code on the phone.
 User actions run on a serial worker rather than performing socket I/O or camera
 teardown on Android's UI thread.
+
+After Stop, Android removes the ongoing notification and clears the service's
+started state. The UI binds/polls only while visible (or scanning QR), so closing
+the stopped app destroys the service and its control/discovery listeners. Reopening
+retains pairing and Stop; only an explicit Start resumes. Active streaming remains
+a started camera foreground service and continues with the screen locked.
+
+The virtual camera delivers requests asynchronously on a serial MF work queue,
+paced by a rational 30 fps clock, with strictly increasing sample times and no
+catch-up bursts after delays. Queued requests are invalidated on stream restart.
+The installed DLL passed a 90-frame DirectShow capture at 30 fps with no duplicate
+or backward timestamps. RTP startup regressions cover config PTS=0, high camera
+timestamps, wrap and sender changes; SPS/PPS now repeat with every IDR. The phone's
+service-level Stop/unbind regression passed on the Redmi Note 8. A separate live
+hotspot check resumed video through the tray, stopped it, then sent the phone to
+Home: no service or active notification remained, and pairing was unchanged.
+The Compose instrumentation variant timed out; the live close check above did
+not depend on that harness.
 
 Verified on the existing Redmi Note 8 pairing: remembered rediscovery without
 rescan, tray Stop across four watchdog intervals, black DirectShow output while

@@ -24,11 +24,6 @@ constexpr uint8_t kPayloadTypeH264 = 96;  // dynamic, matches the phone's packet
 constexpr size_t kRtpHeaderSize = 12;
 constexpr size_t kMaxDatagram = 2048;
 
-// A jump bigger than this in the 90 kHz clock means the 32-bit RTP timestamp
-// wrapped (rather than a frame taking an hour): at 30 fps the normal step is
-// ~3000, so a minute's worth is comfortably above any real gap.
-constexpr uint32_t kTimestampWrapThreshold = 90000u * 60u;
-
 // NAL unit types (ITU-T H.264 table 7-1) this receiver understands.
 constexpr uint8_t kNalSlice = 1;
 constexpr uint8_t kNalIdr = 5;
@@ -106,6 +101,7 @@ struct RtpVideoTransport::Impl {
     bool haveSeq = false;
     uint16_t lastSeq = 0;
     bool haveSsrc = false;
+    bool newSession = false;
     uint32_t ssrc = 0;
     uint64_t tsBase = 0;   // unwrapped 32-bit RTP timestamp high part
     uint32_t lastTs = 0;
@@ -121,6 +117,16 @@ struct RtpVideoTransport::Impl {
     uint64_t bytes = 0;
     uint64_t accessUnits = 0;
     std::chrono::steady_clock::time_point lastStatsLog{};
+
+    void Emit(const AccessUnit& finished, uint32_t& sequence, const VideoPacketCallback& onPacket) {
+        if (finished.data.empty()) return;
+        ++accessUnits;
+        VideoPacket packet{finished.hasVcl ? PacketType::Frame : PacketType::Config,
+                           finished.hasIdr, sequence++, finished.timestampUs,
+                           finished.data.data(), finished.data.size(), newSession};
+        newSession = false;
+        onPacket(packet);
+    }
 
     void AppendNal(const uint8_t* nal, size_t size, uint8_t nalType) {
         static const uint8_t kStartCode[4] = {0, 0, 0, 1};
@@ -207,6 +213,7 @@ bool RtpVideoTransport::Connect() {
         return false;
     }
     impl_->sock = s;
+    impl_->haveSsrc = false;
     phonecam::log::Info("RtpVideoTransport: listening on UDP port " + std::to_string(impl_->listenPort));
     return true;
 }
@@ -305,6 +312,7 @@ void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
         if (!impl_->haveSsrc || impl_->ssrc != ssrc) {
             impl_->haveSsrc = true;
             impl_->ssrc = ssrc;
+            impl_->newSession = true;
             impl_->haveSeq = false;
             impl_->haveTs = false;
             impl_->tsBase = 0;
@@ -334,30 +342,32 @@ void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
         impl_->haveSeq = true;
         impl_->lastSeq = seq;
 
-        // Timestamp unwrapping (the RTP clock is 32 bits and wraps every ~13
-        // hours at 90 kHz). The modular difference is what makes the wrap
-        // detectable: a backwards jump shows up as a huge unsigned delta,
-        // while a genuinely reordered packet shows up as a delta past the
-        // 2^31 boundary (i.e. negative when read as signed).
-        if (!impl_->haveTs) {
+        const uint8_t nalType = payload[0] & 0x1F;
+        const bool hasVideoClock = IsVclType(nalType) ||
+            (nalType == kNalFuA && payloadSize >= 2 && IsVclType(payload[1] & 0x1F));
+        // Config-only buffers can have timestamp zero, unrelated to the camera
+        // clock. Do not use those to reject or unwrap real picture timestamps.
+        // Packet sequence numbers above already reject reordered datagrams.
+        if (hasVideoClock && !impl_->haveTs) {
             impl_->haveTs = true;
             impl_->lastTs = timestamp;
             impl_->tsBase = 0;
-        } else {
-            const uint32_t delta = timestamp - impl_->lastTs;
-            if (delta > 0x80000000u) {
-                continue;  // reordered or duplicate: ignore
-            }
-            if (delta > kTimestampWrapThreshold) {
+        } else if (hasVideoClock) {
+            if (timestamp < impl_->lastTs && impl_->lastTs - timestamp > 0x80000000u) {
                 impl_->tsBase += (1ull << 32);
             }
             impl_->lastTs = timestamp;
         }
         const uint64_t ticks = impl_->tsBase + timestamp;
-        impl_->unit.timestampUs = ticks * 1000000ull / 90000ull;
+        const uint64_t timestampUs = ticks * 1000000ull / 90000ull;
+        if (impl_->unit.hasVcl && impl_->unit.timestampUs != timestampUs) {
+            // The previous marker was lost. Never stamp the old picture with
+            // the new picture's time or deliver a potentially truncated frame.
+            impl_->OnLoss("missing marker");
+        }
+        if (hasVideoClock || !impl_->unit.hasVcl) impl_->unit.timestampUs = timestampUs;
 
         // ---- payload handling ------------------------------------------------
-        const uint8_t nalType = payload[0] & 0x1F;
 
         if (nalType == kNalFuA) {
             if (payloadSize < 2) continue;
@@ -400,11 +410,7 @@ void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
                 const AccessUnit finished = std::move(impl_->unit);
                 impl_->unit = AccessUnit{};
                 impl_->unit.timestampUs = finished.timestampUs;
-                if (!finished.data.empty()) {
-                    VideoPacket pkt{PacketType::Frame, finished.hasIdr, emittedSeq++, finished.timestampUs,
-                                    finished.data.data(), finished.data.size()};
-                    onPacket(pkt);
-                }
+                impl_->Emit(finished, emittedSeq, onPacket);
             }
             impl_->AppendNal(impl_->fuBuffer.data(), impl_->fuBuffer.size(), fuType);
             impl_->fuActive = false;
@@ -438,11 +444,7 @@ void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
                 const AccessUnit finished = std::move(impl_->unit);
                 impl_->unit = AccessUnit{};
                 impl_->unit.timestampUs = finished.timestampUs;
-                if (!finished.data.empty()) {
-                    VideoPacket pkt{PacketType::Frame, finished.hasIdr, emittedSeq++, finished.timestampUs,
-                                    finished.data.data(), finished.data.size()};
-                    onPacket(pkt);
-                }
+                impl_->Emit(finished, emittedSeq, onPacket);
             }
             impl_->AppendNal(payload, payloadSize, type);
         } else {
@@ -454,14 +456,7 @@ void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
         if (marker) {
             // The marker bit ends the access unit -- the sender sets it on the
             // last packet of every encoded frame.
-            if (!impl_->unit.data.empty()) {
-                const bool isConfig = !impl_->unit.hasVcl;  // SPS/PPS only
-                ++impl_->accessUnits;
-                VideoPacket pkt{isConfig ? PacketType::Config : PacketType::Frame, impl_->unit.hasIdr,
-                                emittedSeq++, impl_->unit.timestampUs, impl_->unit.data.data(),
-                                impl_->unit.data.size()};
-                onPacket(pkt);
-            }
+            impl_->Emit(impl_->unit, emittedSeq, onPacket);
             impl_->unit.clear();
             impl_->fuActive = false;
             impl_->fuBuffer.clear();

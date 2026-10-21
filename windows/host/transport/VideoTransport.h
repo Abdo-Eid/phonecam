@@ -26,6 +26,7 @@ struct VideoPacket {
     uint64_t timestampUs;
     const uint8_t* payload;
     size_t payloadSize;
+    bool discontinuity = false;
 };
 
 using VideoPacketCallback = std::function<void(const VideoPacket&)>;

@@ -91,6 +91,10 @@ add_executable(phonecam-pairing-tests connection/PairingStoreTests.cpp connectio
 target_include_directories(phonecam-pairing-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(phonecam-pairing-tests PRIVATE advapi32 bcrypt)
 
+add_executable(phonecam-video-tests transport/VideoTimingTests.cpp transport/RtpVideoTransport.cpp)
+target_include_directories(phonecam-video-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(phonecam-video-tests PRIVATE phonecam_common ws2_32)
+
 # libusb-1.0.dll must sit next to the exe at runtime -- same reasoning as
 # aoa_probe's own copy and adb.exe's PostBuildEvent copy for phonecam-vcam.dll.
 add_custom_command(TARGET phonecam-host POST_BUILD

@@ -41,8 +41,9 @@ sealed interface CaptureUiState {
 // service) own the actual start/stop, since that's the pattern startForegroundService() requires
 // -- the service must reach startForeground() from within its own onStartCommand.
 //
-// The poll loop runs continuously from init{} rather than being started/cancelled
-// alongside startCapture()/stopCapture() -- CaptureService can also be started by MainActivity's
+// Poll while the UI is visible, independently of startCapture()/stopCapture().
+// Release the binding and polling when hidden; a stopped service then exits,
+// while a started streaming service remains alive. CaptureService can also be started by MainActivity's
 // AOA accessory-attach handling (ACTION_START_AOA), entirely independent of this ViewModel and
 // its Start button, so uiState needs to reflect the service's real state regardless of what
 // triggered it. Previously, an AOA-triggered session would stream successfully while this
@@ -75,9 +76,10 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
       }
     }
 
-  init {
+  init { bindUi() }
+
+  private fun startPolling() {
     val context = getApplication<Application>()
-    isBound = context.bindService(Intent(context, CaptureService::class.java), connection, Context.BIND_AUTO_CREATE)
     statsJob =
       viewModelScope.launch {
         while (true) {
@@ -109,8 +111,8 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
                   CaptureUiState.WaitingForConnection else CaptureUiState.Idle
                 CaptureState.WAITING_FOR_CONNECTION -> CaptureUiState.WaitingForConnection
                 // Quantized to the precision OsdReadout actually renders -- whole seconds
-                // (formatElapsed truncates anyway) and 0.1 fps ("%.1f"). The poll runs twice a
-                // second, so without this every tick produced a visibly identical but
+                // (formatElapsed truncates anyway) and 0.1 fps ("%.1f"). Without this
+                // every poll could produce a visibly identical but
                 // not-equal Streaming, re-emitting StateFlow and recomposing the whole screen
                 // for the same pixels. At this precision consecutive ticks compare equal and
                 // StateFlow conflates them.
@@ -186,15 +188,33 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
   }
   fun forgetPc(id: String) { boundService?.forgetPc(id) }
 
+  fun bindUi() {
+    if (isBound) return
+    val context = getApplication<Application>()
+    isBound = context.bindService(Intent(context, CaptureService::class.java), connection, Context.BIND_AUTO_CREATE)
+    if (isBound) startPolling()
+  }
+
+  fun unbindUi() {
+    // The scanner is another PhoneCam activity, not an app exit.
+    if (scanningQr) return
+    releaseBinding()
+  }
+
+  private fun releaseBinding() {
+    if (!isBound) return
+    statsJob?.cancel()
+    statsJob = null
+    getApplication<Application>().unbindService(connection)
+    isBound = false
+    boundService = null
+    connectedPc.value = ""
+  }
+
   override fun onCleared() {
     super.onCleared()
     statsJob?.cancel()
-    // Deliberately not stopping capture here -- CaptureService outliving this ViewModel (e.g. the
-    // Activity being destroyed while backgrounded) is the entire point of the foreground
-    // service. Only unbind; Stop releases capture but retains control/discovery for resume.
-    if (isBound) {
-      getApplication<Application>().unbindService(connection)
-      isBound = false
-    }
+    // An active started service survives; a stopped service exits with the UI.
+    releaseBinding()
   }
 }
