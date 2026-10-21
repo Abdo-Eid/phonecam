@@ -115,7 +115,7 @@ void LiveVideoBridge::Run() {
                     lastReport = now;
                     const Latency latency = GetLatency();
                     phonecam::log::Info("LiveVideoBridge: " + std::to_string(packets) + " packets, " +
-                                         std::to_string(frames) + " frames, latency " +
+                                         std::to_string(frames) + " frames, reference-relative delay " +
                                          (latency.samples == 0
                                               ? std::string("n/a")
                                               : std::to_string(static_cast<int>(latency.medianMs)) +

@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -274,14 +275,19 @@ std::string ComputeAuthHmac(const std::string& code, const std::string& phoneNon
     return ComputeHmacSha256Hex(code, phoneNonce + "|" + pcNonce);
 }
 
-ControlChannel::ControlChannel() : impl_(std::make_unique<Impl>()) {}ControlChannel::~ControlChannel() = default;
+ControlChannel::ControlChannel() : impl_(std::make_unique<Impl>()) {}
+ControlChannel::~ControlChannel() = default;
 
 bool ControlChannel::Connect(uint16_t port, const std::string& host) {
     return impl_->transport.Connect(port, host);
 }
 void ControlChannel::Disconnect() { impl_->transport.Disconnect(); }
 
-void ControlChannel::SetPairingCode(std::string code) { impl_->pairingCode = std::move(code); }
+void ControlChannel::SetPairingCode(std::string code) {
+    // The app groups the generated code as ABCD-EFGH-IJKL for readability.
+    code.erase(std::remove(code.begin(), code.end(), '-'), code.end());
+    impl_->pairingCode = std::move(code);
+}
 
 void ControlChannel::SetSessionReadyHandler(std::function<void()> handler) {
     impl_->sessionReadyHandler = std::move(handler);
@@ -318,12 +324,13 @@ void ControlChannel::RunReceiveLoop(const ControlMessageHandler& onMessage) {
             return;  // the UI has nothing to do with a challenge
         }
         if (msg.kind == ControlMsgKind::Capabilities) {
-            std::lock_guard<std::mutex> lock(impl_->cacheMutex);
-            impl_->lastCapabilities = msg.capabilities;
-            impl_->hasCapabilities = true;
+            {
+                std::lock_guard<std::mutex> lock(impl_->cacheMutex);
+                impl_->lastCapabilities = msg.capabilities;
+                impl_->hasCapabilities = true;
+            }
             // The capabilities arrive only after a successful authentication, so this is
             // the moment the session can accept commands.
-            if (impl_->sessionReadyHandler) impl_->sessionReadyHandler();
             if (msg.capabilities.protocolVersion != kSupportedProtocolVersion) {
                 const std::string phoneVersion = std::to_string(msg.capabilities.protocolVersion);
                 const std::string hostVersion = std::to_string(kSupportedProtocolVersion);
@@ -336,7 +343,9 @@ void ControlChannel::RunReceiveLoop(const ControlMessageHandler& onMessage) {
                                          " but this host speaks v" + hostVersion +
                                          " -- update the phone app, or the two will misread each other");
                 }
+                return;
             }
+            if (impl_->sessionReadyHandler) impl_->sessionReadyHandler();
         } else if (msg.kind == ControlMsgKind::Settings) {
             std::lock_guard<std::mutex> lock(impl_->cacheMutex);
             impl_->lastSettings = msg.settings;

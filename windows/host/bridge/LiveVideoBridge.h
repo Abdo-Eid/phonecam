@@ -47,11 +47,9 @@ public:
     // the two need different reactions (re-ask the phone / leave it alone).
     uint64_t FramesDecoded() const { return framesDecoded_.load(); }
 
-    // Measured end-to-end media latency, in milliseconds: the time from the frame's
-    // capture timestamp (carried on the wire by every transport) to the moment the
-    // decoded frame was handed to the ring. It covers the camera pipeline, the
-    // encoder, the transport and the decode -- but not the display, which is the
-    // consumer's business.
+    // Reference-relative timing, not absolute end-to-end latency. Comparing elapsed
+    // phone/PC time cancels both their clock offset and the reference frame's delay.
+    // This measures changes in delay, not the camera/encoder/transport/decode baseline.
     //
     // The median of a recent window is reported rather than the mean: a single
     // stalled frame (a keyframe, a reconnect) would otherwise dominate the average

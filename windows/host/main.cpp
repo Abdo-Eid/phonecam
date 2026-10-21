@@ -440,10 +440,23 @@ int wmain(int argc, wchar_t* argv[]) {
     // shown in the phone's app. Also read from the PHONECAM_SECRET environment variable, so it
     // doesn't have to appear in the process list.
     std::string pairingCode;
-    if (argc > 1 && std::wstring(argv[1]) == L"--secret" && argc > 2) {
-        for (const wchar_t* p = argv[2]; *p; ++p) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::wstring(argv[i]) != L"--secret") continue;
+        if (i + 1 >= argc || std::wstring(argv[i + 1]).rfind(L"--", 0) == 0) {
+            std::fprintf(stderr, "--secret requires the pairing code shown on the phone\n");
+            MFShutdown();
+            CoUninitialize();
+            return 1;
+        }
+        pairingCode.clear();
+        for (const wchar_t* p = argv[i + 1]; *p; ++p) {
             pairingCode.push_back(static_cast<char>(*p & 0x7F));
         }
+        // Remove this option/value before the existing transport/positional parser.
+        // Both '--rtp --secret CODE' and '--secret CODE --rtp' then work.
+        for (int j = i; j + 2 < argc; ++j) argv[j] = argv[j + 2];
+        argc -= 2;
+        --i;
     }
     if (pairingCode.empty()) {
         // Read from the environment too, so the code doesn't have to appear in the process
@@ -548,6 +561,7 @@ int wmain(int argc, wchar_t* argv[]) {
     // keyframe-request callback that reaches it: after a packet loss the decoder needs a fresh
     // IDR, and only the PC can ask the phone for one (the phone owns the encoder).
     phonecam::control::ControlChannel controlChannel;
+    std::atomic<bool> controlReady{false};
     if (!pairingCode.empty()) {
         controlChannel.SetPairingCode(pairingCode);
     }
@@ -562,6 +576,8 @@ int wmain(int argc, wchar_t* argv[]) {
     // Not sent over AOA: there the phone starts the session itself, when the USB accessory
     // is attached (the accessory pipe *is* the video transport).
     controlChannel.SetSessionReadyHandler([&]() {
+        controlReady.store(true);
+        controlChannel.SendRequestKeyframe();
         if (useAoa) return;
         // The mode is passed as a plain byte on purpose: ControlChannel.h keeps FlatBuffers
         // types out of its interface (see that header's own rule), so the schema's enum is
@@ -577,7 +593,7 @@ int wmain(int argc, wchar_t* argv[]) {
     // written by the control supervise loop -- the thread that runs discovery -- hence the
     // mutex.
     std::mutex wirelessMutex;
-    std::string discoveredHost;
+    std::string discoveredHost = wirelessHost;
     uint16_t discoveredControlPort = 0;
     uint16_t discoveredVideoPort = 0;
 
@@ -608,7 +624,9 @@ int wmain(int argc, wchar_t* argv[]) {
         videoTransport = std::make_unique<phonecam::transport::AdbVideoTransport>();
     }
     if (rtpTransport != nullptr) {
-        rtpTransport->SetKeyframeRequester([&controlChannel]() { controlChannel.SendRequestKeyframe(); });
+        rtpTransport->SetKeyframeRequester([&]() {
+            if (controlReady.load()) controlChannel.SendRequestKeyframe();
+        });
     }
     phonecam::bridge::LiveVideoBridge bridge(std::move(videoTransport));
     if (useTestPattern) {
@@ -702,9 +720,9 @@ int wmain(int argc, wchar_t* argv[]) {
                 // reconnected onto a fresh encoder session (new SPS/PPS, no
                 // guaranteed keyframe yet) -- ask for one explicitly rather
                 // than waiting for the phone's own keyframe interval.
-                controlChannel.SendRequestKeyframe();
                 controlChannel.RunReceiveLoop(
                     [&](const phonecam::control::ControlMessage& msg) { controlUi.OnMessage(msg); });
+                controlReady.store(false);
                 controlConnected.store(false);
                 controlChannel.Disconnect();
                 if (!controlRunning.load()) break;
@@ -746,7 +764,7 @@ int wmain(int argc, wchar_t* argv[]) {
             }
             if (now - lastFrameChange < std::chrono::seconds(3)) continue;
             lastFrameChange = now;
-            if (!controlConnected.load()) continue;
+            if (!controlReady.load()) continue;
             controlChannel.SendStartVideo(kWirelessWidth, kWirelessHeight, kWirelessFps, kWirelessBitrateBps,
                                           rtpPort,
                                           forceRtp ? static_cast<uint8_t>(phonecam::control::VideoTransportMode::Rtp)

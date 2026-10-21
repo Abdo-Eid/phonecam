@@ -141,14 +141,10 @@ class ControlSocketServer(
     throw IOException("accept() cancelled")
   }
 
-  fun close() {
+  /** Ends just the accepted session; the listeners stay bound for the next PC. */
+  fun closeClient() {
     try {
       clientSocket?.close()
-    } catch (_: Exception) {
-      // best-effort teardown
-    }
-    try {
-      serverSocket?.close()
     } catch (_: Exception) {
       // best-effort teardown
     }
@@ -157,9 +153,26 @@ class ControlSocketServer(
     } catch (_: Exception) {
       // best-effort teardown
     }
-    closeTcpServer()
     clientSocket = null
     tcpClient = null
+    lastAcceptedAddress = null
+  }
+
+  fun finishAuthentication() {
+    // Normal framed reads must not time out midway through an envelope: retrying from
+    // its prefix would lose framing. The bounded timeout is only for the handshake.
+    tcpClient?.soTimeout = 0
+  }
+
+  fun close() {
+    closeClient()
+    try {
+      serverSocket?.close()
+    } catch (_: Exception) {
+      // best-effort teardown
+    }
+    serverSocket = null
+    closeTcpServer()
   }
 
   private fun closeTcpServer() {
@@ -184,6 +197,6 @@ class ControlSocketServer(
     const val POLL_TIMEOUT_MS = 200
 
     // How long a read waits before giving up and letting the caller re-check its state.
-    const val READ_TIMEOUT_MS = 1000
+    const val READ_TIMEOUT_MS = 10_000
   }
 }

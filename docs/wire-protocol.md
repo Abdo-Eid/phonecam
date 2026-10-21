@@ -158,7 +158,7 @@ therefore challenges, and the PC proves it knows the shared **pairing code**:
 
 ```
 phone -> PC:  AuthChallenge { nonce }         (a fresh random nonce)
-PC  -> phone: AuthResponse { nonce, hmac }     hmac = HMAC-SHA256(code, phone_nonce || pc_nonce)
+PC  -> phone: AuthResponse { nonce, hmac }     hmac = HMAC-SHA256(code, phone_nonce + "|" + pc_nonce)
 ```
 
 Both nonces are fresh per session, so a recorded exchange cannot be replayed, and
@@ -172,11 +172,11 @@ out of the process list).
 abstract socket is the local USB link, which the phone already trusts, and
 asking for a code there would be friction for no gain.
 
-**What this protects, and what it doesn't.** It protects *access*: an
-unauthorized client cannot connect, take the video feed, or move the camera. The
-video stream itself is not encrypted by this — it doesn't need to be, because the
-Wi-Fi link's own encryption (WPA2) already protects the traffic from anyone who
-is merely on the same network but not part of the link.
+**What this protects, and what it doesn't.** It gates control commands, including
+starting a stream. It does not encrypt/authenticate media or subsequent commands,
+authenticate the phone to the PC, or separately authenticate the framed-TCP video
+socket. Use a trusted network. WPA2 protects the radio link, not end-to-end traffic
+against a compromised access point or an active network peer.
 
 ## Versioning
 

@@ -134,7 +134,8 @@ class CaptureService : Service() {
     controlChannel = channel
     // The pairing code the PC has to prove it knows. A session over the local USB link is
     // trusted without one; a network session has to answer the challenge.
-    channel.pairingCode = PairingCode(this).code
+    val pairing = PairingCode(this)
+    channel.pairingCodeProvider = { pairing.code }
     // The controller pushes state changes (CurrentSettings/Stats/LensChanged) back to the PC
     // through this channel, so it needs the reference.
     controller.bindControlChannel(channel)

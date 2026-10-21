@@ -2172,13 +2172,13 @@ phone was right there answering probes sent by hand.
 The phone's address is taken from the reply's source address rather than from the
 payload, so a phone cannot claim to be somewhere it isn't.
 
-### Latency: measured, not assumed
+### Timing: relative delay, not absolute latency
 
-`LiveVideoBridge` now measures the media latency: the time from a frame's capture
-timestamp (carried on the wire by every transport) to the moment the decoded frame
-reaches the ring. Reported as a **median over a recent window**, because a mean is
-dominated by the occasional keyframe or reconnect and says nothing about what the
-stream feels like.
+`LiveVideoBridge` reports reference-relative timing as a **median over a recent
+window**. The original description as absolute media latency was incorrect:
+subtracting elapsed phone time from elapsed PC time cancels the reference frame's
+pipeline delay as well as the clock offset. The result measures changes in delay,
+not the camera/encoder/transport/decode baseline.
 
 Two details made the first attempt produce nonsense, and both are general:
 
@@ -2195,14 +2195,15 @@ Two details made the first attempt produce nonsense, and both are general:
 Measured on the reference phone, with the phone on the laptop's Windows Mobile
 Hotspot (one radio hop, not two):
 
-| Transport | Median media latency |
+| Transport | Median reference-relative timing |
 |---|---|
 | USB (adb) | 1–2 ms |
 | Wi-Fi, RTP over UDP | 2–4 ms |
 | Wi-Fi, framed TCP | 4–6 ms |
 
-This is the pipeline's cost — camera, encoder, transport, decode. The display adds
-up to a frame interval on top of it, and that is the consumer's business.
+These are not absolute latency figures and cannot establish which transport has
+the lowest baseline delay. Absolute glass-to-glass latency needs an independent
+measurement, such as a visible timer and the virtual camera output together.
 
 ### Pairing: the phone challenges, the PC proves
 
@@ -2215,11 +2216,11 @@ wire, and a recorded handshake cannot be replayed.
 abstract socket is the local USB link, which the phone already trusts; asking for
 a code there would be friction for no gain.
 
-**What this protects, and what it doesn't:** access. An unauthorized client can
-no longer connect, take the feed, or move the camera. The video stream itself is
-not encrypted by this, and doesn't need to be — the Wi-Fi link's own encryption
-(WPA2) already protects the traffic from anyone who is merely on the same network
-but not part of the link.
+**What this protects, and what it doesn't:** control commands are gated on proof
+of the code, including the command that starts capture. Media and subsequent
+commands are not encrypted/authenticated; the framed-TCP video socket has no
+separate authentication. WPA2 is link protection, not end-to-end protection from
+a compromised access point or an active peer. Use a trusted network.
 
 ### The pairing handshake: two ways to get HMAC wrong
 
@@ -2252,8 +2253,9 @@ Android only lets an app open the camera while it is in the foreground, and a
 PC-driven session can arrive when the phone's screen is off — exactly when a
 webcam app has to keep working. The first version refused the camera with
 `CAMERA_DISABLED ... cannot open camera from background`. Promoting the service
-to a foreground camera service at app-open time fixes it: the session then starts
-whether or not the app is on screen.
+while the app is visible supports background streaming, but does not guarantee a
+cold start behind the lock screen. Live testing after the reboot still hit that
+restriction: unlock and open PhoneCam to establish capture first.
 
 ### The PC keeps asking
 
@@ -2271,5 +2273,24 @@ The result: the session starts by itself as soon as the phone is able to.
 - The pairing code has to be copied from the phone to the PC by hand. The PC
   could learn it over the local USB link instead — the phone trusts that link
   already — but that isn't built.
-- The media latency measurement stops at the ring; measuring what a viewer
-  actually perceives (the display) would need a visible timer on the phone.
+- Absolute latency remains unmeasured; the existing counter is reference-relative
+  and excludes display timing.
+
+### Live pairing verification after reboot (2026-10-21)
+
+On the Redmi Note 8, Android 11, over router Wi-Fi (`192.168.1.29`):
+
+- Missing code: challenged, no capabilities or frames, timed out and closed.
+- Wrong code: explicit `not authorized: wrong pairing code`, no frames.
+- Correct code immediately afterward, without restarting the app: phone logged
+  `the PC proved it knows the pairing code`, host received protocol-v3 capabilities.
+- Discovery found the phone without an IP argument; the displayed grouped code
+  worked with `--rtp --secret CODE`.
+
+The negative test exposed a lifecycle bug: rejecting one session set the channel's
+global stop flag, then retries attempted to bind listeners that were still held.
+Rejection now closes only the accepted client and preserves the listeners. Auth
+timeouts also close the client rather than abandoning a live socket, and normal
+authenticated reads do not restart framing after partial-read timeouts. Host
+watchdog/keyframe commands wait until authentication is complete. New HMAC unit
+tests cover the independent vector, wrong codes, and changed challenges.

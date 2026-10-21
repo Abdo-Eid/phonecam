@@ -19,10 +19,9 @@ import java.security.SecureRandom
  * It is generated on first run and stored in the app's preferences. The user sees it in the
  * app (that's how it gets onto the PC) and can replace it with their own.
  *
- * Note on the video itself: the media stream is not encrypted by this. It doesn't need to be,
- * because the Wi-Fi link's own encryption (WPA2) already protects the traffic from anyone
- * who is merely on the same network but not part of the link. What the code protects is
- * *access* -- who may connect and drive the camera.
+ * This authenticates control sessions only; it does not encrypt or authenticate media or
+ * subsequent commands. Use a trusted network: WPA2 is link protection, not end-to-end
+ * protection against a compromised access point or an active peer.
  */
 class PairingCode(context: Context) {
   private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)

@@ -94,12 +94,13 @@ class ControlChannel(private val context: Context, private val listener: Control
    * The phone's pairing code, used to challenge PCs that arrive over the network. A session
    * over the adb-forwarded abstract socket is a local USB link and is trusted without one.
    */
-  var pairingCode: String? = null
+  var pairingCodeProvider: () -> String = { "" }
 
   // Whether the current session has proved it may drive the camera. A local (USB) session is
   // trusted from the start; a network session has to answer the challenge first.
   private var authenticated = false
   private var authPhoneNonce: String? = null
+  private var sessionRejected = false
 
   // When the unanswered challenge stops being waited for.
   private var authDeadlineMs = 0L
@@ -158,34 +159,38 @@ class ControlChannel(private val context: Context, private val listener: Control
         break
       }
       val (input, out) = session
+      sessionRejected = false
       output = out
       peerAddress = server.lastAcceptedAddress
-      Log.i(TAG, "control session started (peer=$peerAddress)")
+      try {
+        Log.i(TAG, "control session started (peer=$peerAddress)")
 
-      // A network session has to prove it knows the pairing code before the phone will do
-      // anything for it. A session over the abstract socket is the local USB link (adb), which
-      // the phone already trusts -- no code needed there, and asking for one would be friction
-      // for no gain.
-      val isLocalUsbSession = server.lastAcceptedAddress == null
-      authenticated = isLocalUsbSession
-      if (isLocalUsbSession) {
-        sendCapabilities(out)
-      } else {
-        val nonce = SessionAuth.newNonce()
-        authPhoneNonce = nonce
-        authDeadlineMs = System.currentTimeMillis() + AUTH_TIMEOUT_MS
-        sendAuthChallenge(out, nonce)
+        // A network session must prove it knows the pairing code. The adb-forwarded
+        // abstract socket is trusted without one.
+        val isLocalUsbSession = server.lastAcceptedAddress == null
+        authenticated = isLocalUsbSession
+        if (isLocalUsbSession) {
+          sendCapabilities(out)
+        } else {
+          val nonce = SessionAuth.newNonce()
+          authPhoneNonce = nonce
+          authDeadlineMs = System.currentTimeMillis() + AUTH_TIMEOUT_MS
+          sendAuthChallenge(out, nonce)
+        }
+
+        receiveLoop(input) // blocks until the PC disconnects
+      } catch (e: IOException) {
+        if (!stopped.get()) Log.w(TAG, "control session failed", e)
+      } finally {
+        Log.i(TAG, "control session ended")
+        output = null
+        peerAddress = null
+        authenticated = false
+        authPhoneNonce = null
+        server.closeClient()
+        // Capture started by this PC ends with its control connection.
+        onSessionEnded?.invoke()
       }
-
-      receiveLoop(input) // blocks until the PC disconnects
-      Log.i(TAG, "control session ended")
-      output = null
-      peerAddress = null
-      authenticated = false
-      authPhoneNonce = null
-      // The PC is gone: tell the owner, so a capture that only existed because the PC asked
-      // for it can be stopped.
-      onSessionEnded?.invoke()
     }
   }
 
@@ -287,7 +292,7 @@ class ControlChannel(private val context: Context, private val listener: Control
    * replayed, and the code itself never crosses the wire.
    */
   private fun checkAuthResponse(pcNonce: String, hmac: String): Boolean {
-    val code = pairingCode
+    val code = pairingCodeProvider()
     val phoneNonce = authPhoneNonce
     if (code.isNullOrEmpty() || phoneNonce == null) return false
     val expected = SessionAuth.computeHmac(code, phoneNonce, pcNonce)
@@ -332,20 +337,16 @@ class ControlChannel(private val context: Context, private val listener: Control
 
   private fun receiveLoop(input: InputStream) {
     try {
-      while (!stopped.get()) {
+      while (!stopped.get() && !sessionRejected) {
+        if (!authenticated && System.currentTimeMillis() > authDeadlineMs) break
         val bytes =
           try {
             ControlFraming.readEnvelope(input)
           } catch (_: SocketTimeoutException) {
-            // Nothing arrived within the socket's read timeout. Normally just "the PC is
-            // quiet" -- but a peer that never answers the pairing challenge must not be able
-            // to hold the phone's only control listener forever.
-            if (!authenticated && authPhoneNonce != null &&
-              System.currentTimeMillis() > authDeadlineMs) {
-              Log.w(TAG, "the pairing challenge was never answered -- closing the session")
-              break
-            }
-            continue
+            // A timeout can occur halfway through a prefix/body. End this session rather
+            // than interpreting the remainder as a new envelope.
+            Log.w(TAG, "the pairing challenge timed out -- closing the session")
+            break
           }
         dispatch(bytes)
       }
@@ -386,6 +387,7 @@ class ControlChannel(private val context: Context, private val listener: Control
           val t = AuthResponse()
           envelope.payload(t)
           if (checkAuthResponse(t.nonce ?: "", t.hmac ?: "")) {
+            server.finishAuthentication()
             authenticated = true
             Log.i(TAG, "the PC proved it knows the pairing code")
             // The capabilities follow the successful authentication: the PC is told what the
@@ -395,7 +397,7 @@ class ControlChannel(private val context: Context, private val listener: Control
           } else {
             Log.w(TAG, "the PC's authentication answer did not match -- refusing the session")
             sendError("not authorized: wrong pairing code")
-            stopped.set(true)
+            sessionRejected = true
             AckResult.Error
           }
         }

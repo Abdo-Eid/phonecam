@@ -40,13 +40,13 @@ A **wireless** transport also exists: `phonecam-host --rtp` finds the phone by i
 
 Measured on the reference phone (Redmi Note 8, Android 11), with the phone on the laptop's Windows Mobile Hotspot — one radio hop, not two:
 
-| Transport | Media latency (capture → decoded on the PC) |
+| Transport | Reference-relative timing (not absolute latency) |
 |---|---|
 | USB (adb) | 1–2 ms |
 | Wi-Fi, RTP over UDP | 2–4 ms |
 | Wi-Fi, framed TCP | 4–6 ms |
 
-That is the pipeline's cost, not what a viewer perceives: the display adds up to a frame interval (≈16 ms at 60 Hz) on top.
+These figures measure changes in delay relative to a reference frame, not absolute camera-to-PC or glass-to-glass latency. The clock-offset calculation also cancels the reference frame's pipeline delay; absolute latency still needs a separate measurement.
 
 Full design and phased roadmap: [`docs/architecture.md`](docs/architecture.md).
 
