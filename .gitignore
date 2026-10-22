@@ -64,3 +64,10 @@ Thumbs.db
 !debug.keystore
 *.pfx
 *.snk
+
+# --- Local media benchmark artifacts (keep scripts and results tracked) ---
+/bench/runs/
+/bench/e2e/
+/bench/logs/
+/bench/*.png
+/bench/*.log

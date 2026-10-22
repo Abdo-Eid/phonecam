@@ -9,6 +9,8 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
@@ -17,6 +19,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Range
 import android.view.Surface
+import io.github.abdoeid.phonecam.bench.BenchTelemetry
 import java.util.concurrent.Executor
 
 /**
@@ -41,6 +44,22 @@ class CameraCapture(private val context: Context) {
   private var targetSurface: Surface? = null
   private var fps: Int = 30
   @Volatile private var stopped = true
+
+  private val captureCallback =
+    object : CameraCaptureSession.CaptureCallback() {
+      override fun onCaptureCompleted(
+        session: CameraCaptureSession,
+        request: CaptureRequest,
+        result: TotalCaptureResult,
+      ) {
+        if (!BenchTelemetry.enabled) return
+        BenchTelemetry.sensor(
+          sensorTimestampNs = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: 0L,
+          frameDurationNs = result.get(CaptureResult.SENSOR_FRAME_DURATION) ?: 0L,
+          aeFpsRange = result.get(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE)?.toString() ?: "?",
+        )
+      }
+    }
 
   var currentCameraId: String? = null
     private set
@@ -151,7 +170,10 @@ class CameraCapture(private val context: Context) {
                 set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
               }
             requestBuilder = builder
-            configuredSession.setRepeatingRequest(builder.build(), null, bgHandler)
+            BenchTelemetry.cameraStart(camera.id, fps)
+            configuredSession.setRepeatingRequest(
+              builder.build(), if (BenchTelemetry.enabled) captureCallback else null, bgHandler,
+            )
           } catch (e: Exception) {
             configuredSession.close()
             if (!stopped && device === camera) onError(e)
@@ -221,7 +243,9 @@ class CameraCapture(private val context: Context) {
     builder.set(CaptureRequest.CONTROL_AF_REGIONS, region)
     builder.set(CaptureRequest.CONTROL_AE_REGIONS, region)
     return try {
-      activeSession.setRepeatingRequest(builder.build(), null, bgHandler)
+      activeSession.setRepeatingRequest(
+        builder.build(), if (BenchTelemetry.enabled) captureCallback else null, bgHandler,
+      )
       builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
       activeSession.capture(builder.build(), null, bgHandler)
       builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE)
@@ -237,7 +261,9 @@ class CameraCapture(private val context: Context) {
     val bgHandler = handler ?: return false
     mutate(builder)
     return try {
-      activeSession.setRepeatingRequest(builder.build(), null, bgHandler)
+      activeSession.setRepeatingRequest(
+        builder.build(), if (BenchTelemetry.enabled) captureCallback else null, bgHandler,
+      )
       true
     } catch (_: Exception) {
       false

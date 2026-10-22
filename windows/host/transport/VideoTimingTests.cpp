@@ -71,13 +71,18 @@ void TestRtp() {
         sendto(tx, reinterpret_cast<const char*>(data), sizeof(data), 0,
                reinterpret_cast<sockaddr*>(&destination), sizeof(destination));
     };
+    auto idr = [&](uint32_t ssrc, uint32_t timestamp) {
+        send(ssrc, timestamp, 0x67, false);
+        send(ssrc, timestamp, 0x68, false);
+        send(ssrc, timestamp, 0x65);
+    };
     send(1, 0, 0x67);                  // MediaCodec's independent config clock
-    send(1, 0xe0000000, 0x65);         // used to be rejected after PTS=0
+    idr(1, 0xe0000000);               // used to be rejected after PTS=0
     send(1, 0xe0000bb8, 0x41);
-    send(2, 0xfffffff0, 0x65);         // a new encoder session resets the decoder
+    idr(2, 0xfffffff0);               // a new encoder session resets the decoder
     send(2, 0x00000100, 0x41);         // natural 32-bit RTP wrap
     send(2, 0x00001000, 0x41, false);  // lost marker: do not emit this picture
-    send(2, 0x00002000, 0x65);
+    idr(2, 0x00002000);
     bool complete;
     {
         std::unique_lock lock(mutex);

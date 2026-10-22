@@ -1,6 +1,7 @@
 #include "connection/ConnectionManager.h"
 #include <chrono>
 #include "connection/PairingStore.h"
+#include "bench/MediaSettings.h"
 #include "transport/Discovery.h"
 #include "transport/NetTransport.h"
 #include "transport/RtpVideoTransport.h"
@@ -9,8 +10,6 @@
 
 namespace phonecam::connection {
 namespace {
-constexpr uint16_t kWidth = 1920, kHeight = 1080, kFps = 30;
-constexpr uint32_t kBitrate = 6'000'000;
 bool Wireless(Mode mode) { return mode == Mode::WifiRtp || mode == Mode::WifiTcp; }
 int64_t NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -171,6 +170,12 @@ void ConnectionManager::ControlLoop(Target target) {
 }
 
 void ConnectionManager::Run() {
+    const auto requestedMedia = phonecam::bench::RequestedMediaSettings();
+    if (!requestedMedia) {
+        Publish(State::Error, "Invalid debug media benchmark profile");
+        return;
+    }
+    const auto media = *requestedMedia;
     const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     while (running_.load()) {
         Target target;
@@ -234,7 +239,7 @@ void ConnectionManager::Run() {
         userAction_.store(-1);
         startNeeded_.store(false);
         sessionRunning_.store(true);
-        control_.SetSessionReadyHandler([this, target]() {
+        control_.SetSessionReadyHandler([this, target, media]() {
             if (!sessionRunning_.load()) return;
             ready_.store(true);
             lastControlMessageMs_.store(NowMs());
@@ -246,7 +251,7 @@ void ConnectionManager::Run() {
             // knows whether the user stopped it there: never auto-start a stopped stream.
             const bool stopped = paused_.load() || phoneStopped_.load();
             if (!stopped && target.mode != Mode::Aoa)
-                control_.SendStartVideo(kWidth, kHeight, kFps, kBitrate, target.rtpPort,
+                control_.SendStartVideo(media.width, media.height, media.fps, media.bitrate, target.rtpPort,
                                         target.mode == Mode::WifiRtp ? 1 : 0);
             if (!stopped) control_.SendRequestKeyframe();
             Publish(stopped ? State::Stopped : State::WaitingForVideo,
@@ -292,7 +297,7 @@ void ConnectionManager::Run() {
             } else if (action == 1 || resumeRequested_.exchange(false)) {
                 paused_.store(false);
                 bridge_.SetOutputEnabled(!phoneStopped_.load());
-                control_.SendStartVideo(kWidth, kHeight, kFps, kBitrate, target.rtpPort,
+                control_.SendStartVideo(media.width, media.height, media.fps, media.bitrate, target.rtpPort,
                                         target.mode == Mode::WifiRtp ? 1 : 0, true);
                 control_.SendRequestKeyframe();
                 lastRequest = now;
@@ -313,7 +318,7 @@ void ConnectionManager::Run() {
             } else if (ready_.load()) {
                 Publish(State::WaitingForVideo, "Paired; waiting for video. Unlock and open PhoneCam if needed.", true);
                 if (target.mode != Mode::Aoa && now - lastRequest >= std::chrono::seconds(3)) {
-                    control_.SendStartVideo(kWidth, kHeight, kFps, kBitrate, target.rtpPort,
+                    control_.SendStartVideo(media.width, media.height, media.fps, media.bitrate, target.rtpPort,
                                             target.mode == Mode::WifiRtp ? 1 : 0);
                     control_.SendRequestKeyframe();
                     lastRequest = now;

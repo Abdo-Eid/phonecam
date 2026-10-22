@@ -16,6 +16,11 @@
 // units (Annex-B) and hands each one straight to the caller -- the same
 // VideoPacket shape the other transports produce, so the decode bridge, the
 // shared-memory ring and the virtual camera are unchanged.
+// After loss (and on joining), predicted pictures are withheld until a complete
+// IDR containing SPS/PPS arrives. The resumed frame marks decoder discontinuity;
+// corrupting one picture must not poison the rest of the GOP.
+// Slightly reordered datagrams are given a 12 ms / 64-packet bounded window
+// across gaps only; the healthy in-order stream is not deliberately delayed.
 //
 // The phone is the RTP sender and the PC the receiver: the phone learns the
 // PC's address from the control connection itself (see proto/control.fbs's

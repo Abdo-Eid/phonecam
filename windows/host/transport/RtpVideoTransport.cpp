@@ -1,4 +1,5 @@
 #include "transport/RtpVideoTransport.h"
+#include "transport/RtpReorderBuffer.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -69,12 +70,18 @@ struct AccessUnit {
     std::vector<uint8_t> data;
     bool hasVcl = false;
     bool hasIdr = false;
+    bool hasFirstIdrSlice = false;
+    bool hasSps = false;
+    bool hasPps = false;
     uint64_t timestampUs = 0;
 
     void clear() {
         data.clear();
         hasVcl = false;
         hasIdr = false;
+        hasFirstIdrSlice = false;
+        hasSps = false;
+        hasPps = false;
     }
 };
 
@@ -97,6 +104,7 @@ struct RtpVideoTransport::Impl {
     std::vector<uint8_t> fuBuffer;   // FU-A payload being reassembled
     bool fuActive = false;
     uint8_t fuNalType = 0;
+    uint8_t fuIndicator = 0;
 
     bool haveSeq = false;
     uint16_t lastSeq = 0;
@@ -107,7 +115,12 @@ struct RtpVideoTransport::Impl {
     uint32_t lastTs = 0;
     bool haveTs = false;
 
-    bool desynced = false;  // a gap was seen: wait for a clean NAL boundary
+    // A NAL boundary is NOT a decoder recovery point: P pictures can still
+    // reference a lost picture, and another IDR slice can belong to the same
+    // damaged access unit. Resume only at a complete, self-contained IDR.
+    bool waitingForIdr = true;
+    bool haveDiscardedTimestamp = false;
+    uint32_t discardedTimestamp = 0;
     uint32_t lostPackets = 0;
     std::chrono::steady_clock::time_point lastKeyframeRequest{};
 
@@ -116,10 +129,24 @@ struct RtpVideoTransport::Impl {
     uint64_t datagrams = 0;
     uint64_t bytes = 0;
     uint64_t accessUnits = 0;
+    uint64_t recoveryDrops = 0;
     std::chrono::steady_clock::time_point lastStatsLog{};
 
     void Emit(const AccessUnit& finished, uint32_t& sequence, const VideoPacketCallback& onPacket) {
         if (finished.data.empty()) return;
+        if (finished.hasVcl && waitingForIdr) {
+            // The project's sender repeats SPS/PPS inside every IDR AU. Do not
+            // restart a reset decoder using stale/missing parameter sets, or
+            // mistake a surviving non-first IDR slice for an intact picture.
+            if (!finished.hasIdr || !finished.hasFirstIdrSlice || !finished.hasSps || !finished.hasPps) {
+                ++recoveryDrops;
+                RequestKeyframe();
+                return;
+            }
+            waitingForIdr = false;
+            newSession = true; // the bridge must discard old decoder references
+            phonecam::log::Info("RtpVideoTransport: resuming at a complete IDR with SPS/PPS");
+        }
         ++accessUnits;
         VideoPacket packet{finished.hasVcl ? PacketType::Frame : PacketType::Config,
                            finished.hasIdr, sequence++, finished.timestampUs,
@@ -128,32 +155,53 @@ struct RtpVideoTransport::Impl {
         onPacket(packet);
     }
 
-    void AppendNal(const uint8_t* nal, size_t size, uint8_t nalType) {
+    bool AppendNal(const uint8_t* nal, size_t size, uint8_t nalType) {
+        uint32_t firstMb = 0;
+        if (IsVclType(nalType)) {
+            if (!ReadExpGolomb(nal, size, 1, firstMb)) return false;
+            if (unit.hasVcl && (firstMb == 0 || (nalType == kNalIdr) != unit.hasIdr)) return false;
+        }
         static const uint8_t kStartCode[4] = {0, 0, 0, 1};
         unit.data.insert(unit.data.end(), kStartCode, kStartCode + 4);
         unit.data.insert(unit.data.end(), nal, nal + size);
         if (IsVclType(nalType)) unit.hasVcl = true;
         if (nalType == kNalIdr) unit.hasIdr = true;
+        if (nalType == 7) unit.hasSps = true;
+        if (nalType == 8) unit.hasPps = true;
+        if (nalType == kNalIdr && firstMb == 0) unit.hasFirstIdrSlice = true;
+        return true;
     }
 
     // Drops the in-progress access unit (a loss made its contents
     // unreconstructable) and asks for a keyframe so the decoder can recover
     // promptly instead of waiting for the encoder's next periodic IDR.
     void OnLoss(const char* reason) {
-        if (unit.data.size() > 0 || fuActive) {
-            unit.clear();
-            fuActive = false;
-            fuBuffer.clear();
-        }
-        desynced = true;
+        unit.clear();
+        fuActive = false;
+        fuBuffer.clear();
+        waitingForIdr = true;
+        newSession = true;
         ++lostPackets;
+        phonecam::log::Info(std::string("RtpVideoTransport: waiting for clean IDR after ") + reason);
+        RequestKeyframe();
+    }
+
+    void DiscardTimestamp(uint32_t timestamp, const char* reason) {
+        OnLoss(reason);
+        // Discard the rest of this damaged picture, including any surviving
+        // IDR slices. Recovery is allowed only at a later RTP timestamp.
+        haveDiscardedTimestamp = true;
+        discardedTimestamp = timestamp;
+    }
+
+    void RequestKeyframe() {
         const auto now = std::chrono::steady_clock::now();
-        if (keyframeRequester && now - lastKeyframeRequest > std::chrono::seconds(1)) {
+        if (keyframeRequester && (lastKeyframeRequest.time_since_epoch().count() == 0 ||
+                                 now - lastKeyframeRequest > std::chrono::seconds(1))) {
             lastKeyframeRequest = now;
-            phonecam::log::Info("RtpVideoTransport: packet loss, requesting a keyframe");
+            phonecam::log::Info("RtpVideoTransport: requesting a recovery keyframe");
             keyframeRequester();
         }
-        (void)reason;
     }
 };
 
@@ -231,34 +279,58 @@ void RtpVideoTransport::Disconnect() {
 }
 
 void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
-    std::vector<uint8_t> datagram(kMaxDatagram);
+    std::vector<uint8_t> incoming(kMaxDatagram);
+    RtpReorderBuffer reorder;
     uint32_t emittedSeq = 0;
+    SOCKET sock;
+    {
+        std::lock_guard lock(impl_->mutex);
+        sock = impl_->sock;
+    }
+
+    auto receiveOrdered = [&]() -> std::optional<std::vector<uint8_t>> {
+        while (!impl_->cancelled.load()) {
+            const auto now = RtpReorderBuffer::Clock::now();
+            if (auto packet = reorder.Pop(now)) return packet;
+            if (const auto deadline = reorder.Deadline()) {
+                // Wake even if the missing packet NEVER arrives. Otherwise a
+                // quiet socket would turn a bounded reorder window into a stall.
+                const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(*deadline - now);
+                timeval timeout{0, static_cast<long>((std::max)(int64_t{1}, remaining.count()))};
+                fd_set readable;
+                FD_ZERO(&readable);
+                FD_SET(sock, &readable);
+                const int ready = select(0, &readable, nullptr, nullptr, &timeout);
+                if (ready == 0) continue;
+                if (ready == SOCKET_ERROR) return std::nullopt;
+            }
+            sockaddr_in from{};
+            int fromLen = sizeof(from);
+            const int received = recvfrom(sock, reinterpret_cast<char*>(incoming.data()),
+                static_cast<int>(incoming.size()), 0, reinterpret_cast<sockaddr*>(&from), &fromLen);
+            if (received <= 0) {
+                if (impl_->cancelled.load()) return std::nullopt;
+                const int error = WSAGetLastError();
+                if (error == WSAECONNRESET || error == WSAEWOULDBLOCK) {
+                    if (reorder.Pending() == 0) Sleep(50);
+                    continue;
+                }
+                return std::nullopt;
+            }
+            if (received >= static_cast<int>(kRtpHeaderSize)) {
+                ++impl_->datagrams;
+                impl_->bytes += received;
+            }
+            reorder.Push(incoming.data(), static_cast<size_t>(received), RtpReorderBuffer::Clock::now());
+        }
+        return std::nullopt;
+    };
 
     while (true) {
-        sockaddr_in from{};
-        int fromLen = sizeof(from);
-        const int received =
-            recvfrom(impl_->sock, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0,
-                     reinterpret_cast<sockaddr*>(&from), &fromLen);
-        if (received <= 0) {
-            if (impl_->cancelled.load()) break;
-            // A transient error (e.g. ICMP port-unreachable surfaced on the
-            // socket) shouldn't kill the session -- back off briefly and
-            // keep listening, exactly like the other transports' supervise
-            // loops expect.
-            if (WSAGetLastError() == WSAECONNRESET || WSAGetLastError() == WSAEWOULDBLOCK) {
-                Sleep(50);
-                continue;
-            }
-            break;
-        }
-
-        const size_t size = static_cast<size_t>(received);
-        if (size < kRtpHeaderSize) continue;
-        const uint8_t* data = datagram.data();
-
-        ++impl_->datagrams;
-        impl_->bytes += size;
+        const auto datagram = receiveOrdered();
+        if (!datagram) break;
+        const size_t size = datagram->size();
+        const uint8_t* data = datagram->data();
         {
             const auto now = std::chrono::steady_clock::now();
             if (impl_->lastStatsLog.time_since_epoch().count() == 0) {
@@ -268,7 +340,12 @@ void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
                 phonecam::log::Info("RtpVideoTransport: " + std::to_string(impl_->datagrams) +
                                      " datagrams, " + std::to_string(impl_->bytes / 1024) + " KiB, " +
                                      std::to_string(impl_->accessUnits) + " access units, " +
-                                     std::to_string(impl_->lostPackets) + " lost");
+                                     std::to_string(impl_->lostPackets) + " loss events, " +
+                                     std::to_string(impl_->recoveryDrops) + " pictures withheld for recovery, " +
+                                     std::to_string(reorder.latePacketsRecovered) + " late packets recovered, " +
+                                     std::to_string(reorder.expiredGaps) + " reorder gaps expired, " +
+                                     std::to_string(reorder.lateOrDuplicate) + " late/duplicate packets ignored, " +
+                                     std::to_string(reorder.capacityDrops) + " reorder capacity drops");
             }
         }
 
@@ -316,9 +393,12 @@ void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
             impl_->haveSeq = false;
             impl_->haveTs = false;
             impl_->tsBase = 0;
-            impl_->desynced = false;
+            impl_->waitingForIdr = true;
+            impl_->haveDiscardedTimestamp = false;
+            impl_->lastKeyframeRequest = {};
             impl_->unit.clear();
             impl_->fuActive = false;
+            impl_->fuBuffer.clear();
         }
 
         // Sequence continuity (RFC 3550's rules): a FORWARD jump means packets were
@@ -331,7 +411,7 @@ void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
             if (seq != expected) {
                 const uint16_t forward = static_cast<uint16_t>(seq - expected);
                 if (forward < 0x8000u) {
-                    impl_->OnLoss("sequence gap");
+                    impl_->DiscardTimestamp(timestamp, "sequence gap");
                     phonecam::log::Error("RtpVideoTransport: sequence gap, " + std::to_string(forward) +
                                          " packet(s) lost");
                 } else {
@@ -342,9 +422,41 @@ void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
         impl_->haveSeq = true;
         impl_->lastSeq = seq;
 
+        if (impl_->haveDiscardedTimestamp) {
+            if (timestamp == impl_->discardedTimestamp) {
+                impl_->RequestKeyframe();
+                continue;
+            }
+            impl_->haveDiscardedTimestamp = false;
+        }
+
         const uint8_t nalType = payload[0] & 0x1F;
-        const bool hasVideoClock = IsVclType(nalType) ||
+        if ((payload[0] & 0x80) != 0) {
+            impl_->DiscardTimestamp(timestamp, "forbidden NAL bit");
+            continue;
+        }
+        bool hasVideoClock = IsVclType(nalType) ||
             (nalType == kNalFuA && payloadSize >= 2 && IsVclType(payload[1] & 0x1F));
+        if (nalType == kNalStapA) {
+            // Validate the entire aggregation BEFORE appending any NAL. An
+            // incomplete tail must never turn the intact prefix into a frame.
+            size_t pos = 1;
+            bool valid = payloadSize > 1;
+            while (valid && pos < payloadSize) {
+                if (pos + 2 > payloadSize) { valid = false; break; }
+                const size_t nalSize = (static_cast<size_t>(payload[pos]) << 8) | payload[pos + 1];
+                pos += 2;
+                if (nalSize == 0 || nalSize > payloadSize - pos) { valid = false; break; }
+                const uint8_t type = payload[pos] & 0x1F;
+                if ((payload[pos] & 0x80) != 0 || type == 0 || type >= kNalStapA) { valid = false; break; }
+                hasVideoClock = hasVideoClock || IsVclType(type);
+                pos += nalSize;
+            }
+            if (!valid) {
+                impl_->DiscardTimestamp(timestamp, "malformed STAP-A");
+                continue;
+            }
+        }
         // Config-only buffers can have timestamp zero, unrelated to the camera
         // clock. Do not use those to reject or unwrap real picture timestamps.
         // Packet sequence numbers above already reject reordered datagrams.
@@ -360,7 +472,7 @@ void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
         }
         const uint64_t ticks = impl_->tsBase + timestamp;
         const uint64_t timestampUs = ticks * 1000000ull / 90000ull;
-        if (impl_->unit.hasVcl && impl_->unit.timestampUs != timestampUs) {
+        if ((impl_->unit.hasVcl || impl_->fuActive) && impl_->unit.timestampUs != timestampUs) {
             // The previous marker was lost. Never stamp the old picture with
             // the new picture's time or deliver a potentially truncated frame.
             impl_->OnLoss("missing marker");
@@ -370,7 +482,10 @@ void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
         // ---- payload handling ------------------------------------------------
 
         if (nalType == kNalFuA) {
-            if (payloadSize < 2) continue;
+            if (payloadSize < 3) {
+                impl_->DiscardTimestamp(timestamp, "empty/truncated FU-A");
+                continue;
+            }
             const uint8_t fuHeader = payload[1];
             const bool start = (fuHeader & 0x80) != 0;
             const bool end = (fuHeader & 0x40) != 0;
@@ -378,44 +493,46 @@ void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
             const uint8_t* fragment = payload + 2;
             const size_t fragmentSize = payloadSize - 2;
 
+            if ((fuHeader & 0x20) != 0 || (start && end) || type == 0 || type >= kNalStapA || (marker && !end)) {
+                impl_->DiscardTimestamp(timestamp, "invalid FU-A header/marker");
+                continue;
+            }
+
             if (start) {
+                if (impl_->fuActive) {
+                    impl_->DiscardTimestamp(timestamp, "FU-A start before previous end");
+                    continue;
+                }
                 impl_->fuBuffer.clear();
                 impl_->fuActive = true;
                 impl_->fuNalType = type;
+                impl_->fuIndicator = payload[0] & 0xE0;
                 // The original NAL header byte: F/NRI from the FU indicator,
                 // type from the FU header.
                 impl_->fuBuffer.push_back(static_cast<uint8_t>((payload[0] & 0xE0) | type));
-                if (impl_->desynced) {
-                    // A fragment start is a clean NAL boundary: safe to resync
-                    // here and rebuild from this point on.
-                    impl_->desynced = false;
-                    impl_->unit.clear();
-                }
             } else if (!impl_->fuActive) {
                 // Continuation of a fragment whose start was lost -- unusable.
+                impl_->DiscardTimestamp(timestamp, "FU-A continuation without start");
+                continue;
+            } else if (type != impl_->fuNalType || (payload[0] & 0xE0) != impl_->fuIndicator) {
+                impl_->DiscardTimestamp(timestamp, "FU-A fragment header changed");
                 continue;
             }
             impl_->fuBuffer.insert(impl_->fuBuffer.end(), fragment, fragment + fragmentSize);
             if (!end) continue;
 
             const uint8_t fuType = impl_->fuNalType;
-            const bool isFirstMbZero = [&]() {
-                if (!IsVclType(fuType) || impl_->fuBuffer.size() < 2) return false;
-                uint32_t firstMb = 0;
-                return ReadExpGolomb(impl_->fuBuffer.data(), impl_->fuBuffer.size(), 1, firstMb) && firstMb == 0;
-            }();
-
-            if (isFirstMbZero && impl_->unit.hasVcl) {
-                // A new picture starts here: the previous access unit is done.
-                const AccessUnit finished = std::move(impl_->unit);
-                impl_->unit = AccessUnit{};
-                impl_->unit.timestampUs = finished.timestampUs;
-                impl_->Emit(finished, emittedSeq, onPacket);
+            if (!impl_->AppendNal(impl_->fuBuffer.data(), impl_->fuBuffer.size(), fuType)) {
+                impl_->DiscardTimestamp(timestamp, "invalid slice/picture boundary");
+                continue;
             }
-            impl_->AppendNal(impl_->fuBuffer.data(), impl_->fuBuffer.size(), fuType);
             impl_->fuActive = false;
             impl_->fuBuffer.clear();
         } else if (nalType == kNalStapA) {
+            if (impl_->fuActive) {
+                impl_->DiscardTimestamp(timestamp, "STAP-A before fragment end");
+                continue;
+            }
             // STAP-A: several small NALs in one packet (SPS+PPS is the usual
             // case). Each is appended separately.
             size_t pos = 1;
@@ -424,32 +541,27 @@ void RtpVideoTransport::RunReceiveLoop(const VideoPacketCallback& onPacket) {
                 pos += 2;
                 if (nalSize == 0 || pos + nalSize > payloadSize) break;
                 const uint8_t type = payload[pos] & 0x1F;
-                impl_->AppendNal(payload + pos, nalSize, type);
+                if (!impl_->AppendNal(payload + pos, nalSize, type)) {
+                    impl_->DiscardTimestamp(timestamp, "invalid aggregated slice/picture boundary");
+                    break;
+                }
                 pos += nalSize;
             }
         } else if (nalType >= 1 && nalType <= 23) {
             // Single NAL unit packet.
             const uint8_t type = nalType;
-            if (impl_->desynced) {
-                // A clean NAL boundary after a loss: safe to resync here.
-                impl_->desynced = false;
-                impl_->unit.clear();
+            if (impl_->fuActive) {
+                impl_->DiscardTimestamp(timestamp, "NAL before fragment end");
+                continue;
             }
-            const bool isFirstMbZero = [&]() {
-                if (!IsVclType(type) || payloadSize < 2) return false;
-                uint32_t firstMb = 0;
-                return ReadExpGolomb(payload, payloadSize, 1, firstMb) && firstMb == 0;
-            }();
-            if (isFirstMbZero && impl_->unit.hasVcl) {
-                const AccessUnit finished = std::move(impl_->unit);
-                impl_->unit = AccessUnit{};
-                impl_->unit.timestampUs = finished.timestampUs;
-                impl_->Emit(finished, emittedSeq, onPacket);
+            if (!impl_->AppendNal(payload, payloadSize, type)) {
+                impl_->DiscardTimestamp(timestamp, "invalid slice/picture boundary");
+                continue;
             }
-            impl_->AppendNal(payload, payloadSize, type);
         } else {
-            // STAP-B/MTAP/FU-B and anything else: not produced by this
-            // project's sender, ignored deliberately.
+            // Not produced by this sender; silently ignoring it could emit a
+            // picture with one of its NALs missing despite contiguous RTP seqs.
+            impl_->DiscardTimestamp(timestamp, "unsupported packetization");
             continue;
         }
 

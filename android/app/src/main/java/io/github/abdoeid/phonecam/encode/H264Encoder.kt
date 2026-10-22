@@ -4,7 +4,10 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.Surface
+import io.github.abdoeid.phonecam.bench.BenchTelemetry
+import io.github.abdoeid.phonecam.bench.BenchEncoderSettings
 import io.github.abdoeid.phonecam.transport.VideoPacketSink
 import io.github.abdoeid.phonecam.transport.WireFraming
 import java.io.IOException
@@ -53,7 +56,9 @@ class H264Encoder(width: Int, height: Int, fps: Int, bitrateBps: Int) {
         setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
       }
+    BenchEncoderSettings.applySelected(format)
     codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+    if (BenchTelemetry.enabled) BenchTelemetry.encoderFormat(codec.name, format.toString())
     inputSurface = codec.createInputSurface()
   }
 
@@ -107,9 +112,16 @@ class H264Encoder(width: Int, height: Int, fps: Int, bitrateBps: Int) {
 
   private fun drainLoop(sink: VideoPacketSink, onWriteError: (IOException) -> Unit) {
     val bufferInfo = MediaCodec.BufferInfo()
+    val bench = BenchTelemetry.enabled
     while (running.get()) {
+      val dequeueStartNs = if (bench) SystemClock.elapsedRealtimeNanos() else 0L
       val index = codec.dequeueOutputBuffer(bufferInfo, DEQUEUE_TIMEOUT_US)
-      if (index < 0) continue // INFO_TRY_AGAIN_LATER or a format/buffers-changed event -- nothing to write
+      val dequeueEndNs = if (bench) SystemClock.elapsedRealtimeNanos() else 0L
+      if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+        if (bench) BenchTelemetry.encoderFormat(codec.name, codec.outputFormat.toString())
+        continue
+      }
+      if (index < 0) continue // INFO_TRY_AGAIN_LATER or a buffers-changed event -- nothing to write
 
       val buffer = codec.getOutputBuffer(index) ?: continue
       if (bufferInfo.size > 0) {
@@ -120,11 +132,15 @@ class H264Encoder(width: Int, height: Int, fps: Int, bitrateBps: Int) {
 
         val isConfig = bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
         val isKeyframe = isConfig || (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0)
+        val outputNs = if (bench) SystemClock.elapsedRealtimeNanos() else 0L
+        val outputUptimeMs = if (bench) SystemClock.uptimeMillis() else 0L
+        val packetSeq = seq++
+        val writeStartNs = if (bench) SystemClock.elapsedRealtimeNanos() else 0L
         try {
           sink.writePacket(
             if (isConfig) WireFraming.TYPE_CONFIG else WireFraming.TYPE_FRAME,
             isKeyframe,
-            seq++,
+            packetSeq,
             bufferInfo.presentationTimeUs,
             bytes,
             0,
@@ -143,6 +159,18 @@ class H264Encoder(width: Int, height: Int, fps: Int, bitrateBps: Int) {
           return
         }
         if (!isConfig) {
+          if (bench) {
+            BenchTelemetry.encoderFrame(
+              ptsUs = bufferInfo.presentationTimeUs,
+              outputNs = outputNs,
+              outputUptimeMs = outputUptimeMs,
+              dequeueWaitUs = (dequeueEndNs - dequeueStartNs) / 1_000L,
+              writeUs = (SystemClock.elapsedRealtimeNanos() - writeStartNs) / 1_000L,
+              size = bytes.size,
+              keyframe = isKeyframe,
+              sequence = packetSeq,
+            )
+          }
           frameCount.incrementAndGet()
         }
       }

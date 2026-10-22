@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <format>
 #include <vector>
 
 #include "log/Log.h"
@@ -11,6 +13,25 @@ namespace phonecam::bridge {
 namespace {
 constexpr std::chrono::milliseconds kReconnectPollInterval{200};
 constexpr std::chrono::milliseconds kReconnectBackoff{2000};
+
+// Opt-in per-frame telemetry; leave normal product logging unchanged.
+bool BenchEnabled() {
+#ifdef _DEBUG
+    static const bool enabled = [] {
+        char value[8]{};
+        const DWORD length = GetEnvironmentVariableA("PHONECAM_BENCH", value, sizeof(value));
+        return length > 0 && value[0] != '0';
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
+std::uint64_t NowNs() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 
 // How many frames after the latency reference are ignored: the pipeline is still warming
 // up (the decoder negotiates its output format, the first keyframe is the expensive one),
@@ -134,8 +155,13 @@ void LiveVideoBridge::Run() {
                                            const phonecam::transport::VideoPacket& pkt) {
                 ++packets;
                 if (pkt.discontinuity && !decoder_.Initialize()) return;
+                const bool bench = BenchEnabled();
+                const std::uint64_t recvNs = bench ? NowNs() : 0;
                 decoder_.Feed(pkt.payload, pkt.payloadSize, pkt.timestampUs,
-                                [this, &frames](const phonecam::decode::DecodedFrame& frame) {
+                                [this, &frames, bench, recvNs](const phonecam::decode::DecodedFrame& frame) {
+#ifdef _DEBUG
+                                    const std::uint64_t decodedNs = bench ? NowNs() : 0;
+#endif
                                     std::lock_guard<std::mutex> outputLock(outputMutex_);
                                     if (!outputEnabled_) return;
                                    // Latency: the wire carries the frame's capture timestamp
@@ -153,7 +179,17 @@ void LiveVideoBridge::Run() {
                                    RecordLatency(frame.timestampUs, nowUs);
                                    ring_.WriteFrame(frame.width, frame.height, frame.timestampUs, frame.nv12);
                                    ++frames;
-                                   framesDecoded_.fetch_add(1, std::memory_order_relaxed);
+                                    framesDecoded_.fetch_add(1, std::memory_order_relaxed);
+#ifdef _DEBUG
+                                    if (bench) {
+                                        const std::uint64_t ringNs = NowNs();
+                                        phonecam::log::Info(std::format(
+                                            "BENCH host ts_us={} recv_ns={} decoded_ns={} ring_ns={} "
+                                            "decode_us={} ring_us={}",
+                                            frame.timestampUs, recvNs, decodedNs, ringNs,
+                                            (decodedNs - recvNs) / 1000, (ringNs - decodedNs) / 1000));
+                                    }
+#endif
                                });
                 const auto now = std::chrono::steady_clock::now();
                 if (now - lastReport >= std::chrono::seconds(5)) {
