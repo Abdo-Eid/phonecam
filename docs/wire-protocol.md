@@ -22,9 +22,9 @@ The PC is always the connecting **client**; the phone's transport listens.
 
 ## Connection bootstrap
 
-1. Phone app starts a foreground service that opens `LocalServerSocket`s bound
-   to abstract names `phonecam_video` and `phonecam_control`. It also binds TCP
-   ports 27183 and 27184 only to an IPv4 address on a detected USB-tethering
+1. The visible phone app binds its control service. Control listens on
+   `phonecam_control`; starting capture opens `phonecam_video`. Corresponding
+   TCP ports 27184 and 27183 bind only to an IPv4 address on a detected USB-tethering
    interface (`rndis*`, `usb*`, or `ncm*`); those TCP listeners are refreshed
    as tethering appears or its address changes.
 2. For USB debugging, the host runs:
@@ -40,8 +40,9 @@ The PC is always the connecting **client**; the phone's transport listens.
    tethered TCP access relies only on reachability of the USB-tether interface.
 5. **Video channel:** phone sends a `CONFIG` packet (SPS/PPS) before the first
    `FRAME`. Host must not attempt to initialize the MF decoder until `CONFIG` is seen.
-6. On disconnect, the host tears down both channels and reconnects over the
-   selected USB path. It sends `RequestKeyframe` after control reconnects.
+6. The host retries the selected USB path after disconnect and requests a
+   keyframe when control is ready again. The phone must be visible for a new
+   session: disconnected hidden services exit rather than wait in the background.
 
 The phone listens on both supported USB paths so either can be selected without
 restarting the app.
@@ -117,10 +118,9 @@ Current protocol: **v8**. v8 removes the former authentication payloads from
 apps must be updated together. See [control-protocol.md](control-protocol.md).
 
 `CapabilityDescriptor.protocol_version` and any future breaking change bump a
-single integer. The host refuses to proceed (shows an "update the app on your
-phone" style error) if the phone's `protocol_version` is newer than what the
-host understands; the phone does the same in reverse if it ever needs to. Until
-v1.0 this number may change freely between phases.
+single integer. The host refuses to proceed when the advertised phone version
+differs from its supported version, whether older or newer. Until v1.0 this
+number may change between development phases.
 
 **The version number is not optional bookkeeping here.** FlatBuffers assigns
 union payload types by declaration order, so *adding a command to

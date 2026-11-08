@@ -8,28 +8,20 @@ pipeline to build on, and there is genuinely useful work left.
 
 This guide covers what you need to know before your first change.
 
-## Before anything else: read the architecture log
+## Start with the current architecture
 
-[`docs/architecture.md`](docs/architecture.md) is not a design document written up front. It is a
-running record of what was actually built, in order, including the bugs found along the way and
-the decisions that later turned out to be wrong. It is long, and it is the single highest-value
-thing to read before touching this codebase.
+[`docs/architecture.md`](docs/architecture.md) summarizes the USB-only pipeline,
+background-service rule, shared-memory/elevation boundary and known portrait
+limitation. It links to the original development journal in Git history instead
+of mixing obsolete implementations into current instructions.
 
-Two examples of why it is worth your time:
-
-- USB tethering was **rejected** early on for two stated reasons. Both later failed — one argument
-  had silently expired as the codebase changed, the other had never actually been tested. It is now
-  the primary transport. The old rejection is still in the document, marked superseded, with the
-  reasoning intact.
-- Portrait resolutions look corrupted in some apps. That is a bug in a Windows component, not in
-  this code, and the document records exactly which three tests isolated it — so nobody repeats
-  that work.
-
-If you change something the log describes, update the log in the same change.
+Use [`docs/build.md`](docs/build.md) for build/deployment and tests,
+[`plan.md`](plan.md) for remaining checks, and dated validation records for what
+was actually observed. Update the relevant document alongside a behavior change.
 
 ## What the project is trying to be
 
-- **USB first.** Not a wireless product. Latency and reliability are the point.
+- **USB only.** Tethering and USB debugging (ADB), not a wireless product.
 - **No root, no vendor lock.** It has to work on an ordinary phone a normal person owns.
 - **Free, with no paid tier.** No watermark, no feature held back.
 - **Honest about its state.** The README and this site say what is unbuilt. Please keep it that way
@@ -62,6 +54,7 @@ git clone https://github.com/Abdo-Eid/phonecam
 cd phonecam
 git submodule update --init --recursive
 
+cmake -S windows -B windows/build -A x64
 cmake --build windows/build --target phonecam-host --config Debug
 cd android && ./gradlew assembleDebug
 ```
@@ -76,9 +69,21 @@ Two things that catch everyone once:
 
 ## Testing your change
 
-This project has no automated test suite. That is a real gap, and adding one would be a welcome
-contribution. Until then, verification is manual and the bar is: **say what you actually
-observed.**
+Run the Android JVM checks and Windows local test executables:
+
+```powershell
+cmake --build windows/build --target phonecam-video-tests phonecam-media-settings-tests --config Debug
+windows/build/host/Debug/phonecam-video-tests.exe
+windows/build/host/Debug/phonecam-media-settings-tests.exe
+cd android
+.\gradlew.bat testDebugUnitTest assembleDebug assembleDebugAndroidTest
+```
+
+For offline measurement analyzers, run `python -m unittest discover -s bench -p
+'test_*.py'` from the repository root. These automated checks do not replace
+real-device transport/lifecycle validation; report what was and was not tested.
+Use the targeted instrumentation commands in `docs/build.md`, not an unfiltered
+device-test run that could include unrelated opt-in data-reset tests.
 
 Some checks worth knowing:
 
@@ -104,14 +109,14 @@ report from different hardware is a genuinely useful contribution even with no c
 - **Match the surrounding code.** This codebase comments the *why* — especially where something
   looks odd because of a real bug that was hit. Terse code with no explanation of a
   non-obvious choice will get review comments asking for it.
-- **Do not silently rewrite history in the docs.** When a documented decision turns out to be
-  wrong, mark it superseded and explain why it failed. That record is the most useful part of
-  this repository.
+- **Preserve evidence when distilling history.** Link to the original commit and
+  keep measured outcomes and caveats. Do not turn historical results into
+  current-build claims or silently convert incomplete checks into passes.
 
 ## Code style
 
-- **C++**: C++20, MSVC. Four spaces, `/W4` clean. Prefer the existing patterns — look at how the
-  three transports mirror each other before inventing a fourth shape.
+- **C++**: C++20, MSVC. Four spaces, `/W4` clean. Prefer the existing ADB and
+  tethered-transport patterns before adding another abstraction.
 - **Kotlin**: two spaces, standard Android conventions.
 - **Comments explain why, not what.** The bar is: could someone six months from now tell whether
   this line is deliberate or accidental?

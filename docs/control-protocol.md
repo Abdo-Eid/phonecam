@@ -14,8 +14,7 @@ supported USB connection, it sends `CapabilityDescriptor`
 is generated from this descriptor — it must never render a control that isn't
 backed by a matching capability, and must never send a command the descriptor
 doesn't support.** This is what keeps the tool honest on a mid-range
-`LIMITED`-hardware-level phone (the reference device, a Redmi Note 8, very
-likely lacks `MANUAL_SENSOR` — see `docs/architecture.md` risk R9): if
+device with limited camera capabilities: if
 `has_manual_sensor = false`, the host must gray out / hide `SetManualExposure`,
 and if `af_modes` doesn't list a mode, that mode isn't offered.
 
@@ -43,7 +42,7 @@ Each is sent inside a `ControlEnvelope` with a fresh, monotonically increasing
 | Command | Camera2 mapping | Notes |
 |---|---|---|
 | `Start` / `Stop` | opens/closes the `CameraCaptureSession` and encoder | `Stop` keeps the control socket alive, just halts the video channel |
-| `StartVideo` | starts a capture session | The phone binds its framed video socket; the host connects over ADB forwarding or USB-tethered TCP. Answered `Ack{Busy}` if the phone is already streaming from a different source |
+| `StartVideo` | starts a capture session | The phone binds its framed video socket; the host connects over ADB forwarding or USB-tethered TCP. Automatic startup cannot clear user Stop; new disconnected background sessions are rejected |
 | `StopVideo` | stops a session started by `StartVideo` | the control channel stays open |
 | `SetResolution` | re-negotiates the `MediaCodec` input `Surface` + repeating request | triggers a new `CONFIG` on the video channel |
 | `SetFps` | `CONTROL_AE_TARGET_FPS_RANGE` (fixed range `[fps, fps]`) | clamp to the resolution's `max_fps` from `Resolution` |
@@ -102,24 +101,24 @@ Each is sent inside a `ControlEnvelope` with a fresh, monotonically increasing
 
 ## Implementation status
 
-Implemented and verified against the real device: control startup
+Implemented controls, exercised on the reference device over the project's history: control startup
 (`StreamIntent` followed by `CapabilityDescriptor`), `SetZoomRatio`, `SetEv`, `SetTorch`,
 `SetFocusMode`, `TapToFocus`, `RequestKeyframe`, `SetBitrate`, `SetLens`
 (with `LensChanged` + `CurrentSettings` confirmation), `StartVideo` /
 `StopVideo`, and `Ack` for all of
-the above. Normal host use is the native tray GUI, including transport changes,
-connection selection and Start/Stop. `windows/host/control/ConsoleControlUi` remains
+the above. Normal host use is the native tray GUI, including connection selection
+and Start/Stop. `windows/host/control/ConsoleControlUi` remains
 a developer command surface alongside it.
 
 **The control channel is durable**: it is owned by the phone's `CaptureService`,
 not by the capture session, so it keeps serving across a video Stop/Start and
-exists while the phone is idle. That is what lets the PC wake a phone that
+exists while the phone is idle and its UI is visible. That lets the PC start a phone that
 isn't streaming yet (`StartVideo`) — a channel that only existed during a
 capture could never receive the command that starts one.
 
 **Not yet implemented** (the phone replies `Ack{Unsupported}`):
-`SetResolution`, `SetFps` (blocked on `windows/vcam` only supporting one
-fixed stream size — see architecture.md), `SetManualExposure`,
+`SetResolution`, `SetFps` (phone capture renegotiation is separate from supported
+virtual-camera output-size negotiation), `SetManualExposure`,
 `SetAutoExposure`, `SetWhiteBalanceMode`, `SetManualWhiteBalance`,
 `SetStabilization` (deferred by choice since Phase 2, not by device
 capability — a live capability probe now shows this device actually
@@ -153,3 +152,7 @@ handler can request video; its watchdog does not restart a stopped stream.
 - `GetStreamIntent` is a camera-free heartbeat every two seconds.
   Six seconds without control replies retires a stale socket and reconnects,
   including while stopped (when no media/stats would otherwise reveal a dead peer).
+
+The durable control channel is not permission to keep disconnected phone work
+alive in the background. Leaving idle/waiting/retry closes the service; losing
+a hidden streaming session also exits. Reopen the phone app to reconnect.

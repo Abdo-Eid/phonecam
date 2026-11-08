@@ -1,5 +1,9 @@
 # Router Wi-Fi versus laptop hotspot — 2026-10-21
 
+> Historical protocol-v4 measurements, not current USB-only behavior. The
+> wireless transport was removed from main. The later investigation closed
+> without acceptable smoothness; see [networking.md](../../networking.md).
+
 This compares the observed network configurations, **not absolute video latency**.
 Both runs use the same PhoneCam protocol-v4 Release host and Redmi Note 8
 (Android 11), RTP/H.264, 1920x1080 at 30 fps, requested bitrate 6 Mbps. Video

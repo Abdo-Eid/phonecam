@@ -1,12 +1,19 @@
 # PhoneCam media-pipeline measurements
 
+**Historical cohorts, 2026-10-20–22.** The tables and caveats below are retained
+as evidence, not current-build performance claims or a test runbook. Main is
+now USB-only; RTP/pairing code and their old test targets have been removed.
+Current validation is in [docs/usb-validation-2026-11-08.md](../docs/usb-validation-2026-11-08.md).
+The original experiment plan/journals are preserved at
+[253bd2d](https://github.com/Abdo-Eid/phonecam/tree/253bd2d/bench).
+
 ## Final status — hotspot work stopped, USB retained (2026-10-22)
 
 - The user reported that clean-IDR recovery removed pixelation, but froze/lagged.
 - Bounded reordering was then reported **better, but still lagging**. The user
   stopped further effort and chose USB as the dependable path. Wireless
   smoothness is **not accepted**; no exact radio/driver root cause was established.
-- The PC retains clean-IDR recovery and a gap-only 12 ms / 64-packet reorder
+- The historical PC candidate retained clean-IDR recovery and a gap-only 12 ms / 64-packet reorder
   policy. No encoder, resolution, bitrate, USB-path or phone-APK change was made
   for these Windows-only fixes. Synthetic picture-hash success is not a live
   smoothness or end-to-end latency claim.
@@ -16,7 +23,8 @@
   validation is **not** claimed passed.
 - Full story, online sources, A/B/offline evidence, unsuccessful adapter trial,
   deployment hashes/backups, final logs and limits: `../networking.md`, especially
-  sections 20–22. Original unfinished media acceptance gaps remain in `../plan.md`.
+  now distilled with links to the original journal. Original media acceptance gaps
+  are summarized below and in `../plan.md`.
 - Raw logs, generated media, private device/network identifiers and room/user
   images remain local in ignored artifact directories. No further live test is active.
 
@@ -197,7 +205,8 @@ registering its per-frame capture callback, and Windows telemetry was gated out
 of Release (media profiles were already Debug-only). No product tuning defaults
 changed. Measured APK/host archived at
 `bench/logs/pre-final-validation-20261022-155113/`; later rebuilt artifacts are
-not substituted into the measured cohorts. Final validation status: `../plan.md`.
+not substituted into the measured cohorts. The historical validation limits
+are recorded below; newer USB build/test results do not validate this old cohort.
 
 ## Closing short optical observation — precision limited
 
@@ -330,7 +339,8 @@ Three consecutive 30 s runs with instrumentation enabled:
 ### Observations
 
 - The pipeline is frame-locked at ~30.33 fps: sensor, encoder, and host counts
-  match 1:1 in all three runs; no pairing misses.
+  are near-matched, with one-frame session-boundary differences; no telemetry
+  pairing misses were reported. This does not prove loss-free image delivery.
 - Phone-side sensor→encoder output is stable at ~96 ms p50 and ~100–102 ms p95.
   This is the dominant measured segment.
 - Host decode is ~6.1–6.3 ms p50; ring write is ~0.2 ms; receive→ring is

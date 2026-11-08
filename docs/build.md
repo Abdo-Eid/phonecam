@@ -10,15 +10,16 @@
 - JDK 21, Android SDK (`ANDROID_HOME`) for the Gradle build
 - `git submodule update --init --recursive` -- pulls in `third_party/reference/VCamSample`
   and `third_party/flatbuffers` (the C++/Java FlatBuffers runtime, vendored because `flatc`'s
-  installed version is newer than any published `flatbuffers-java` Maven artifact -- see
-  `docs/architecture.md`'s Phase 4 section for why)
+  code generator/runtime versions must match; generated code references an
+  exact runtime version rather than an arbitrary Maven release)
 - Inno Setup (winget `JRSoftware.InnoSetup`) -- only needed to build the installer
   (`windows/installer/PhoneCam.iss`), not for day-to-day dev builds. Installs to
   `%LocalAppData%\Programs\Inno Setup 6\ISCC.exe`, not on PATH by default.
 
 ## Windows: host + common + svc (CMake)
 
-```
+```powershell
+cmake -S windows -B windows/build -A x64
 cmake --build D:\work\phonecam\windows\build --target phonecam-host --config Debug
 ```
 
@@ -40,7 +41,7 @@ naturally consume, so it builds via its own MSBuild project:
 **Deploying a vcam change:** the registered DLL
 (`HKLM\SOFTWARE\Classes\CLSID\{d0255f4e-4471-47c4-91fc-0e74dcc93308}\InprocServer32`) points at
 `C:\ProgramData\PhoneCam\phonecam-vcam.dll`, a separate deployed copy -- **not** the MSBuild
-output. `PhoneCamVCam.vcxproj` now has a `PostBuildEvent` (Phase 5) that copies `$(TargetPath)`
+output. `PhoneCamVCam.vcxproj` has a `PostBuildEvent` that copies `$(TargetPath)`
 over that ProgramData copy automatically on every build, best-effort (it silently no-ops if the
 file is locked). So the remaining steps after a rebuild are just:
 
@@ -54,8 +55,8 @@ file is locked). So the remaining steps after a rebuild are just:
 
 ## Windows: installer (Inno Setup)
 
-The installer packages **Release** builds (static CRT, no VC++ redistributable dependency -- see
-`docs/architecture.md`'s Phase 5 section), not the Debug builds the commands above produce:
+The installer packages **Release** builds (static CRT, no VC++ redistributable
+dependency), not the Debug builds the commands above produce:
 
 ```
 cmake --build D:\work\phonecam\windows\build --target phonecam-host --config Release
@@ -70,9 +71,39 @@ standalone once installed, no PATH setup needed. Installing/uninstalling both re
 installer requests elevation itself) since they touch `HKLM`, `ProgramData`, and the Windows
 service.
 
-**Verified on this machine, not on a fresh Windows account** (that's the installer's actual
-roadmap exit criterion, and isn't verifiable here) -- see `docs/architecture.md`'s Phase 5
-section for exactly what was and wasn't checked.
+The older installer was verified on the development machine, not a fresh Windows
+account. The new USB-only installer has not been rebuilt/deployed in the current
+validation run; see [deployment status](usb-validation-2026-11-08.md#deployment-status-checked-after-validation).
+
+### Updating an installed Windows host
+
+**Build, test, and install are separate operations.** Launching
+`windows/build/host/Debug/phonecam-host.exe` tests that executable; it does not
+replace `%ProgramFiles%\PhoneCam\phonecam-host.exe`, which the installed shortcut
+normally launches. The installer also consumes **Release**, not Debug, output;
+an old Release directory is not refreshed by a Debug build.
+
+For a host-only update on a PC that already has the ring service and virtual
+camera installed:
+
+1. Rebuild `phonecam-host` with `--config Release` using the command above.
+2. Exit PhoneCam through its tray menu. Do not run the installed and development
+   hosts at the same time.
+3. Back up the installed host executable, then use an elevated copy operation to
+   replace it with `windows/build/host/Release/phonecam-host.exe`. Use a newly
+   built Release host, not a stale binary or the Debug executable.
+4. Compare source/destination SHA-256 hashes with `Get-FileHash`, then launch the
+   installed shortcut and confirm the running executable path. Verify protocol
+   v8 control and video against the updated phone app.
+
+This host-only update does not require reinstalling the ring service or
+re-registering the unchanged virtual-camera DLL. For a complete installation,
+build all Release components and rebuild/run the Inno Setup package instead.
+Building an installer alone still does not install it.
+
+The Android disconnected-background fix changes only the phone app; it needs no
+additional Windows code change. However, the earlier USB-only/protocol-v8 change
+requires the matching new Windows host, not the older installed host.
 
 ## Android
 
@@ -81,8 +112,7 @@ cd android
 .\gradlew.bat assembleDebug
 ```
 
-**Use PowerShell, not Bash**, for `gradlew.bat` in this environment -- a session hook redirects
-Bash's `gradlew` invocations to a broken sandbox path missing `gradle-wrapper.jar` access.
+Use PowerShell for the Windows `gradlew.bat` commands.
 
 The Kotlin FlatBuffers bindings are generated automatically as part of the build (a Gradle `Exec`
 task in `android/app/build.gradle.kts` invoking `flatc --kotlin`) -- no manual step needed.
@@ -124,6 +154,26 @@ attached phone is not assumed by the local build/test commands above.
 
 Reference-device results and remaining limits are recorded in
 [usb-validation-2026-11-08.md](usb-validation-2026-11-08.md).
+
+### Android background lifecycle regression
+
+Only active, connected video streaming may continue with the phone app hidden.
+Leaving Ready, Connecting, or retry/error exits its service and notification;
+disconnecting a hidden stream also exits instead of retrying in the background.
+Reopen PhoneCam to connect again. This does not change the saved Stop intent.
+
+With the Windows host stopped, run the device regression (no app-data reset):
+
+```powershell
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb shell am instrument -w -e class io.github.abdoeid.phonecam.CaptureServiceLifecycleTest io.github.abdoeid.phonecam.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+The tests cover idle, waiting for video, a real listener-bind failure (retry),
+and deliberate Stop followed by UI unbind. A live host is needed separately to
+verify that connected streaming continues when backgrounded and ends after
+connection loss.
 
 ## Verifying the virtual camera reaches DirectShow apps, not just Media Foundation ones
 

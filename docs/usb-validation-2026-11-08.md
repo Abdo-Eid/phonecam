@@ -34,3 +34,45 @@ are local under `%LocalAppData%\Temp\opencode\phonecam-usb-validation`.
   and the full Compose UI instrumentation suite were not tested in this run.
 - These results do not imply encryption or authentication: tethered control and
   video remain plaintext with no application-level login.
+
+## Follow-up: disconnected background shutdown
+
+Validated the subsequent Android lifecycle change on the same phone:
+
+- JVM background-eligibility checks and both Android APK builds passed.
+- All four `CaptureServiceLifecycleTest` cases passed in three consecutive
+  runs: idle, waiting for a video client, real video-listener bind failure
+  (retry/error), and deliberate Stop. Each checks service exit and notification
+  removal after unbind; the disconnected cases also check that exit does not
+  latch a user Stop.
+- Opening Ready with no host, then going Home, left no active PhoneCam service.
+- Connected tethered streaming continued after Home: DirectShow consumed 90
+  frames at 1080p/30. Reopening and backgrounding again retained the connected
+  foreground service with no UI binding.
+- Terminating the test host while the phone UI was hidden ended the phone
+  service; the saved Stop intent remained false until test cleanup restored
+  the initial Stopped state.
+
+Device testing caught and fixed a late-notification race: notification updates,
+foreground promotion and removal now share a lock, and disconnected/retired
+services cannot repost notifications. Test logs are local under
+`%LocalAppData%\Temp\opencode\phonecam-background-validation`. No app data was
+cleared or camera images saved. These checks used Home/backgrounding and service
+unbind, not a separate physical Recents swipe or screen-lock test.
+
+## Deployment status checked after validation
+
+- **Phone:** the latest Debug app, including the background-shutdown fix, was
+  installed in place. App data was preserved.
+- **PC test executable:** tests launched
+  `windows/build/host/Debug/phonecam-host.exe` directly from this checkout.
+- **Installed PC app:** `C:\Program Files\PhoneCam\phonecam-host.exe` was **not
+  updated**. A read-only audit found its timestamp was 2026-10-22 and its SHA-256
+  matched the old `windows/build/host/Release/phonecam-host.exe`, not the new
+  Debug host. No PC installer or elevated host replacement was performed.
+- The unchanged, previously installed Windows ring service and virtual-camera
+  DLL were used by the development host during validation.
+
+Do not interpret the live test passes as validation of the installed PC copy.
+Rebuild/deploy the matching Release host before using the installed shortcut
+with the updated phone. See [build.md](build.md#updating-an-installed-windows-host).

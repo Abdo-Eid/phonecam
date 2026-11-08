@@ -394,17 +394,17 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
             <a class="btn btn-primary" href="https://github.com/Abdo-Eid/phonecam">
               <span class="t-en">View on GitHub</span><span class="t-ar">افتح على GitHub</span>
             </a>
-            <a class="btn btn-ghost" href="https://github.com/Abdo-Eid/phonecam/blob/master/CONTRIBUTING.md">
+            <a class="btn btn-ghost" href="https://github.com/Abdo-Eid/phonecam/blob/main/CONTRIBUTING.md">
               <span class="t-en">Contributing guide</span><span class="t-ar">دليل المساهمة</span>
             </a>
-            <a class="btn btn-ghost" href="https://github.com/Abdo-Eid/phonecam/blob/master/docs/architecture.md">
-              <span class="t-en">Architecture log</span><span class="t-ar">سجل البنية</span>
+            <a class="btn btn-ghost" href="https://github.com/Abdo-Eid/phonecam/blob/main/docs/architecture.md">
+              <span class="t-en">Architecture</span><span class="t-ar">البنية</span>
             </a>
           </div>
 
       <p class="hero-note">
-        <span class="t-en"><strong>Status:</strong> the whole pipeline works on real hardware and has been tested. There is no installer and no release yet, so for now you build it from source. This page says plainly what is done and what is not.</span>
-        <span class="t-ar"><strong>الحالة:</strong> المسار كامل يعمل على عتاد حقيقي وجرى اختباره. لا يوجد مُثبِّت ولا إصدار جاهز بعد، لذا تبنيه حاليًا من المصدر. تذكر هذه الصفحة بوضوح ما أُنجز وما لم يُنجز.</span>
+        <span class="t-en"><strong>Status:</strong> USB video and controls work on real hardware. An Inno Setup installer is available in source, but fresh-PC installation still needs validation. Building or running a development host does not update an installed copy.</span>
+        <span class="t-ar"><strong>الحالة:</strong> يعمل الفيديو والتحكم عبر USB على عتاد حقيقي. تتوفر شيفرة مُثبِّت Inno Setup، لكن التثبيت على حاسوب نظيف ما زال يحتاج إلى اختبار. بناء نسخة التطوير أو تشغيلها لا يحدّث النسخة المثبّتة.</span>
       </p>
   </div>
 </section>
@@ -435,7 +435,7 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
       <article class="stage">
         <span class="stage-n">03</span>
         <h3><span class="t-en">Transport</span><span class="t-ar">النقل</span></h3>
-        <p><span class="t-en">USB tethering, ADB, or AOA — detected automatically in that order, no setting to choose.</span><span class="t-ar">‏USB tethering أو ADB أو AOA — يُكتشف تلقائيًا بهذا الترتيب، دون أي إعداد يختاره المستخدم.</span></p>
+        <p><span class="t-en">USB tethering first, then USB debugging (ADB). Either path can also be selected from the Windows tray.</span><span class="t-ar">‏USB tethering أولًا، ثم تصحيح USB عبر ADB. ويمكن اختيار أي مسار من قائمة شريط المهام في ويندوز.</span></p>
       </article>
       <article class="stage">
         <span class="stage-n">04</span>
@@ -461,10 +461,10 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
   <div class="wrap">
     <div class="section-head">
       <p class="eyebrow"><span class="t-en">Stage 03</span><span class="t-ar">المرحلة 03</span></p>
-      <h2><span class="t-en">The three transports</span><span class="t-ar">قنوات النقل الثلاث</span></h2>
+      <h2><span class="t-en">Two USB connections</span><span class="t-ar">مساران للاتصال عبر USB</span></h2>
       <p class="lede" style="margin-top:1rem">
-        <span class="t-en">Getting video off an Android phone over USB without root is the hardest part of the project. Three transports exist, and the Windows program picks one automatically at startup.</span>
-        <span class="t-ar">إخراج الفيديو من هاتف أندرويد عبر USB دون صلاحيات root هو أصعب جزء في المشروع. توجد ثلاث قنوات نقل، ويختار برنامج ويندوز إحداها تلقائيًا عند بدء التشغيل.</span>
+        <span class="t-en">Both supported paths carry video and camera controls. The Windows host prefers tethering when available and otherwise uses ADB. Wi-Fi/RTP and AOA are not supported.</span>
+        <span class="t-ar">ينقل المساران الفيديو وأوامر التحكم بالكاميرا. يفضّل برنامج ويندوز مشاركة الاتصال عبر USB عند توفرها، وإلا يستخدم ADB. لا يُدعم Wi-Fi/RTP أو AOA.</span>
       </p>
     </div>
 
@@ -479,7 +479,7 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
         <ul class="spec">
           <li><span class="k"><span class="t-en">Driver to install</span><span class="t-ar">تعريف يُثبَّت</span></span><span class="v v-good"><span class="t-en">None</span><span class="t-ar">لا شيء</span></span></li>
           <li><span class="k"><span class="t-en">Developer Options</span><span class="t-ar">خيارات المطوّر</span></span><span class="v v-good"><span class="t-en">Not needed</span><span class="t-ar">غير مطلوبة</span></span></li>
-          <li><span class="k"><span class="t-en">Latency</span><span class="t-ar">زمن الاستجابة</span></span><span class="v v-good">2–5 ms</span></li>
+          <li><span class="k"><span class="t-en">Earlier link RTT</span><span class="t-ar">زمن الذهاب والعودة المقاس سابقًا</span></span><span class="v v-good">2–5 ms</span></li>
           <li><span class="k"><span class="t-en">Camera controls</span><span class="t-ar">التحكم بالكاميرا</span></span><span class="v v-good"><span class="t-en">Yes</span><span class="t-ar">نعم</span></span></li>
           <li><span class="k"><span class="t-en">Displaces</span><span class="t-ar">يُعطّل</span></span><span class="v v-good"><span class="t-en">Nothing</span><span class="t-ar">لا شيء</span></span></li>
         </ul>
@@ -489,8 +489,8 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
         <span class="card-tag"><span class="t-en">Original path</span><span class="t-ar">المسار الأصلي</span></span>
         <h3><span class="t-en">ADB</span><span class="t-ar">ADB</span></h3>
         <p>
-          <span class="t-en">Forwards a port over the Android Debug Bridge. Reliable and well tested, but the user has to turn on Developer Options first. That is the step the other two transports avoid.</span>
-          <span class="t-ar">يمرّر منفذًا عبر Android Debug Bridge. موثوق ومُختبر جيدًا، لكن على المستخدم تفعيل خيارات المطوّر أولًا. وهذه هي الخطوة التي تتفاداها القناتان الأخريان.</span>
+          <span class="t-en">Forwards local sockets over the Android Debug Bridge. Enable Developer Options and USB debugging, then authorize the PC. USB tethering avoids that setup.</span>
+          <span class="t-ar">يمرّر المقابس المحلية عبر Android Debug Bridge. فعّل خيارات المطوّر وتصحيح USB، ثم اسمح للحاسوب بالاتصال. لا تحتاج مشاركة الاتصال عبر USB إلى هذه الخطوات.</span>
         </p>
         <ul class="spec">
           <li><span class="k"><span class="t-en">Driver to install</span><span class="t-ar">تعريف يُثبَّت</span></span><span class="v v-good"><span class="t-en">None</span><span class="t-ar">لا شيء</span></span></li>
@@ -501,26 +501,15 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
         </ul>
       </article>
 
-      <article class="card" data-rank="fallback">
-        <span class="card-tag"><span class="t-en">Fallback</span><span class="t-ar">احتياطي</span></span>
-        <h3><span class="t-en">AOA</span><span class="t-ar">AOA</span></h3>
-        <p>
-          <span class="t-en">Android Open Accessory mode. Also needs no Developer Options, but Windows has no built-in driver for raw USB access, so one has to be installed. That stops file transfer working until it is removed again.</span>
-          <span class="t-ar">وضع Android Open Accessory. لا يحتاج خيارات المطوّر أيضًا، لكن ويندوز لا يملك تعريفًا مدمجًا يتيح الوصول المباشر إلى USB، فيلزم تثبيت واحد. وهذا يوقف نقل الملفات حتى تتم إزالته.</span>
-        </p>
-        <ul class="spec">
-          <li><span class="k"><span class="t-en">Driver to install</span><span class="t-ar">تعريف يُثبَّت</span></span><span class="v v-warn"><span class="t-en">Yes, one prompt</span><span class="t-ar">نعم، بموافقة واحدة</span></span></li>
-          <li><span class="k"><span class="t-en">Developer Options</span><span class="t-ar">خيارات المطوّر</span></span><span class="v v-good"><span class="t-en">Not needed</span><span class="t-ar">غير مطلوبة</span></span></li>
-          <li><span class="k"><span class="t-en">Latency</span><span class="t-ar">زمن الاستجابة</span></span><span class="v v-good">USB</span></li>
-          <li><span class="k"><span class="t-en">Camera controls</span><span class="t-ar">التحكم بالكاميرا</span></span><span class="v v-bad"><span class="t-en">No — video only</span><span class="t-ar">لا — فيديو فقط</span></span></li>
-          <li><span class="k"><span class="t-en">Displaces</span><span class="t-ar">يُعطّل</span></span><span class="v v-warn"><span class="t-en">File transfer</span><span class="t-ar">نقل الملفات</span></span></li>
-        </ul>
-      </article>
     </div>
 
     <p class="hero-note" style="border-top:none;padding-top:1.6rem;margin-top:0.4rem">
-      <span class="t-en">USB tethering is not wireless. It is a USB cable carrying a network protocol, which is why it has USB latency but needs no driver. It replaced AOA as the recommended transport.</span>
-      <span class="t-ar">‏USB tethering ليس اتصالًا لاسلكيًا. هو كابل USB يحمل بروتوكول شبكة، ولذلك يعطي زمن استجابة USB دون الحاجة إلى أي تعريف. وقد حلّ محلّ AOA كقناة النقل الموصى بها.</span>
+      <span class="t-en">Tethered TCP listeners bind only to the phone's USB-tethering address, not Wi-Fi or cellular. There is no QR pairing or app-layer authentication; control and video are plaintext. Use a trusted PC and link. Both apps must speak protocol v8.</span>
+      <span class="t-ar">ترتبط مقابس TCP بعنوان مشاركة الاتصال عبر USB في الهاتف فقط، لا بعنوان الواي فاي أو شبكة المحمول. لا يوجد اقتران QR أو تحقق من الهوية داخل التطبيق، والبيانات غير مشفّرة. استخدم حاسوبًا واتصالًا موثوقين، وحدّث التطبيقين إلى بروتوكول v8.</span>
+    </p>
+    <p class="hero-note">
+      <span class="t-en"><strong>Background rule:</strong> only connected video streaming continues when the phone app is hidden. Leaving Ready, Connecting, or Retry shuts down its service and notification. A hidden stream also exits after disconnection; reopen PhoneCam to reconnect. Saved Stop intent is unchanged.</span>
+      <span class="t-ar"><strong>قاعدة العمل في الخلفية:</strong> يستمر التطبيق بعد إخفائه فقط عند وجود اتصال وبث فيديو فعلي. إغلاق شاشة الجاهزية أو الاتصال أو إعادة المحاولة يوقف الخدمة والإشعار. وينتهي البث المخفي إذا انقطع الاتصال؛ افتح PhoneCam مجددًا لإعادة الاتصال. لا تتغير حالة الإيقاف المحفوظة.</span>
     </p>
   </div>
 </section>
@@ -569,7 +558,7 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
           </tr>
           <tr>
             <th scope="row"><span class="t-en">Ready for a non-technical user</span><span class="t-ar">جاهز لمستخدم غير تقني</span></th>
-            <td><span class="miss"><span class="t-en">Not yet — no installer, build from source</span><span class="t-ar">ليس بعد — لا مُثبِّت، ويُبنى من المصدر</span></span></td>
+            <td><span class="miss"><span class="t-en">Development-stage; clean-PC installer validation pending</span><span class="t-ar">ما زال قيد التطوير؛ اختبار المُثبِّت على حاسوب نظيف لم يكتمل</span></span></td>
             <td><span class="t-en">Yes</span><span class="t-ar">نعم</span></td>
           </tr>
           <tr>
@@ -609,9 +598,9 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
       <div class="map-row"><div class="map-path">windows/host/</div><div class="map-what"><span class="t-en">C++. <code>phonecam-host.exe</code> — transports, H.264 decode, the tray UI and its controls.</span><span class="t-ar">بلغة <span class="ltr">C++</span>. ملف <code>phonecam-host.exe</code> — قنوات النقل، وفكّ ترميز H.264، وواجهة شريط المهام وأدواتها.</span></div></div>
       <div class="map-row"><div class="map-path">windows/vcam/</div><div class="map-what"><span class="t-en">C++/COM. The <code>MFCreateVirtualCamera</code> media source Windows loads into its own Frame Server.</span><span class="t-ar">بلغة <span class="ltr">C++/COM</span>. مصدر الوسائط <code>MFCreateVirtualCamera</code> الذي يُحمّله ويندوز داخل Frame Server.</span></div></div>
       <div class="map-row"><div class="map-path">windows/common/</div><div class="map-what"><span class="t-en">Shared C++: the cross-process frame ring, wire framing, logging.</span><span class="t-ar">شيفرة <span class="ltr">C++</span> مشتركة: ring buffer الإطارات بين العمليات، وتأطير البيانات، والتسجيل.</span></div></div>
-      <div class="map-row"><div class="map-path">windows/usbdriver/</div><div class="map-what"><span class="t-en">The elevated helper that installs and removes the AOA driver. Only used by the fallback transport.</span><span class="t-ar">أداة مساعدة تعمل بصلاحيات المدير، تثبّت تعريف AOA وتزيله. تُستخدم فقط مع القناة الاحتياطية.</span></div></div>
+      <div class="map-row"><div class="map-path">windows/installer/</div><div class="map-what"><span class="t-en">Inno Setup packaging for the host, ring service, virtual camera, and bundled ADB.</span><span class="t-ar">حزمة Inno Setup لتثبيت برنامج الحاسوب وخدمة الذاكرة المشتركة والكاميرا الافتراضية وADB المرفق.</span></div></div>
       <div class="map-row"><div class="map-path">proto/</div><div class="map-what"><span class="t-en">FlatBuffers schemas — the contract both sides compile against. Change here, change both sides.</span><span class="t-ar">مخططات FlatBuffers — العقد الذي يُبنى عليه الجانبان. أي تغيير هنا يستلزم تعديل الطرفين.</span></div></div>
-      <div class="map-row"><div class="map-path">docs/architecture.md</div><div class="map-what"><span class="t-en">The real history: every phase, every bug found and fixed, and the decisions that were later proven wrong. Start here.</span><span class="t-ar">التاريخ الحقيقي: كل مرحلة، وكل خلل اكتُشف وأُصلح، والقرارات التي ثبت خطؤها لاحقًا. ابدأ من هنا.</span></div></div>
+      <div class="map-row"><div class="map-path">docs/architecture.md</div><div class="map-what"><span class="t-en">Current USB-only design, lifecycle rules and known limits, with links to the original journal in Git history.</span><span class="t-ar">البنية الحالية للاتصال عبر USB، وقواعد دورة الحياة والقيود المعروفة، مع روابط بالسجل الأصلي في تاريخ Git.</span></div></div>
     </div>
   </div>
 </section>
@@ -623,8 +612,8 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
       <p class="eyebrow"><span class="t-en">Contributors</span><span class="t-ar">للمساهمين</span></p>
       <h2><span class="t-en">What needs doing</span><span class="t-ar">ما يحتاج إلى عمل</span></h2>
       <p class="lede" style="margin-top:1rem">
-        <span class="t-en">Open problems, described as they actually are. Each one is covered in more detail in the architecture log.</span>
-        <span class="t-ar">مشكلات مفتوحة، موصوفة كما هي فعلًا. كل واحدة مشروحة بتفصيل أكبر في سجل البنية.</span>
+        <span class="t-en">Open problems, described as they actually are. The architecture summary and current plan separate known limits from unfinished validation.</span>
+        <span class="t-ar">مشكلات مفتوحة، موصوفة كما هي فعلًا. يفصل ملخص البنية والخطة الحالية بين القيود المعروفة والفحوص غير المكتملة.</span>
       </p>
     </div>
 
@@ -636,32 +625,32 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
       </article>
 
       <article class="issue">
-        <h3><span class="t-en">The AOA connection can wedge silently</span><span class="t-ar">اتصال AOA قد يتعلّق بصمت</span></h3>
-        <p><span class="t-en">After a replug, the USB read loop can time out forever without ever reporting the device is gone, so the reconnect logic never fires and the process needs a manual restart. A consecutive-timeout threshold would likely fix it.</span><span class="t-ar">بعد إعادة توصيل الكابل، قد تستمر حلقة القراءة عبر USB في انتهاء المهلة إلى الأبد دون الإبلاغ عن اختفاء الجهاز، فلا تعمل آلية إعادة الاتصال ويحتاج البرنامج إلى إعادة تشغيل يدوية. غالبًا يكفي حدّ أقصى لعدد المهلات المتتالية.</span></p>
-        <div class="tags"><span class="tag" data-t="med"><span class="t-en">Medium</span><span class="t-ar">متوسط</span></span><span class="tag">libusb</span><span class="tag">C++</span></div>
+        <h3><span class="t-en">USB reconnection coverage</span><span class="t-ar">اختبارات إعادة الاتصال عبر USB</span></h3>
+        <p><span class="t-en">The current USB-only build still needs physical unplug/replug and changed-tether-address tests. Keep the phone app visible for reconnect testing; a disconnected hidden app is supposed to exit, not retry forever.</span><span class="t-ar">تحتاج النسخة الحالية إلى اختبار فصل الكابل وإعادة توصيله وتغيّر عنوان مشاركة الاتصال. أبقِ تطبيق الهاتف ظاهرًا لهذه الاختبارات؛ فمن المقصود أن يُغلق التطبيق المخفي عند انقطاع الاتصال، لا أن يعيد المحاولة إلى الأبد.</span></p>
+        <div class="tags"><span class="tag" data-t="med"><span class="t-en">Medium</span><span class="t-ar">متوسط</span></span><span class="tag">USB</span><span class="tag">Android</span></div>
       </article>
 
       <article class="issue">
-        <h3><span class="t-en">The installer is incomplete</span><span class="t-ar">المُثبِّت غير مكتمل</span></h3>
-        <p><span class="t-en">The Inno Setup script does not yet ship <code>libusb-1.0.dll</code> or the USB driver helper, so an installed build would fail to launch. Small, well-defined, and blocking the first real release.</span><span class="t-ar">لا يتضمّن سكربت Inno Setup بعد ملف <code>libusb-1.0.dll</code> ولا أداة تثبيت التعريف، لذا ستفشل النسخة المثبَّتة في العمل. مهمة صغيرة وواضحة، لكنها تعيق أول إصدار حقيقي.</span></p>
+        <h3><span class="t-en">Validate clean installs and upgrades</span><span class="t-ar">اختبار التثبيت النظيف والترقيات</span></h3>
+        <p><span class="t-en">The installer packages Release output, not the Debug host used during development. Rebuild every packaged component, then test installation and upgrades on a clean Windows account. Running a new binary from the checkout does not update the installed shortcut.</span><span class="t-ar">يستخدم المُثبِّت مخرجات Release، لا برنامج Debug المستخدم أثناء التطوير. أعد بناء كل المكوّنات المرفقة، ثم اختبر التثبيت والترقية على حساب ويندوز نظيف. تشغيل نسخة جديدة من المستودع لا يحدّث اختصار النسخة المثبّتة.</span></p>
         <div class="tags"><span class="tag" data-t="start"><span class="t-en">Good first task</span><span class="t-ar">مناسبة للبداية</span></span><span class="tag">Inno Setup</span></div>
       </article>
 
       <article class="issue">
         <h3><span class="t-en">No audio</span><span class="t-ar">لا يوجد صوت</span></h3>
-        <p><span class="t-en">Video only, for now. Synced audio over the same cable is a stated goal and nothing has been built for it. The wire protocol has no audio channel, so this is a design task before it is a coding one.</span><span class="t-ar">فيديو فقط حاليًا. نقل صوت متزامن عبر الكابل نفسه هدف معلن ولم يُبنَ منه شيء. لا يحتوي بروتوكول النقل على قناة صوت، لذا فهي مهمة تصميم قبل أن تكون مهمة برمجة.</span></p>
+        <p><span class="t-en">Video only, for now. The protocol reserves an audio channel, but capture, encoding, synchronization and Windows audio delivery are not implemented.</span><span class="t-ar">فيديو فقط حاليًا. يحجز البروتوكول قناة للصوت، لكن التقاط الصوت وترميزه ومزامنته وإيصاله إلى ويندوز لم تُنفّذ بعد.</span></p>
         <div class="tags"><span class="tag" data-t="hard"><span class="t-en">Hard</span><span class="t-ar">صعب</span></span><span class="tag">Kotlin</span><span class="tag">C++</span></div>
       </article>
 
       <article class="issue">
-        <h3><span class="t-en">Wi-Fi as a transport</span><span class="t-ar">الواي فاي كقناة نقل</span></h3>
-        <p><span class="t-en">The network transport already accepts an explicit address, so Wi-Fi mostly works already — what is missing is discovery and any way to choose it in the UI. Mostly a UX problem.</span><span class="t-ar">تقبل قناة النقل الشبكية عنوانًا صريحًا بالفعل، لذا فالواي فاي يعمل غالبًا — الناقص هو اكتشاف الجهاز وطريقة لاختياره من الواجهة. المشكلة في تجربة الاستخدام أساسًا.</span></p>
+        <h3><span class="t-en">First-time USB guidance</span><span class="t-ar">إرشاد الاستخدام الأول عبر USB</span></h3>
+        <p><span class="t-en">Help new users find USB tethering or authorize ADB, and explain when to reopen the phone app after a disconnected background session exits. Keep the connection flow USB-only and free of QR pairing.</span><span class="t-ar">ساعد المستخدم الجديد على تفعيل مشاركة الاتصال عبر USB أو السماح باتصال ADB، ووضّح متى يعيد فتح التطبيق بعد إغلاقه في الخلفية عند انقطاع الاتصال. يظل الاتصال عبر USB فقط ودون اقتران QR.</span></p>
         <div class="tags"><span class="tag" data-t="start"><span class="t-en">Good first task</span><span class="t-ar">مناسبة للبداية</span></span><span class="tag">C++</span><span class="tag">UX</span></div>
       </article>
 
       <article class="issue">
         <h3><span class="t-en">Tested on one phone</span><span class="t-ar">مُختبر على هاتف واحد</span></h3>
-        <p><span class="t-en">Everything here is verified on a Redmi Note 8 running Android 11. Whether USB tethering is carrier-gated on your device, and whether AOA behaves the same, is genuinely unknown. Reports from other hardware are useful contributions on their own.</span><span class="t-ar">كل ما سبق جرى التحقق منه على هاتف Redmi Note 8 بنظام أندرويد 11. أما إن كان USB tethering مقيَّدًا من مشغّل شبكتك، وهل يتصرّف AOA بالطريقة نفسها، فغير معروف فعلًا. تقارير من أجهزة أخرى تُعدّ مساهمة قيّمة بحدّ ذاتها.</span></p>
+        <p><span class="t-en">Current live checks use a Redmi Note 8 running Android 11. Tether-interface names, carrier restrictions and newer Android foreground-service behavior need testing on other devices.</span><span class="t-ar">تستخدم الاختبارات الحية الحالية هاتف Redmi Note 8 بنظام أندرويد 11. تحتاج أسماء واجهات مشاركة الاتصال وقيود المشغّلين وسلوك الخدمات في إصدارات أندرويد الأحدث إلى اختبار على أجهزة أخرى.</span></p>
         <div class="tags"><span class="tag" data-t="start"><span class="t-en">No code needed</span><span class="t-ar">لا تحتاج برمجة</span></span><span class="tag">Android</span></div>
       </article>
     </div>
@@ -691,6 +680,7 @@ cd phonecam
 git submodule update --init --recursive
 
 # Windows host
+cmake -S windows -B windows/build -A x64
 cmake --build windows/build --target phonecam-host --config Debug
 
 # Android app
@@ -704,10 +694,10 @@ cd android &amp;&amp; ./gradlew assembleDebug</code></pre>
     </p>
 
     <div class="cta-row" style="margin-top:1.5rem">
-      <a class="btn btn-primary" href="https://github.com/Abdo-Eid/phonecam/blob/master/CONTRIBUTING.md">
+      <a class="btn btn-primary" href="https://github.com/Abdo-Eid/phonecam/blob/main/CONTRIBUTING.md">
         <span class="t-en">Read the contributing guide</span><span class="t-ar">اقرأ دليل المساهمة</span>
       </a>
-      <a class="btn btn-ghost" href="https://github.com/Abdo-Eid/phonecam/blob/master/docs/build.md">
+      <a class="btn btn-ghost" href="https://github.com/Abdo-Eid/phonecam/blob/main/docs/build.md">
         <span class="t-en">Build instructions</span><span class="t-ar">تعليمات البناء</span>
       </a>
     </div>
@@ -724,8 +714,8 @@ cd android &amp;&amp; ./gradlew assembleDebug</code></pre>
     </span>
     <span class="topbar-spacer"></span>
     <a href="https://github.com/Abdo-Eid/phonecam">GitHub</a>
-    <a href="https://github.com/Abdo-Eid/phonecam/blob/master/docs/architecture.md"><span class="t-en">Architecture</span><span class="t-ar">البنية</span></a>
-    <a href="https://github.com/Abdo-Eid/phonecam/blob/master/docs/wire-protocol.md"><span class="t-en">Wire protocol</span><span class="t-ar">بروتوكول النقل</span></a>
+    <a href="https://github.com/Abdo-Eid/phonecam/blob/main/docs/architecture.md"><span class="t-en">Architecture</span><span class="t-ar">البنية</span></a>
+    <a href="https://github.com/Abdo-Eid/phonecam/blob/main/docs/wire-protocol.md"><span class="t-en">Wire protocol</span><span class="t-ar">بروتوكول النقل</span></a>
   </div>
 </footer>
 

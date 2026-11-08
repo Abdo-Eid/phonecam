@@ -1,5 +1,9 @@
 # Startup and connection tests — 2026-10-21
 
+> Historical pre-USB-only results. The Wi-Fi/QR/manual-code flows below were
+> removed from main; this matrix is not a current test runbook. Use
+> [current USB/lifecycle validation](usb-validation-2026-11-08.md) instead.
+
 Device: Redmi Note 8, Android 11 / MIUI. Windows Release tray host launched
 normally, without transport command-line flags. Wi-Fi uses the laptop hotspot;
 USB video uses ADB over the attached cable. Each passing case required decoded
@@ -42,4 +46,5 @@ Limitations: this matrix does not test physical QR scanning, AOA, physical cable
 unplug/replug, or a new camera open while the phone is asleep. An already-running
 stream continuing through screen lock is established behavior, not a failed case.
 
-Reproduction: see [build.md](build.md#startup-order-matrix-real-phone-and-tray).
+Historical reproduction instructions:
+[build.md at 253bd2d](https://github.com/Abdo-Eid/phonecam/blob/253bd2d/docs/build.md#startup-order-matrix-real-phone-and-tray).
