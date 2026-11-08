@@ -74,7 +74,7 @@ interface ControlCommandListener {
  */
 class ControlChannel(private val context: Context, private val listener: ControlCommandListener) {
   private val server = ControlSocketServer()
-  private var output: OutputStream? = null
+  @Volatile private var output: OutputStream? = null
   private val stopped = AtomicBoolean(false)
 
   // Guards writes to the control socket -- see sendBytes.

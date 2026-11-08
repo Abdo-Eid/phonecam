@@ -41,8 +41,8 @@ sealed interface CaptureUiState {
 // -- the service must reach startForeground() from within its own onStartCommand.
 //
 // Poll while the UI is visible, independently of startCapture()/stopCapture().
-// Release the binding and polling when hidden; a stopped service then exits,
-// while a started streaming service remains alive. The host can also start the service over
+// Release the binding and polling when hidden; a disconnected/retrying service exits,
+// while connected streaming remains alive. The host can also start capture over
 // either supported USB transport independently of this ViewModel and its Start button, so UI
 // state reflects the service's actual state.
 class MainScreenViewModel(application: Application) : AndroidViewModel(application) {
@@ -175,7 +175,7 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
   override fun onCleared() {
     super.onCleared()
     statsJob?.cancel()
-    // An active started service survives; a stopped service exits with the UI.
+    // Only connected streaming survives; idle/retry/waiting work exits with the UI.
     releaseBinding()
   }
 }

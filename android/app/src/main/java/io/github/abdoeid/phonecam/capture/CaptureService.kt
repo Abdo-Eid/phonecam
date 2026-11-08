@@ -36,6 +36,10 @@ class CaptureService : Service() {
   private lateinit var controller: CaptureController
   private var wakeLock: PowerManager.WakeLock? = null
   private val userCommands = Executors.newSingleThreadExecutor { task -> Thread(task, "Capture-user-actions") }
+  @Volatile private var uiBound = false
+  @Volatile private var backgroundAllowed = false
+  @Volatile private var destroyed = false
+  private val notificationLock = Any()
 
   // The control channel is durable: it outlives any single capture session, so a PC can
   // command a phone that is sitting idle (start a session, ask for a keyframe) and
@@ -97,15 +101,43 @@ class CaptureService : Service() {
   private val binder = LocalBinder()
 
   override fun onBind(intent: Intent): IBinder {
+    uiBound = true
+    backgroundAllowed = false
     if (userStopped) {
-      stopForeground(STOP_FOREGROUND_REMOVE)
+      removeForegroundNotification()
     } else {
-      // A PC-started capture must outlive the UI binding too. A foreground
-      // notification alone does not make a bound service a started service.
-      startService(Intent(this, CaptureService::class.java).setAction(ACTION_KEEP_ALIVE))
+      startForegroundInternal()
     }
+    // Binding alone must not make idle/retrying work survive the visible UI.
+    // Actual capture starts its own service lifetime below.
     return binder
   }
+
+  override fun onRebind(intent: Intent) {
+    uiBound = true
+    backgroundAllowed = false
+    super.onRebind(intent)
+  }
+
+  override fun onUnbind(intent: Intent): Boolean {
+    // Latch eligibility at departure: a late frame/Start must not turn a retry
+    // that was closed into a new background session.
+    backgroundAllowed = canContinueInBackground()
+    uiBound = false
+    if (!backgroundAllowed) {
+      // Removing the started state lets Android destroy the now-unbound service.
+      // onDestroy closes capture/listeners; don't do blocking camera teardown here.
+      Log.i(TAG, "UI hidden without a live stream -- stopping service")
+      removeForegroundNotification()
+      stopSelf()
+    }
+    return true // a surviving stream must see onRebind when the UI comes back
+  }
+
+  private fun canContinueInBackground() = keepCaptureInBackground(
+    controller.state, hasVideoFrames, controlChannel?.isConnected == true,
+    userStopped, lastError != null,
+  )
 
   override fun onCreate() {
     super.onCreate()
@@ -113,10 +145,8 @@ class CaptureService : Service() {
     userStopped = sessionPrefs.getBoolean("stopped", false)
     createNotificationChannel()
     startControlChannel()
-    // Promote before serving any Start. Explicit Stop later removes foreground
-    // status; only the visible UI's binding then keeps control/discovery alive.
-    // Already-running capture remains foreground and survives screen lock.
-    startForegroundInternal()
+    // onBind/Start promotes before any camera work. A cold, unbound service
+    // created by a late Start must not publish a notification before exiting.
   }
 
   /**
@@ -141,9 +171,10 @@ class CaptureService : Service() {
         Log.i(TAG, "the PC disconnected -- stopping the session it asked for")
         stopCaptureInternal()
       } else {
-          // A phone-started capture can also have a tethered TCP viewer. Its video socket
-          // must not outlive the control session associated with that viewer.
+        // A phone-started capture can also have a tethered TCP viewer. Its video socket
+        // must not outlive the control session associated with that viewer.
         controller.disconnectNetworkVideo()
+        if (!uiBound) stopCaptureInternal()
       }
     }
     controlRunning.set(true)
@@ -214,6 +245,8 @@ class CaptureService : Service() {
    * The phone binds its video socket and waits for the PC to connect.
    */
   @Synchronized private fun startSession(width: Int, height: Int, fps: Int, bitrateBps: Int, explicitStart: Boolean = false): Byte {
+    // A reconnect/late Start cannot create waiting work after the user leaves.
+    if (!uiBound && (!backgroundAllowed || !canContinueInBackground())) return AckResult.Busy
     if (explicitStart) persistStopIntent(false)
     if (userStopped) { controlChannel?.sendStreamIntent(); return AckResult.Busy }
     if (controller.state != CaptureState.IDLE) {
@@ -286,6 +319,13 @@ class CaptureService : Service() {
   }
 
   @Synchronized private fun handleCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    // Start/keep-alive intents may already be queued when onUnbind removes the
+    // started state. Do not let their later delivery revive disconnected work.
+    if (intent?.action != ACTION_STOP && !uiBound && (!backgroundAllowed || !canContinueInBackground())) {
+      removeForegroundNotification()
+      stopSelf()
+      return START_NOT_STICKY
+    }
     when (intent?.action) {
       ACTION_KEEP_ALIVE -> {
         if (userStopped) stopSelf() else startForegroundInternal()
@@ -323,20 +363,22 @@ class CaptureService : Service() {
   }
 
   private fun stopCaptureInternal() {
+    backgroundAllowed = false
     controller.stop()
     sessionStartedByPc = false
     releaseWakeLock()
-    if (userStopped) {
-      // While the UI is bound, control stays available for one-tap Start. Once
-      // the UI closes/unbinds, Android destroys this now-unstarted service.
-      stopForeground(STOP_FOREGROUND_REMOVE)
+    if (userStopped || !uiBound) {
+      // With no UI, losing/stopping capture must also end the service, not leave
+      // a foreground reconnect listener. While bound, control can still retry.
+      removeForegroundNotification()
       stopSelf()
     } else {
       updateNotification(streaming = false)
     }
   }
 
-  private fun startForegroundInternal() {
+  private fun startForegroundInternal() = synchronized(notificationLock) {
+    if (destroyed || (!uiBound && !backgroundAllowed)) return@synchronized
     val notification = buildNotification(streaming = controller.state == CaptureState.STREAMING)
     try {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -353,13 +395,21 @@ class CaptureService : Service() {
   }
 
   /** Refreshes the notification's text -- "ready" while idle, "streaming" while capturing. */
-  private fun updateNotification(streaming: Boolean) {
+  private fun updateNotification(streaming: Boolean) = synchronized(notificationLock) {
+    if (destroyed || userStopped || (!uiBound && !backgroundAllowed)) return@synchronized
     try {
       val manager = getSystemService(NotificationManager::class.java)
       manager.notify(NOTIFICATION_ID, buildNotification(streaming))
     } catch (e: Exception) {
       Log.w(TAG, "could not update the notification", e)
     }
+  }
+
+  private fun removeForegroundNotification() = synchronized(notificationLock) {
+    stopForeground(STOP_FOREGROUND_REMOVE)
+    // Also cancel an ordinary updateNotification() posted just before foreground
+    // removal. All three notification operations share this lock with teardown.
+    getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
   }
 
   private fun buildNotification(streaming: Boolean): Notification {
@@ -401,6 +451,9 @@ class CaptureService : Service() {
   }
 
   override fun onDestroy() {
+    destroyed = true
+    uiBound = false
+    backgroundAllowed = false
     userCommands.shutdownNow()
     userCommands.awaitTermination(2, TimeUnit.SECONDS)
     controlRunning.set(false)
@@ -412,7 +465,7 @@ class CaptureService : Service() {
     controlChannel = null
     controller.stop()
     releaseWakeLock()
-    stopForeground(STOP_FOREGROUND_REMOVE)
+    removeForegroundNotification()
     super.onDestroy()
   }
 
