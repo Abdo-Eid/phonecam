@@ -60,19 +60,47 @@ services cannot repost notifications. Test logs are local under
 cleared or camera images saved. These checks used Home/backgrounding and service
 unbind, not a separate physical Recents swipe or screen-lock test.
 
-## Deployment status checked after validation
+## Deployment audit before installation
 
 - **Phone:** the latest Debug app, including the background-shutdown fix, was
   installed in place. App data was preserved.
 - **PC test executable:** tests launched
   `windows/build/host/Debug/phonecam-host.exe` directly from this checkout.
-- **Installed PC app:** `C:\Program Files\PhoneCam\phonecam-host.exe` was **not
-  updated**. A read-only audit found its timestamp was 2026-10-22 and its SHA-256
+- **Installed PC app at that audit:** `C:\Program Files\PhoneCam\phonecam-host.exe`
+  had **not yet been updated**. Its timestamp was 2026-10-22 and its SHA-256
   matched the old `windows/build/host/Release/phonecam-host.exe`, not the new
   Debug host. No PC installer or elevated host replacement was performed.
 - The unchanged, previously installed Windows ring service and virtual-camera
   DLL were used by the development host during validation.
 
-Do not interpret the live test passes as validation of the installed PC copy.
-Rebuild/deploy the matching Release host before using the installed shortcut
-with the updated phone. See [build.md](build.md#updating-an-installed-windows-host).
+Those Debug-host live passes did not validate the then-installed PC copy. The
+subsequent authorized installation below supersedes its deployment status.
+
+## Installed Release host update
+
+At the user's request, rebuilt the Release host from source revision `04ee348`
+and replaced only `C:\Program Files\PhoneCam\phonecam-host.exe` with administrator
+approval. Installed SHA-256 matches the new Release output:
+
+```text
+7924F2420492F505FF2265FF46F78C764EF49C4919EAD03C48B416545714CE4F
+```
+
+- Release video-pacing and media-settings test executables passed.
+- The **installed executable**, launched with `--test-pattern`, delivered 90
+  DirectShow frames at 1920×1080/30 fps without a phone or saved images.
+- That test process exited, and the installed host was launched normally from
+  `C:\Program Files\PhoneCam`; it was left running and waiting for the phone.
+- The ring service and deployed virtual-camera DLL were unchanged, with hashes
+  verified. Connection settings, service configuration and the COM registration
+  snapshots were unchanged. No driver, bundled ADB, service/DLL reinstall or
+  full Inno Setup package installation was performed.
+- The old host executable was backed up and hash-verified. Backup and deployment
+  manifest: `%LocalAppData%\Temp\opencode\phonecam-install-20261108-100806`.
+- The phone was absent from ADB while a tether adapter was present. The phone
+  application was not accepting connections; the user chose to finish without
+  a live phone check. **Installed Release control/video verification remains
+  pending**; do not substitute the earlier Debug-host results for it.
+
+This is an in-place host-only update, not a newly validated complete installer
+or a package-version bump. See [build.md](build.md#updating-an-installed-windows-host).
