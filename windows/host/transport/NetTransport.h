@@ -1,26 +1,22 @@
 #pragma once
 
-// Video over a plain TCP connection to the phone, with no adb and no USB driver of our
-// own -- the transport that USB tethering (RNDIS) and Wi-Fi both reduce to.
+// Video over a plain TCP connection to the phone on USB tethering, with no adb
+// and no custom USB driver.
 //
-// Why this exists alongside AdbVideoTransport and AoaVideoTransport: enabling USB tethering makes
+// Why this exists alongside AdbVideoTransport: enabling USB tethering makes
 // the phone present a network interface, which Windows binds with its own *inbox* RNDIS driver
-// automatically -- no install, no UAC, no libwdi/libusbK, and nothing displaced (unlike the AOA
-// path, which must replace the MTP driver to get raw USB access and therefore breaks file
-// transfer until reverted). Measured live on the reference device: 3-5ms round-trip, i.e. USB
-// latency, not Wi-Fi latency.
+// automatically -- no install, no UAC, and nothing displaced. Measured live on
+// the reference device: 3-5ms round-trip, i.e. USB latency.
 //
-// Discovery is deterministic rather than mDNS/manual: over tethering the phone *is* the PC's
+// Address selection is deterministic rather than mDNS/manual: over tethering the phone *is* the PC's
 // default gateway on that link, so finding it is "enumerate adapters, find the RNDIS/NCM one,
-// read its gateway". An explicit host can still be passed to target the phone over Wi-Fi, or to
-// bypass discovery entirely.
+// read its gateway".
 //
 // No winsock/windows types in this header, same rule as AdbTransport.h: it's included from
 // main.cpp alongside <mfapi.h>, and winsock2.h must be the first Windows header in a translation
 // unit or windows.h's default winsock.h pull-in conflicts with it.
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <string>
 
@@ -45,13 +41,6 @@ public:
     NetVideoTransport(const NetVideoTransport&) = delete;
     NetVideoTransport& operator=(const NetVideoTransport&) = delete;
 
-    // Overrides how the address is found, for the case where the phone isn't on a tethering
-    // link but on Wi-Fi: the provider is consulted on every Connect() (so it can answer with an
-    // address discovered a moment ago) and may return an empty string to say "not yet".
-    // Without one, the tethered-phone discovery is used.
-    void SetHostProvider(std::function<std::string()> provider);
-    // Returns a hex HMAC for the fresh video challenge, or empty while control is not ready.
-    void SetAuthenticator(std::function<std::string(const std::string&)> authenticator);
     void SetPort(uint16_t port);
 
     bool Connect() override;

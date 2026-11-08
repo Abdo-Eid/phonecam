@@ -26,10 +26,9 @@ constexpr size_t kHeaderSize = 20;
 constexpr uint16_t kPort = 27183;
 
 // Deliberately a near-copy of AdbTransport.cpp's equivalents rather than a shared helper: the two
-// differ only in how they obtain a host (adb forward to localhost vs. discovery), and AoaTransport
-// already carries its own third variant with a different framing prelude. Consolidating all three
-// is worth doing if the wire format ever changes; it isn't worth destabilizing two working
-// transports to do it pre-emptively.
+// differ only in how they obtain a host (adb forward to localhost vs. the
+// tethered adapter's gateway). Consolidating them is unnecessary while both
+// paths share the same framing.
 bool ReadExact(SOCKET s, uint8_t* buffer, size_t size) {
     size_t total = 0;
     while (total < size) {
@@ -92,8 +91,6 @@ std::string DiscoverTetheredPhoneAddress() {
 struct NetVideoTransport::Impl {
     std::string host;  // empty == rediscover per Connect()
     uint16_t port = kPort;
-    std::function<std::string()> hostProvider;  // when set, replaces the tethered-phone discovery
-    std::function<std::string(const std::string&)> authenticator;
     SOCKET sock = INVALID_SOCKET;
     bool wsaOk = false;
     // Guards sock, and the cancelled flag lets a Disconnect() arriving mid-Connect() win rather
@@ -127,9 +124,7 @@ bool NetVideoTransport::Connect() {
     // The provider is consulted per attempt: it may have found the phone since the last try
     // (discovery runs in the background), and it may not have -- in which case this attempt
     // simply fails and the reconnect loop tries again.
-    const std::string host = !impl_->host.empty()  ? impl_->host
-                          : impl_->hostProvider     ? impl_->hostProvider()
-                                                   : DiscoverTetheredPhoneAddress();
+    const std::string host = !impl_->host.empty() ? impl_->host : DiscoverTetheredPhoneAddress();
     if (host.empty()) {
         // No tethered phone right now. Non-fatal and expected (tethering off, or unplugged) --
         // the supervise loop retries, same as adb failing to find a streaming phone.
@@ -168,40 +163,6 @@ bool NetVideoTransport::Connect() {
     BOOL noDelay = TRUE;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
 
-    // No media is sent until this connection proves membership in the current control
-    // session. This fixed-size handshake runs once per connection, not per video packet.
-    const DWORD timeoutMs = 2000;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
-    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
-    uint8_t challenge[20];
-    if (!impl_->authenticator || !ReadExact(s, challenge, sizeof(challenge)) ||
-        std::memcmp(challenge, "PCV1", 4) != 0 || impl_->cancelled.load()) {
-        closesocket(s);
-        return false;
-    }
-    static const char hex[] = "0123456789abcdef";
-    std::string nonce;
-    for (size_t i = 4; i < sizeof(challenge); ++i) {
-        nonce.push_back(hex[challenge[i] >> 4]);
-        nonce.push_back(hex[challenge[i] & 15]);
-    }
-    const std::string proof = impl_->authenticator(nonce);
-    size_t sent = 0;
-    while (proof.size() == 64 && sent < proof.size() && !impl_->cancelled.load()) {
-        const int count = send(s, proof.data() + sent, static_cast<int>(proof.size() - sent), 0);
-        if (count <= 0) break;
-        sent += static_cast<size_t>(count);
-    }
-    uint8_t accepted = 0;
-    if (sent != 64 || !ReadExact(s, &accepted, 1) || accepted != 1 || impl_->cancelled.load()) {
-        closesocket(s);
-        phonecam::log::Info("NetVideoTransport: video authorization not ready or rejected");
-        return false;
-    }
-    const DWORD noTimeout = 0;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&noTimeout), sizeof(noTimeout));
-    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&noTimeout), sizeof(noTimeout));
-
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->cancelled.load()) {
         closesocket(s);
@@ -210,14 +171,6 @@ bool NetVideoTransport::Connect() {
     impl_->sock = s;
     phonecam::log::Info(std::format("NetVideoTransport: connected to {}:{}", host, impl_->port));
     return true;
-}
-
-void NetVideoTransport::SetHostProvider(std::function<std::string()> provider) {
-    impl_->hostProvider = std::move(provider);
-}
-
-void NetVideoTransport::SetAuthenticator(std::function<std::string(const std::string&)> authenticator) {
-    impl_->authenticator = std::move(authenticator);
 }
 
 void NetVideoTransport::SetPort(uint16_t port) { impl_->port = port; }

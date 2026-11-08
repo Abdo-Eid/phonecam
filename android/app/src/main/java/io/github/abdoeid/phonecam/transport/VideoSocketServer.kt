@@ -9,27 +9,23 @@ import android.system.StructPollfd
 import android.util.Log
 import java.io.IOException
 import java.io.OutputStream
-import java.net.InetSocketAddress
-import java.net.ServerSocket
 import java.net.Socket
-import java.net.SocketTimeoutException
 
 /**
  * Listens for the PC's video connection on **two** listeners at once, returning whichever one
- * connects first (network clients must authenticate before they are returned):
+ * connects first:
  *
  *  - the `phonecam_video` abstract socket, bridged via `adb forward tcp:27183
  *    localabstract:phonecam_video` (the USB path, needs USB debugging), and
- *  - a plain TCP listener on [tcpPort], which a PC reaches directly over **USB
- *    tethering** (RNDIS: the phone is the PC's default gateway on that link, ~3-5ms round trip)
- *    or over Wi-Fi -- no adb, no Developer Options, and no Windows driver install at all, since
- *    Windows binds its own inbox RNDIS driver automatically.
+ *  - a plain TCP listener on [tcpPort], which a PC reaches over **USB tethering**
+ *    (RNDIS/NCM: the phone is the PC's gateway on that link, with no custom driver).
  *
- * Listening on both is deliberate: it means the user never picks a mode. Whichever way the PC
- * can reach the phone, it just works, and the app needs no transport toggle in its UI.
+ * Listening on both is deliberate: the PC uses either the ADB-forwarded socket or the tethered
+ * network interface, depending on the selected USB connection.
  *
- * The TCP bind is best-effort -- if it fails (port busy, permission), the abstract socket alone
- * still works exactly as before, and vice versa. Only failing *both* is fatal.
+ * The TCP listener binds only to a detected USB-tethering interface address. It is refreshed
+ * while accepting, so tethering may be enabled after the service starts. If unavailable, ADB
+ * remains usable.
  *
  * [accept] polls with a short timeout and re-checks its own cancellation flag between polls,
  * rather than blocking indefinitely on the plain accept() call and depending entirely on [close]
@@ -42,11 +38,10 @@ import java.net.SocketTimeoutException
 class VideoSocketServer(
   private val name: String = "phonecam_video",
   private val tcpPort: Int = DEFAULT_TCP_PORT,
-  private val authenticateTcp: (Socket) -> Boolean = { false },
 ) {
   private var serverSocket: LocalServerSocket? = null
   private var clientSocket: LocalSocket? = null
-  private var tcpServer: ServerSocket? = null
+  private val tcpListener = TetheredTcpListener(tcpPort, TCP_BACKLOG, TAG)
   @Volatile private var tcpClient: Socket? = null
 
   /**
@@ -66,24 +61,12 @@ class VideoSocketServer(
    * Throws only if BOTH listeners fail to bind -- one working listener is enough to serve a PC.
    */
   fun open(isCancelled: () -> Boolean = { false }) {
-    // TCP first: it binds instantly, so it's ready to serve even if the abstract socket below
-    // spends its full retry budget losing a rebind race.
-    tcpServer =
-      try {
-        ServerSocket().apply {
-          reuseAddress = true
-          bind(InetSocketAddress(tcpPort), TCP_BACKLOG)
-          soTimeout = POLL_TIMEOUT_MS
-        }
-      } catch (e: IOException) {
-        Log.w(TAG, "$name: TCP bind on port $tcpPort failed, abstract socket only", e)
-        null
-      }
+    tcpListener.open()
 
     var lastError: IOException? = null
     repeat(MAX_BIND_ATTEMPTS) {
       if (isCancelled()) {
-        closeTcpServer()
+        tcpListener.close()
         throw IOException("$name: open() cancelled")
       }
       try {
@@ -95,10 +78,11 @@ class VideoSocketServer(
       }
     }
 
-    if (tcpServer != null) {
-      Log.w(TAG, "$name: abstract socket bind failed, serving over TCP only", lastError)
+    if (tcpListener.isBound) {
+      Log.w(TAG, "$name: abstract socket bind failed, serving over USB-tethered TCP only", lastError)
       return
     }
+    Log.w(TAG, "$name: abstract socket bind failed", lastError)
     throw lastError ?: IOException("failed to bind $name")
   }
 
@@ -114,8 +98,7 @@ class VideoSocketServer(
    */
   fun accept(isCancelled: () -> Boolean = { false }): OutputStream {
     val local = serverSocket
-    val tcp = tcpServer
-    if (local == null && tcp == null) throw IOException("$name: accept() with no bound listener")
+    if (local == null && !tcpListener.isBound) throw IOException("$name: accept() with no bound listener")
 
     while (!isCancelled()) {
       if (local != null) {
@@ -139,23 +122,15 @@ class VideoSocketServer(
         }
       }
 
-      if (tcp != null) {
+      if (!isCancelled()) {
         try {
-          val socket = tcp.accept()
+          val socket = tcpListener.accept(POLL_TIMEOUT_MS) ?: continue
           // Video packets are latency-sensitive and already framed -- never let Nagle hold a
           // small tail back waiting for more data to coalesce with.
           socket.tcpNoDelay = true
           tcpClient = socket
-          if (!authenticateTcp(socket) || isCancelled()) {
-            Log.w(TAG, "$name: rejected unauthorized TCP video connection")
-            socket.close()
-            tcpClient = null
-            continue
-          }
           Log.i(TAG, "$name: accepted over TCP from ${socket.inetAddress?.hostAddress}")
           return socket.getOutputStream()
-        } catch (_: SocketTimeoutException) {
-          // Normal: nothing connected within soTimeout, fall through and re-check cancellation.
         } catch (e: IOException) {
           if (!isCancelled()) throw e  // a real error, not close() racing us during teardown
         }
@@ -180,7 +155,7 @@ class VideoSocketServer(
     } catch (_: Exception) {
       // best-effort teardown
     }
-    closeTcpServer()
+    tcpListener.close()
     clientSocket = null
     tcpClient = null
   }
@@ -192,15 +167,6 @@ class VideoSocketServer(
     } catch (_: IOException) {
       // already disconnected
     }
-  }
-
-  private fun closeTcpServer() {
-    try {
-      tcpServer?.close()
-    } catch (_: Exception) {
-      // best-effort teardown
-    }
-    tcpServer = null
   }
 
   private companion object {

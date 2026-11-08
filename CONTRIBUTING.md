@@ -44,7 +44,6 @@ If you change something the log describes, update the log in the same change.
 | `windows/vcam/` | C++/COM. The `MFCreateVirtualCamera` media source, loaded by Windows' Frame Server. |
 | `windows/common/` | Shared C++: cross-process frame ring, wire framing, logging. |
 | `windows/svc/` | A tiny service that owns the shared-memory ring's lifetime. |
-| `windows/usbdriver/` | Elevated helper that installs/removes the AOA driver. Fallback transport only. |
 | `proto/` | FlatBuffers schemas — the contract both sides compile against. |
 | `docs/` | Architecture log, protocol specs, build instructions, and this project's website. |
 

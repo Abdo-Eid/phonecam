@@ -10,10 +10,7 @@ import android.util.Log
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
-import java.net.InetSocketAddress
-import java.net.ServerSocket
 import java.net.Socket
-import java.net.SocketTimeoutException
 
 /**
  * Listens for the PC's control connection on the `phonecam_control` abstract socket (bridged via
@@ -24,10 +21,8 @@ import java.net.SocketTimeoutException
  * Bidirectional (unlike [VideoSocketServer]): the PC sends commands, the phone sends
  * capabilities/telemetry back on the same connection.
  *
- * The TCP listener is what makes the camera controls (lens/zoom/exposure/torch/focus) work
- * without USB debugging at all -- over AOA they were unreachable, because AOA only ever carried
- * video and this channel had no route to the phone. Over USB tethering both channels are just
- * TCP to the same device, so control comes back for free.
+ * The TCP listener carries camera controls over USB tethering. Both control and video use TCP
+ * to the same tethered phone.
  */
 class ControlSocketServer(
   private val name: String = "phonecam_control",
@@ -35,40 +30,22 @@ class ControlSocketServer(
 ) {
   private var serverSocket: LocalServerSocket? = null
   private var clientSocket: LocalSocket? = null
-  private var tcpServer: ServerSocket? = null
+  private val tcpListener = TetheredTcpListener(tcpPort, TCP_BACKLOG, TAG)
   private var tcpClient: Socket? = null
 
-  /**
-   * The address of the most recently accepted TCP client, or null if the
-   * connection came through the abstract socket (the adb-forward path, where
-   * the "peer" is the phone's own adb daemon and its address is meaningless).
-   *
-   * This is how the wireless session finds its destination: the PC connects
-   * over TCP and the phone then streams RTP back to this address -- no
-   * discovery protocol, no address typed on the phone.
-   */
+  /** The PC address for tethered TCP, or null for an ADB-forwarded abstract socket. */
   var lastAcceptedAddress: String? = null
     private set
 
-  // isCancelled / retry budget / both-listeners rationale: see VideoSocketServer.open()'s doc
-  // comment -- same reasoning, same fix, same best-effort TCP bind.
+  // The USB-tethered listener binds only to the detected tethering interface. The abstract
+  // socket remains available independently for USB debugging (ADB).
   fun open(isCancelled: () -> Boolean = { false }) {
-    tcpServer =
-      try {
-        ServerSocket().apply {
-          reuseAddress = true
-          bind(InetSocketAddress(tcpPort), TCP_BACKLOG)
-          soTimeout = POLL_TIMEOUT_MS
-        }
-      } catch (e: IOException) {
-        Log.w(TAG, "$name: TCP bind on port $tcpPort failed, abstract socket only", e)
-        null
-      }
+    tcpListener.open()
 
     var lastError: IOException? = null
     repeat(MAX_BIND_ATTEMPTS) {
       if (isCancelled()) {
-        closeTcpServer()
+        tcpListener.close()
         throw IOException("$name: open() cancelled")
       }
       try {
@@ -80,8 +57,8 @@ class ControlSocketServer(
       }
     }
 
-    if (tcpServer != null) {
-      Log.w(TAG, "$name: abstract socket bind failed, serving over TCP only", lastError)
+    if (tcpListenerIsBound()) {
+      Log.w(TAG, "$name: abstract socket bind failed, serving over USB-tethered TCP only", lastError)
       return
     }
     throw lastError ?: IOException("failed to bind $name")
@@ -90,8 +67,7 @@ class ControlSocketServer(
   // isCancelled / alternating-poll rationale: see VideoSocketServer.accept()'s doc comment.
   fun accept(isCancelled: () -> Boolean = { false }): Pair<InputStream, OutputStream> {
     val local = serverSocket
-    val tcp = tcpServer
-    if (local == null && tcp == null) throw IOException("$name: accept() with no bound listener")
+    if (local == null && !tcpListenerIsBound()) throw IOException("$name: accept() with no bound listener")
 
     while (!isCancelled()) {
       if (local != null) {
@@ -116,23 +92,16 @@ class ControlSocketServer(
         }
       }
 
-      if (tcp != null) {
+      if (!isCancelled()) {
         try {
-          val socket = tcp.accept()
+          val socket = tcpListener.accept(POLL_TIMEOUT_MS) ?: continue
           // Control messages are small and latency-sensitive (a tray click should apply now, not
           // whenever Nagle decides enough bytes have accumulated).
           socket.tcpNoDelay = true
-          // A read timeout, so a peer that connects and then says nothing cannot hold the
-          // session (and the phone's only control listener) forever. The control channel's
-          // receive loop treats the timeout as "nothing yet" and keeps waiting; the pairing
-          // handshake is what gives up on it.
-          socket.soTimeout = READ_TIMEOUT_MS
           tcpClient = socket
           lastAcceptedAddress = socket.inetAddress?.hostAddress
           Log.i(TAG, "$name: accepted over TCP from ${socket.inetAddress?.hostAddress}")
           return socket.getInputStream() to socket.getOutputStream()
-        } catch (_: SocketTimeoutException) {
-          // Normal: nothing connected within soTimeout, fall through and re-check cancellation.
         } catch (e: IOException) {
           if (!isCancelled()) throw e
         }
@@ -158,12 +127,6 @@ class ControlSocketServer(
     lastAcceptedAddress = null
   }
 
-  fun finishAuthentication() {
-    // Normal framed reads must not time out midway through an envelope: retrying from
-    // its prefix would lose framing. The bounded timeout is only for the handshake.
-    tcpClient?.soTimeout = 0
-  }
-
   fun close() {
     closeClient()
     try {
@@ -172,17 +135,10 @@ class ControlSocketServer(
       // best-effort teardown
     }
     serverSocket = null
-    closeTcpServer()
+    tcpListener.close()
   }
 
-  private fun closeTcpServer() {
-    try {
-      tcpServer?.close()
-    } catch (_: Exception) {
-      // best-effort teardown
-    }
-    tcpServer = null
-  }
+  private fun tcpListenerIsBound() = tcpListener.isBound
 
   private companion object {
     const val TAG = "ControlSocketServer"
@@ -195,8 +151,5 @@ class ControlSocketServer(
     const val MAX_BIND_ATTEMPTS = 30
     const val BIND_RETRY_DELAY_MS = 100L
     const val POLL_TIMEOUT_MS = 200
-
-    // How long a read waits before giving up and letting the caller re-check its state.
-    const val READ_TIMEOUT_MS = 10_000
   }
 }

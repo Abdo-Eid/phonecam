@@ -6,16 +6,8 @@ import java.io.OutputStream
 /**
  * Where the encoder's wire-framed packets go. This is the transport seam
  * H264Encoder/CaptureController program against: every byte that leaves the
- * encoder passes through [writePacket], so a new transport only needs to
- * implement this interface -- no encoder/controller change (that decoupling is
- * what let the AOA transport and now the RTP transport
- * work: the AOA path tags one write() call as the video channel, RTP turns
- * each framed packet into one or more UDP datagrams).
- *
- * Packet identity (type/keyframe/seq/pts) travels as arguments, not hidden
- * inside a byte buffer -- [RtpVideoSink] needs the timestamps and keyframe
- * info itself, and an OutputStream-based sink would otherwise have to parse
- * the 20-byte header back out of its own bytes to recover them.
+ * encoder passes through [writePacket], keeping the encoder independent of
+ * socket setup and lifecycle.
  */
 interface VideoPacketSink {
   /**
@@ -39,23 +31,15 @@ interface VideoPacketSink {
   )
 
   /**
-   * Releases this sink's own resources (e.g. an open UDP socket). Called by
-   * CaptureController.stop() on teardown. Default no-op: stream-backed sinks
-   * must NOT close the underlying stream here -- the socket's owner
-   * (VideoSocketServer / AoaTransport) tears those down itself, and closing an
-   * owner-held stream from two directions is exactly the reentrancy shape this
-   * project has already been bitten by twice (see CaptureController.stop()'s
-   * comments).
+   * Releases resources owned by the sink. The stream's socket owner
+   * ([VideoSocketServer]) performs socket teardown.
    */
   fun close() {}
 }
 
 /**
- * Adapter for transports whose packets already travel as OutputStream writes:
- * USB (abstract socket / TCP via VideoSocketServer.accept) and the AOA
- * accessory pipe. Delegates to [WireFraming], preserving that contract exactly
- * (including the single-write-per-packet guarantee AoaTransport's
- * channel-tagging wrapper relies on).
+ * Adapter for ADB abstract sockets and tethered TCP via [VideoSocketServer.accept].
+ * Delegates to [WireFraming].
  */
 class OutputStreamVideoSink(private val out: OutputStream) : VideoPacketSink {
   override fun writePacket(

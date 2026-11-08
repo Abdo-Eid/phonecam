@@ -11,18 +11,13 @@
 #include "control/ControlChannel.h"
 
 namespace phonecam::connection {
-enum class Mode { Automatic, Adb, Aoa, Tethered, WifiRtp, WifiTcp, Disconnected };
-enum class State { Disconnected, Connecting, Pairing, WaitingForVideo, Streaming, Stopped, Error };
+enum class Mode { Automatic, Adb, Tethered, Disconnected };
+enum class State { Disconnected, Connecting, WaitingForVideo, Streaming, Stopped, Error };
 struct Target {
     Mode mode = Mode::Automatic;
     std::string address;
-    std::string pairingCode;
-    std::string clientId;
-    std::string phoneId;
     uint16_t controlPort = 27184;
     uint16_t videoPort = 27183;
-    uint16_t rtpPort = 27185;
-    bool remember = false;
 };
 struct Snapshot {
     Mode mode = Mode::Disconnected;
@@ -70,7 +65,6 @@ private:
     std::atomic<bool> ready_{false};
     std::atomic<bool> connected_{false};
     std::atomic<bool> failed_{false};
-    std::atomic<bool> rememberFailed_{false};
     std::atomic<bool> paused_{false};       // the user stopped it on this PC
     std::atomic<bool> phoneStopped_{false}; // the user stopped it on the phone
     std::atomic<bool> startNeeded_{false};

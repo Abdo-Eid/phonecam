@@ -12,7 +12,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.abdoeid.phonecam.capture.CaptureService
 import io.github.abdoeid.phonecam.capture.CaptureState
-import io.github.abdoeid.phonecam.control.TrustedPcs
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -43,27 +42,20 @@ sealed interface CaptureUiState {
 //
 // Poll while the UI is visible, independently of startCapture()/stopCapture().
 // Release the binding and polling when hidden; a stopped service then exits,
-// while a started streaming service remains alive. CaptureService can also be started by MainActivity's
-// AOA accessory-attach handling (ACTION_START_AOA), entirely independent of this ViewModel and
-// its Start button, so uiState needs to reflect the service's real state regardless of what
-// triggered it. Previously, an AOA-triggered session would stream successfully while this
-// ViewModel kept reporting stale Idle indefinitely, since nothing had ever called startCapture()
-// to kick off polling.
+// while a started streaming service remains alive. The host can also start the service over
+// either supported USB transport independently of this ViewModel and its Start button, so UI
+// state reflects the service's actual state.
 class MainScreenViewModel(application: Application) : AndroidViewModel(application) {
   private val _uiState = MutableStateFlow<CaptureUiState>(CaptureUiState.Idle)
   val uiState: StateFlow<CaptureUiState> = _uiState.asStateFlow()
-  val pairedPcs = MutableStateFlow<List<TrustedPcs.Pc>>(emptyList())
-  val pairingMessage = MutableStateFlow("")
   val connectedPc = MutableStateFlow("")
   private val notices = Channel<String>(Channel.BUFFERED)
   val notifications = notices.receiveAsFlow()
   private var announcedStream = false
-  private var lastPairStatus = ""
 
   private var boundService: CaptureService? = null
   private var isBound = false
   private var statsJob: Job? = null
-  private var scanningQr = false
 
   private val connection =
     object : ServiceConnection {
@@ -79,17 +71,9 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
   init { bindUi() }
 
   private fun startPolling() {
-    val context = getApplication<Application>()
     statsJob =
       viewModelScope.launch {
         while (true) {
-          pairedPcs.value = TrustedPcs(context).list()
-          val pairStatus = TrustedPcs.status()
-          if (pairStatus.isNotEmpty() && pairStatus != lastPairStatus) {
-            pairingMessage.value = pairStatus
-            lastPairStatus = pairStatus
-            if (pairStatus.startsWith("Paired with")) notices.trySend(pairStatus)
-          }
           val service = boundService
           if (service == null) {
             // Bind hasn't completed yet -- init{} kicked it off, but onServiceConnected is async.
@@ -107,7 +91,7 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
           } else {
             _uiState.value =
               when (service.state) {
-                CaptureState.IDLE -> if (connectedPc.value.isNotEmpty() || TrustedPcs.isPairingPending())
+                CaptureState.IDLE -> if (connectedPc.value.isNotEmpty())
                   CaptureUiState.WaitingForConnection else CaptureUiState.Idle
                 CaptureState.WAITING_FOR_CONNECTION -> CaptureUiState.WaitingForConnection
                 // Quantized to the precision OsdReadout actually renders -- whole seconds
@@ -145,7 +129,6 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     bitrateBps: Int = 6_000_000,
     lensFacing: Int = CameraCharacteristics.LENS_FACING_BACK,
   ) {
-    if (scanningQr) return
     _uiState.value = CaptureUiState.WaitingForConnection
     val context = getApplication<Application>()
     val intent =
@@ -168,26 +151,6 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     notices.trySend("Stopped")
   }
 
-  fun beginQrScan(): Boolean {
-    val service = boundService ?: run { pairingMessage.value = "PhoneCam is starting. Try Scan PC QR again."; return false }
-    scanningQr = true
-    TrustedPcs.cancelPending()
-    pairingMessage.value = ""
-    service.beginQrScan()
-    return true
-  }
-  fun qrScanned(payload: String?) {
-    try {
-      if (payload != null) TrustedPcs(getApplication()).scan(payload)
-    } catch (_: IllegalArgumentException) {
-      pairingMessage.value = "This is not a valid PhoneCam PC QR code."
-    } finally {
-      scanningQr = false
-      boundService?.endQrScan()
-    }
-  }
-  fun forgetPc(id: String) { boundService?.forgetPc(id) }
-
   fun bindUi() {
     if (isBound) return
     val context = getApplication<Application>()
@@ -196,8 +159,6 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
   }
 
   fun unbindUi() {
-    // The scanner is another PhoneCam activity, not an app exit.
-    if (scanningQr) return
     releaseBinding()
   }
 

@@ -23,48 +23,31 @@ So PhoneCam plays that same architecture straight, and competes on what the paid
 ```
 Android app                     USB                  Windows host              Virtual camera
 Camera2 → MediaCodec   ──►  USB tethering  ──►   Media Foundation    ──►   MFCreateVirtualCamera
-(H.264, zero-copy)          / ADB / AOA          H.264 decode              seen by ALL apps
-     ▲       / Wi-Fi (RTP)                         │
-     └──────────────── control channel (bidirectional) ┘
+(H.264, zero-copy)          or USB debugging     H.264 decode              seen by ALL apps
+     └────────────────── control channel (bidirectional) ───────────────────┘
 ```
 
-The phone captures and hardware-encodes video, streams it over USB (or Wi-Fi), and a Windows host process decodes it and feeds a registered [`MFCreateVirtualCamera`](https://learn.microsoft.com/en-us/windows/win32/api/mfvirtualcamera/) media source — which Windows' Frame Server serves to both Media Foundation apps (Chrome, Windows Camera, new Teams) and DirectShow apps (Zoom, classic OBS) at once. A bidirectional control channel carries camera commands (PC → phone) and capabilities/telemetry (phone → PC).
+The phone captures and hardware-encodes video over USB, and a Windows host process decodes it and feeds a registered [`MFCreateVirtualCamera`](https://learn.microsoft.com/en-us/windows/win32/api/mfvirtualcamera/) media source — which Windows' Frame Server serves to both Media Foundation apps (Chrome, Windows Camera, new Teams) and DirectShow apps (Zoom, classic OBS) at once. A bidirectional control channel carries camera commands (PC → phone) and capabilities/telemetry (phone → PC).
 
-Three USB transports exist side by side, auto-detected at startup in this order:
+PhoneCam supports two USB connections:
 
-- **USB tethering** (the default when available) — flip the phone's USB tethering toggle and the phone presents a network interface, which Windows binds with its own built-in driver. Both video *and* camera controls run over it, with no Developer Options, **no driver to install, and nothing else on the phone displaced**. Measured at 2-5ms round-trip: USB latency, not Wi-Fi latency. This is the path to use.
-- **ADB** — needs Developer Options → USB debugging on. The original, fully proven path; still the fallback when tethering isn't available but debugging is.
-- **AOA** (Android Open Accessory) — no Developer Options either, but it needs a Windows driver bound to the phone (handled automatically, one admin prompt, no Zadig) which makes file transfer unavailable until reverted, and it carries video only. Kept as the last resort for devices where the carrier gates USB tethering.
+- **USB tethering** — enable USB tethering on the phone. Windows uses its built-in network driver; video and camera controls work without Developer Options or a custom driver. This is preferred when the tethered link is available.
+- **USB debugging (ADB)** — enable Developer Options → USB debugging. The host uses ADB forwarding over the authorized local ADB connection.
 
-**Wi-Fi: open the laptop tray app → Connect over Wi-Fi → scan its QR inside PhoneCam.**
-The pairing window closes when the pairing is saved; video arrival produces a brief
-Connected notification. Both devices remember the pairing, including across IP changes.
-No terminal, cable, driver, or Developer Options is needed. Use the same Wi-Fi or laptop
-hotspot. The normal path is RTP/H.264 over UDP; **Use code instead** also offers TCP.
-When disconnected, PhoneCam directly offers **Scan PC QR**, **Use pairing code**,
-and **Connect with USB**—no Settings detour, even with a remembered PC.
-While connected, change-PC and pairing controls live in **Connection settings**.
-**Stop stays stopped until Start**, retaining the pairing and the Windows virtual camera.
-**Video is deliberately unencrypted:** authenticated access does not prevent interception.
-See [security.md](docs/security.md) for credentials and accepted limits. CLI transport
-flags remain available for development, not the normal connection workflow.
+The host automatically selects tethering when available, otherwise it uses ADB. You can also select either path from the Windows tray menu. There is no QR pairing or application-level authentication. Tethered TCP listeners bind only to the phone's USB-tethering interface; ADB keeps its authorized local sockets. **Stop stays stopped until Start**, and the Windows virtual camera remains registered. Tethered control and video are plaintext and unauthenticated, so use a trusted, directly connected USB host.
+See [security.md](docs/security.md) for the trust boundary and accepted limits. CLI transport
+overrides `--net` and `--adb` remain available for development.
 
 Measured on the reference phone (Redmi Note 8, Android 11), with the phone on the laptop's Windows Mobile Hotspot — one radio hop, not two:
 
 | Transport | Reference-relative timing (not absolute latency) |
 |---|---|
 | USB (adb) | 1–2 ms |
-| Wi-Fi, RTP over UDP | 2–4 ms |
-| Wi-Fi, framed TCP | 4–6 ms |
 
 These figures measure changes in delay relative to a reference frame, not absolute camera-to-PC or glass-to-glass latency. The clock-offset calculation also cancels the reference frame's pipeline delay; absolute latency still needs a separate measurement.
 
-A separate [router Wi-Fi versus laptop-hotspot measurement](docs/measurements/2026-10-21-wireless-links.md)
-compares network RTT, delivery rate, and loss while streaming; it is not a glass-to-glass latency test.
-
 Full design and phased roadmap: [`docs/architecture.md`](docs/architecture.md).
-Current execution plan and explicit security tradeoffs: [`docs/plan.md`](docs/plan.md).
-Network protection and accepted plaintext-video limits: [`docs/security.md`](docs/security.md).
+Network trust boundary and accepted plaintext limits: [`docs/security.md`](docs/security.md).
 
 ## Status
 
@@ -75,16 +58,14 @@ Not yet a finished product — actively developed, most of the core pipeline wor
 - Live camera controls from the PC (zoom, exposure, focus incl. tap-to-focus, torch, lens switch, bitrate) with capability-driven UI (never shows a control the phone doesn't actually support).
 - Adaptive bitrate, thermal-aware, with live stats telemetry.
 - Reconnect/robustness: survives USB replug and the phone backgrounding without restarting either side.
-- **USB tethering transport — the one to use.** No Developer Options, no driver install, no admin prompt, and nothing else on the phone displaced. Flip the phone's USB tethering toggle and open the app. Windows binds its own built-in RNDIS driver automatically, and the host discovers the phone deterministically (it's the tethered link's gateway — no IP to type). Network pairing is required: give the host the code shown in the app. Measured at 2-5ms round-trip. Verified live with USB debugging off, end to end: video *and* controls, 1080p and 720p, with `adb forward --list` empty proving nothing routed through adb.
+- **USB tethering transport — the one to use.** No Developer Options, no driver install, no admin prompt, and nothing else on the phone displaced. Flip the phone's USB tethering toggle and open the app. Windows binds its built-in RNDIS driver automatically, and the host discovers the phone deterministically (it's the tethered link's gateway — no IP to type). Tethered TCP listeners bind only on the phone's USB-tethering interface; there is no pairing or application-level authentication, and traffic is plaintext. Measured at 2-5ms round-trip. Verified live with USB debugging off, end to end: video *and* controls, 1080p and 720p, with `adb forward --list` empty proving nothing routed through ADB.
 - **Camera controls work without USB debugging** for the first time, over that same tethered link — the control channel was always just TCP; it only ever used adb to get a route. All seven tray controls populate from the phone's real reported capabilities.
 - **Recovers unattended.** Observed following the phone across three different tethered addresses in one session (every USB reconfiguration hands out a new subnet) and surviving USB debugging being toggled off mid-stream — both channels reconnected with no restart, because discovery re-runs per attempt rather than caching.
-- AOA transport (also no USB debugging): proven end-to-end, kept as the fallback for devices where a carrier gates USB tethering. Its Windows driver step is one click in the tray behind a single admin prompt — no Zadig, ever — with a matching "Remove USB driver" that fully undoes it. Note the tradeoff tethering avoids entirely: binding that driver makes the phone's file transfer unavailable until reverted, and AOA carries video only, so camera controls don't work over it.
 
 - The virtual camera now genuinely advertises 4 resolutions (1920x1080, 1280x720, and true portrait 1080x1920/720x1280) — the consuming app picks one, same as any real UVC webcam. Confirmed via `ffmpeg -f dshow -list_options` and independently via a native Media Foundation probe.
 - Rotation/mirror (0°/90°/180°/270° + mirror), applied PC-side, live from the tray — defaults to 90° clockwise (the reference mounting is the phone held vertically; a landscape sensor frame needs that rotation to look normal). Verified live against the running virtual camera, including the default applying automatically with no tray interaction needed.
 - **Known platform limitation, not yet worked around:** the two portrait sizes render correctly in native Media Foundation apps (Chrome, Windows Camera, modern capture backends) but are corrupted by a confirmed bug in Windows' own DirectShow compatibility bridge (`VCAMDS`) — this affects DirectShow-based apps, which includes Zoom's classic Windows client and older/classic OBS. Landscape sizes are unaffected everywhere. See `docs/architecture.md`'s Phase 3 section for the full diagnosis.
 - Full tray controls: camera/lens switch, zoom, exposure, torch, focus mode, plus the rotation/mirror above and a read-only resolution display — all real submenus, not stubs, populated from the phone's own reported capabilities (a control never appears unless the phone actually supports it). Resolution is display-only by design: the consuming app picks it, exactly like a real webcam, so you set it in OBS/Zoom/Chrome's own device settings.
-- Camera controls need either USB tethering or ADB — they don't work over AOA, which carries video only.
 
 **Not built yet:** a proactive nudge for first-time users (today the tray items are there to click, but nothing prompts you toward them automatically), hotspot setup automation (the PC can use one, but it doesn't create it), and synced audio.
 
@@ -94,12 +75,10 @@ See [`docs/architecture.md`](docs/architecture.md) for the full phase-by-phase h
 
 - `android/` — the installed Kotlin/Camera2 app (capture, encode, transport, control, foreground service).
 - `windows/common/` — shared C++ static lib: wire framing, shared-memory frame ring, logging.
-- `windows/host/` — `phonecam-host.exe`: USB transport (ADB or AOA), Media Foundation decode, virtual-camera control.
+- `windows/host/` — `phonecam-host.exe`: USB transports (ADB and tethered TCP), Media Foundation decode, virtual-camera control.
 - `windows/vcam/` — `phonecam-vcam.dll`: the `MFCreateVirtualCamera` COM media source.
-- `windows/tools/aoa_probe/` — standalone diagnostic tool used to develop/debug the AOA transport; not shipped.
 - `windows/installer/` — not built yet (see Status above).
 - `proto/` — shared FlatBuffers schemas (wire + control protocol) — the contract both sides build against.
-- `third_party/libusb/` — vendored libusb, used by the AOA transport and `aoa_probe`.
 - `docs/` — architecture (the authoritative, detailed project history), protocol specs, build instructions.
 
 ## Building

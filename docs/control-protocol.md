@@ -8,8 +8,8 @@ the socket.
 
 ## Capability-driven UI (read this first)
 
-The phone is the source of truth for what it can do. After network authentication
-(or immediately on a trusted ADB connection), it sends `CapabilityDescriptor`
+The phone is the source of truth for what it can do. At the start of either
+supported USB connection, it sends `CapabilityDescriptor`
 (`wire.fbs`). **The host UI
 is generated from this descriptor — it must never render a control that isn't
 backed by a matching capability, and must never send a command the descriptor
@@ -27,16 +27,13 @@ Concretely, on `CapabilityDescriptor` receipt the host:
 3. Re-does step 2 whenever `LensChanged` arrives (a different lens can have
     different capabilities — e.g. front camera often lacks torch).
 
-## Authentication and video access
+## Connection access
 
-Network sessions first exchange `AuthChallenge` / `AuthResponse`; no camera
-commands are honored before a valid pairing-code HMAC. Capabilities mark the
-session ready. Current protocol **v6** retains v4's fresh session-bound proof on
-each framed-TCP video socket, not just a successful control login. Closing
-control revokes its video connection/capture. Local ADB/AOA behavior is unchanged.
-
-**Video remains unencrypted by explicit decision.** Full handshake, threat model,
-lifecycle, tests, and accepted interception/MITM limits: [security.md](security.md).
+There is no application-level authentication or video prelude. ADB connections
+use the Android-authorized ADB forwarding path. Tethered control and video TCP
+listeners bind only to the phone's USB-tethering interface; any peer able to
+reach those ports can send commands and receive video. Both channels are
+plaintext. See [security.md](security.md) for the trust boundary and limits.
 
 ## Commands (PC → phone)
 
@@ -46,7 +43,7 @@ Each is sent inside a `ControlEnvelope` with a fresh, monotonically increasing
 | Command | Camera2 mapping | Notes |
 |---|---|---|
 | `Start` / `Stop` | opens/closes the `CameraCaptureSession` and encoder | `Stop` keeps the control socket alive, just halts the video channel |
-| `StartVideo` | starts a capture session and names the transport to deliver it on | `mode` is `FramedTcp` (the phone binds its video socket and the PC's video transport connects to it) or `Rtp` (the phone streams RTP/H.264 straight to the PC's `rtp_port`). The PC's address is learned from the control connection itself, so this command is both the wake-up and the destination discovery. Answered `Ack{Busy}` if the phone is already streaming on another transport |
+| `StartVideo` | starts a capture session | The phone binds its framed video socket; the host connects over ADB forwarding or USB-tethered TCP. Answered `Ack{Busy}` if the phone is already streaming from a different source |
 | `StopVideo` | stops a session started by `StartVideo` | the control channel stays open |
 | `SetResolution` | re-negotiates the `MediaCodec` input `Surface` + repeating request | triggers a new `CONFIG` on the video channel |
 | `SetFps` | `CONTROL_AE_TARGET_FPS_RANGE` (fixed range `[fps, fps]`) | clamp to the resolution's `max_fps` from `Resolution` |
@@ -68,7 +65,7 @@ Each is sent inside a `ControlEnvelope` with a fresh, monotonically increasing
 
 | Message | `cmd_id` | Meaning |
 |---|---|---|
-| `CapabilityDescriptor` | 0 | sent after successful network login, or immediately over trusted ADB |
+| `CapabilityDescriptor` | 0 | sent at the start of every control session |
 | `Ack` | echoes the command's `cmd_id` | `result` = `Ok` / `Unsupported` / `OutOfRange` / `Busy` / `Error`, with a human-readable `message` for the last two |
 | `CurrentSettings` | 0 (unsolicited) or the triggering `cmd_id` | full state snapshot; see reconciliation below |
 | `Stats` | 0 | pushed ~1/sec: encode fps, bitrate, dropped frames, `thermal_status` |
@@ -105,13 +102,13 @@ Each is sent inside a `ControlEnvelope` with a fresh, monotonically increasing
 
 ## Implementation status
 
-Implemented and verified against the real device: the whole handshake
-(`CapabilityDescriptor` after login, immediately for ADB), `SetZoomRatio`, `SetEv`, `SetTorch`,
+Implemented and verified against the real device: control startup
+(`StreamIntent` followed by `CapabilityDescriptor`), `SetZoomRatio`, `SetEv`, `SetTorch`,
 `SetFocusMode`, `TapToFocus`, `RequestKeyframe`, `SetBitrate`, `SetLens`
 (with `LensChanged` + `CurrentSettings` confirmation), `StartVideo` /
 `StopVideo`, and `Ack` for all of
 the above. Normal host use is the native tray GUI, including transport changes,
-QR/manual pairing and Start/Stop. `windows/host/control/ConsoleControlUi` remains
+connection selection and Start/Stop. `windows/host/control/ConsoleControlUi` remains
 a developer command surface alongside it.
 
 **The control channel is durable**: it is owned by the phone's `CaptureService`,
@@ -130,13 +127,13 @@ supports `MANUAL_SENSOR` on both lenses), `Start`, `Stop` (video
 start/stop is driven by the PC's `StartVideo`/`StopVideo` or the phone's own
 UI). `Stats` telemetry is pushed roughly once a second while streaming.
 
-## QR identities and user Stop (v5/v6)
+## User Stop and protocol version (v8)
 
-v5 adds `AuthResponse.client_id`: nonempty selects the PC's QR-paired key;
-empty retains manual-code authentication. See [security.md](security.md) for
-enrollment/discovery. Current compatible versions are v6 on both devices.
+Current compatible versions are v8 on both devices. v8 removes the former
+authentication messages from the `ControlPayload` union, so both applications
+must be rebuilt/updated together.
 
-v6 sends authenticated `StreamIntent{stopped}` **before capabilities** on every
+The phone sends `StreamIntent{stopped}` **before capabilities** on every
 control connection, and pushes it when the user changes intent. The phone stores
 this independently of capture/error state. The host consumes it before its ready
 handler can request video; its watchdog does not restart a stopped stream.
@@ -147,12 +144,12 @@ handler can request video; its watchdog does not restart a stopped stream.
   clears intent and pushes it so the host can resume its known transport.
 - `StopVideo.user_requested=true` latches Stop. False means transport teardown,
   not a user pause; switching connections does not clear an existing Stop.
-- Stop preserves authenticated control and remembered keys. The Windows output
+- Stop preserves the control connection. The Windows output
   gate discards late decoded frames and publishes black without re-registering
   the virtual camera. Ready/Connecting/Streaming/Stopped labels describe the
-  normal UI; actual encoded/decoded frames, not mere authentication, confirm video.
+  normal UI; actual encoded/decoded frames confirm video.
 - Success notifications are one-shot for initial connection or deliberate resume,
   not repeated by stats polling or transient automatic recovery.
-- `GetStreamIntent` is an authenticated, camera-free heartbeat every two seconds.
+- `GetStreamIntent` is a camera-free heartbeat every two seconds.
   Six seconds without control replies retires a stale socket and reconnects,
   including while stopped (when no media/stats would otherwise reveal a dead peer).

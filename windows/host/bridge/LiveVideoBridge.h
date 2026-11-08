@@ -21,9 +21,8 @@ namespace phonecam::bridge {
 
 class LiveVideoBridge {
 public:
-    // Defaults to the adb-forward transport (the proven path) --
-    // pass an AoaVideoTransport (transport/AoaTransport.h) to run the same
-    // decode/ring/vcam pipeline over AOA instead. See main.cpp's --aoa flag.
+    // Defaults to the adb-forward transport; ConnectionManager can replace it
+    // with the TCP transport used over USB tethering.
     explicit LiveVideoBridge(std::unique_ptr<phonecam::transport::VideoTransport> transport =
                                   std::make_unique<phonecam::transport::AdbVideoTransport>());
     ~LiveVideoBridge();

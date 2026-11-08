@@ -6,63 +6,38 @@ detail see [`wire-protocol.md`](wire-protocol.md) and
 
 ## Overview
 
-### Current connection UX (2026-10-21)
+The dated implementation notes below are historical records, not a list of
+currently supported transports. The current design is described in the overview
+and in [wire-protocol.md](wire-protocol.md).
+
+### Current USB connection model
 
 The running host owns a `ConnectionManager` that serializes transport changes,
-authentication, reconnect and video recovery without recreating the virtual
-camera. Normal Wi-Fi use is tray **Connect over Wi-Fi → in-app phone QR scan**;
-manual discovery/code entry is a secondary dialog. The QR dialog dismisses on
-durable enrollment; remembered reconnect and successful manual connection dismiss
-their dialogs too. Initial video and deliberate resume notify once, not on every
-telemetry tick or automatic retry.
+reconnect, and video recovery without recreating the virtual camera. Automatic
+selection prefers USB tethering and falls back to USB debugging (ADB); either
+path can also be selected from the tray. The phone's TCP listeners bind only to
+addresses on USB-tether interfaces (`rndis*`, `usb*`, or `ncm*`), while ADB uses
+the existing authorized abstract sockets.
 
-Protocol v6 separates persistent **user-stopped intent** from capture/error state.
-The phone publishes it before capabilities on every authenticated connection.
-Automatic startup/watchdog requests cannot clear it; only explicit Start can.
-Stop keeps pairing and (while the UI is visible) control, releases capture and gates the Windows output to
-black, including late decoded frames. The phone presents Ready, Connecting,
-Streaming and Stopped, with codes/change-PC/forget under Connection settings.
-Without a live PC, QR/code/USB choices are directly visible; remembered pairing
-alone must not hide them. The manual-code action shows the phone's code for entry
-on the PC, rather than asking the user to enter a PC code on the phone.
-User actions run on a serial worker rather than performing socket I/O or camera
-teardown on Android's UI thread.
-
-After Stop, Android removes the ongoing notification and clears the service's
-started state. The UI binds/polls only while visible (or scanning QR), so closing
-the stopped app destroys the service and its control/discovery listeners. Reopening
-retains pairing and Stop; only an explicit Start resumes. Active streaming remains
-a started camera foreground service and continues with the screen locked.
+There is no QR flow, remembered application credential, or app-layer
+authentication. Tethered TCP control and video are plaintext and rely on the
+physical USB-tether link being trusted. Both paths carry the same control and
+video functionality. Control begins with `StreamIntent` and `CapabilityDescriptor`;
+the host then starts or resumes capture according to the persistent user Stop
+intent. Stop gates Windows output to black without unregistering the virtual
+camera, and only an explicit Start clears the stopped intent.
 
 The virtual camera delivers requests asynchronously on a serial MF work queue,
 paced by a rational 30 fps clock, with strictly increasing sample times and no
 catch-up bursts after delays. Queued requests are invalidated on stream restart.
-The installed DLL passed a 90-frame DirectShow capture at 30 fps with no duplicate
-or backward timestamps. RTP startup regressions cover config PTS=0, high camera
-timestamps, wrap and sender changes; SPS/PPS now repeat with every IDR. The phone's
-service-level Stop/unbind regression passed on the Redmi Note 8. A separate live
-hotspot check resumed video through the tray, stopped it, then sent the phone to
-Home: no service or active notification remained, and pairing was unchanged.
-The Compose instrumentation variant timed out; the live close check above did
-not depend on that harness.
-
-Verified on the existing Redmi Note 8 pairing: remembered rediscovery without
-rescan, tray Stop across four watchdog intervals, black DirectShow output while
-the camera endpoint remains registered, explicit tray resume, automatic remembered
-reconnect-window dismissal, Stop across phone update/host restart, and the real
-phone's Connecting cancellation/settings/Stop persistence through activity recreation.
-Tests preserve the original phone pairing-preference hash and PC identity.
-Fresh physical QR scanning was confirmed before this UX change; the new
-post-enrollment dismissal branch has not required replacing that real pairing.
-
-See [build.md](build.md) for live UX tests and [security.md](security.md) for
-QR credentials and the explicit decision to leave video unencrypted.
+For the transport trust boundary and current test instructions, see
+[security.md](security.md) and [build.md](build.md).
 
 ```
 [Android APK]  Camera2 → MediaCodec H.264 (low-latency, zero-copy Surface)
                        │            (+ AudioRecord → Opus, Phase 8)
                        ▼
-[USB transport]  MVP: ADB-forward socket   →   Phase 7: AOA (no USB-debugging)
+[USB transport]  ADB-forward socket  +  USB-tethered TCP
                        ▼
 [phonecam-host.exe]  MF H.264 decode → SharedFrameRing (shared memory)
                        ▲ created by

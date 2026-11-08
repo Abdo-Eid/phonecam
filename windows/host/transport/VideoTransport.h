@@ -1,15 +1,7 @@
 #pragma once
 
-// Common video-channel interface both AdbVideoTransport (adb-forward TCP,
-// transport/AdbTransport.h) and AoaVideoTransport (libusb AOA accessory pipe,
-// transport/AoaTransport.h) implement, so bridge/LiveVideoBridge.cpp's
-// connect/receive/reconnect supervising loop doesn't need to know which one
-// it's driving -- see LiveVideoBridge::Run()'s comment for why that loop's
-// shape (retry Connect() after any disconnect, back off between attempts)
-// already fits AOA too: a dropped accessory session has no clean
-// reconnect-in-place the way `adb forward` does, so repeated failed
-// Connect() calls (logged, backed off) are the correct behavior until the
-// user physically replugs -- not a bug to work around here.
+// Common video-channel interface for ADB-forwarded TCP and USB-tethered TCP.
+// The bridge reconnect loop doesn't need to know how the PC reaches the phone.
 
 #include <cstdint>
 #include <functional>

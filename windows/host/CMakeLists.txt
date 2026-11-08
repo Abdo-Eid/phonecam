@@ -23,7 +23,7 @@ add_custom_target(phonecam_proto_gen
 # WIN32: links with the GUI subsystem so double-clicking phonecam-host.exe (the real end-user
 # path -- it's a tray-icon background app, not a CLI tool) doesn't pop a console window. main.cpp
 # still defines wmain(argc, argv), not WinMain -- /ENTRY:wmainCRTStartup below tells the linker to
-# keep using wmain's CRT startup despite the GUI subsystem, so argv-based flags (--aoa etc.) still
+# keep using wmain's CRT startup despite the GUI subsystem, so argv-based diagnostic flags still
 # work unchanged. Logging (std::printf/phonecam::log::*) is unaffected either way: with no console
 # attached (a real double-click launch) those writes just go nowhere, same as before this had a
 # console to write into; run from an existing terminal (as in dev/test) and they still show up,
@@ -41,14 +41,8 @@ add_executable(phonecam-host WIN32
     transport/VideoTransport.h
     transport/AdbTransport.h
     transport/AdbTransport.cpp
-    transport/AoaTransport.h
-    transport/AoaTransport.cpp
     transport/NetTransport.h
     transport/NetTransport.cpp
-    transport/Discovery.h
-    transport/Discovery.cpp
-    transport/RtpVideoTransport.h
-    transport/RtpVideoTransport.cpp
     control/ControlTransport.h
     control/ControlTransport.cpp
     control/ControlChannel.h
@@ -57,68 +51,24 @@ add_executable(phonecam-host WIN32
     control/ConsoleControlUi.cpp
     tray/TrayIcon.h
     tray/TrayIcon.cpp
-    tray/WifiDialog.h
-    tray/WifiDialog.cpp
-    tray/QrPairDialog.h
-    tray/QrPairDialog.cpp
-    ../../third_party/qr-code-generator/cpp/qrcodegen.cpp
     connection/ConnectionManager.h
     connection/ConnectionManager.cpp
-    connection/PairingStore.h
-    connection/PairingStore.cpp
     resources/phonecam.rc
 )
 
 add_dependencies(phonecam-host phonecam_proto_gen)
 
-# The AOA transport (transport/AoaTransport.h) needs libusb, already
-# vendored for windows/tools/aoa_probe -- same include/lib/dll layout.
-set(LIBUSB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/libusb)
-
 target_include_directories(phonecam-host PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${PHONECAM_PROTO_GEN_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/flatbuffers/include
-    ${LIBUSB_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/qr-code-generator/cpp
 )
-target_link_libraries(phonecam-host PRIVATE phonecam_common mfplat mfuuid ole32 ws2_32 shell32 bcrypt advapi32
-    ${LIBUSB_DIR}/lib/libusb-1.0.lib)
+target_link_libraries(phonecam-host PRIVATE phonecam_common mfplat mfuuid ole32 ws2_32 shell32
+    )
 target_compile_features(phonecam-host PRIVATE cxx_std_20)
 target_link_options(phonecam-host PRIVATE "/ENTRY:wmainCRTStartup")
 
-add_executable(phonecam-pairing-tests connection/PairingStoreTests.cpp connection/PairingStore.cpp)
-target_include_directories(phonecam-pairing-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(phonecam-pairing-tests PRIVATE advapi32 bcrypt)
-
-add_executable(phonecam-video-tests transport/VideoTimingTests.cpp transport/RtpVideoTransport.cpp)
-target_include_directories(phonecam-video-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(phonecam-video-tests PRIVATE phonecam_common ws2_32)
-
-add_executable(phonecam-rtp-recovery-tests transport/RtpRecoveryTests.cpp transport/RtpVideoTransport.cpp)
-target_include_directories(phonecam-rtp-recovery-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(phonecam-rtp-recovery-tests PRIVATE phonecam_common ws2_32)
-
-add_executable(phonecam-rtp-reorder-tests transport/RtpReorderTests.cpp)
-target_include_directories(phonecam-rtp-reorder-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_executable(phonecam-video-tests transport/VideoTimingTests.cpp)
 
 add_executable(phonecam-media-settings-tests bench/MediaSettingsTests.cpp)
 target_include_directories(phonecam-media-settings-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-# libusb-1.0.dll must sit next to the exe at runtime -- same reasoning as
-# aoa_probe's own copy and adb.exe's PostBuildEvent copy for phonecam-vcam.dll.
-add_custom_command(TARGET phonecam-host POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${LIBUSB_DIR}/bin/libusb-1.0.dll $<TARGET_FILE_DIR:phonecam-host>
-)
-
-# RunUsbDriverHelperElevated (main.cpp) locates phonecam-usbdriver.exe next to the running
-# phonecam-host.exe -- true in the installed layout (PhoneCam.iss puts both in {app}), but in this
-# CMake dev build tree each target lands in its own windows/build/<target>/<config>/ directory.
-# Copy it alongside phonecam-host.exe after every build so the tray's driver-setup/revert items
-# work from a dev build too, not just an installed one.
-add_dependencies(phonecam-host phonecam-usbdriver)
-add_custom_command(TARGET phonecam-host POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:phonecam-usbdriver> $<TARGET_FILE_DIR:phonecam-host>
-)

@@ -18,15 +18,6 @@
 
 namespace phonecam::control {
 
-// The pairing handshake's proof: HMAC-SHA256(code, phone_nonce || pc_nonce), hex-encoded.
-// Exposed (rather than kept private to the channel) so the host's --test-auth mode can
-// check it against an independent implementation.
-std::string ComputeAuthHmac(const std::string& code, const std::string& phoneNonce,
-                             const std::string& pcNonce);
-std::string ComputeVideoAuthHmac(const std::string& code, const std::string& phoneNonce,
-                                 const std::string& pcNonce, const std::string& videoNonce);
-std::string ComputeMessageHmac(const std::string& key, const std::string& message);
-
 struct LensInfo {
     std::string cameraId;
     int facing = 0;  // phonecam.wire.LensFacing: 0=Back 1=Front 2=External
@@ -55,11 +46,6 @@ struct AckInfo {
     uint32_t cmdId = 0;
     int result = 0;  // phonecam.control.AckResult
     std::string message;
-};
-
-// The phone's challenge: a fresh nonce the PC has to include, keyed, in its answer.
-struct AuthChallengeInfo {
-    std::string nonce;
 };
 
 struct SettingsInfo {
@@ -101,7 +87,6 @@ struct ErrorInfo {
 
 enum class ControlMsgKind {
     Capabilities,
-    AuthChallenge,
     Ack,
     Settings,
     Stats,
@@ -117,7 +102,6 @@ enum class ControlMsgKind {
 struct ControlMessage {
     ControlMsgKind kind = ControlMsgKind::Unknown;
     CapabilityInfo capabilities;
-    AuthChallengeInfo authChallenge;
     AckInfo ack;
     SettingsInfo settings;
     StatsInfo stats;
@@ -140,28 +124,13 @@ public:
     ControlChannel& operator=(const ControlChannel&) = delete;
 
     // host empty == the adb-forward path (unchanged); host set == connect straight to that
-    // address, no adb (USB tethering / Wi-Fi). See ControlTransport::Connect.
+    // address, no adb (USB tethering). See ControlTransport::Connect.
     bool Connect(uint16_t port = 27184, const std::string& host = {});
     void Disconnect();
 
-    // The pairing code this host answers the phone's challenge with. Over a network
-    // link the phone will not accept commands until the PC proves it knows this
-    // code; over the local USB link the phone trusts the connection without one.
-    //
-    // An empty code means "no code configured": the host then cannot answer a
-    // challenge, and a phone that asks for one will refuse the session.
-    void SetPairingCode(std::string code);
-    void SetClientId(std::string id);
-
-    // Called when the session is ready for commands -- i.e. when the phone has sent
-    // its capabilities, which it only does after a successful authentication. Commands
-    // sent before that are rejected by the phone, so anything that wants to start a
-    // session should wait for this rather than for the connection itself.
+    // Called when the session is ready for commands, after the phone sends its
+    // capabilities descriptor.
     void SetSessionReadyHandler(std::function<void()> handler);
-
-    // Empty unless the current network control session has completed authentication.
-    // Used only at TCP video connect time, never per frame.
-    std::string VideoAuthProof(const std::string& challenge) const;
 
     // Blocks until disconnect; invokes onMessage for each decoded envelope.
     void RunReceiveLoop(const ControlMessageHandler& onMessage);
@@ -181,23 +150,13 @@ public:
     uint32_t SendSetBitrate(uint32_t bitrateBps);
     uint32_t SendSetLens(const std::string& cameraId);
 
-    // Wireless session control (RTP over UDP): asks the phone to start
-    // streaming live camera video to this PC. The phone learns the PC's
-    // address from the control connection itself, so the only extra
-    // information it needs is the UDP port the PC is listening on.
-    //
-    // Sent on every (re)connect, not once per process: the phone may have
-    // restarted, or its capture may have stopped while the control channel
-    // stayed up -- either way the phone is the one that knows whether video
-    // is actually running, and it answers Ack{Busy} if it already is.
-    //
-    // [mode] is VideoTransportMode: FramedTcp for the socket-based transports
-    // (the phone binds its video socket and the video transport connects to
-    // it), Rtp for the UDP one.
-    uint32_t SendStartVideo(uint16_t width, uint16_t height, uint16_t fps, uint32_t bitrateBps, uint16_t rtpPort,
-                            uint8_t mode = 0, bool explicitStart = false);
+    // Asks the phone to start a capture session. Sent on every (re)connect,
+    // not once per process: the phone may have restarted, or its capture may
+    // have stopped while the control channel stayed up.
+    uint32_t SendStartVideo(uint16_t width, uint16_t height, uint16_t fps, uint32_t bitrateBps,
+                            bool explicitStart = false);
 
-    // Stops a wireless session (the phone keeps its control channel open).
+    // Stops a PC-started capture session (the phone keeps its control channel open).
     uint32_t SendStopVideo(bool userRequested = false);
     uint32_t SendGetStreamIntent();
 

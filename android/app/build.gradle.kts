@@ -60,7 +60,6 @@ dependencies {
   implementation(libs.androidx.core.ktx)
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.activity.compose)
-  implementation(libs.zxing.embedded)
 
   // Arch Components
   implementation(libs.androidx.lifecycle.runtime.compose)

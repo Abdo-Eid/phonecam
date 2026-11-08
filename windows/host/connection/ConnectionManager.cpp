@@ -1,16 +1,11 @@
 #include "connection/ConnectionManager.h"
 #include <chrono>
-#include "connection/PairingStore.h"
 #include "bench/MediaSettings.h"
-#include "transport/Discovery.h"
 #include "transport/NetTransport.h"
-#include "transport/RtpVideoTransport.h"
-#include "transport/AoaTransport.h"
 #include "log/Log.h"
 
 namespace phonecam::connection {
 namespace {
-bool Wireless(Mode mode) { return mode == Mode::WifiRtp || mode == Mode::WifiTcp; }
 int64_t NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -20,11 +15,8 @@ int64_t NowMs() {
 std::string ModeName(Mode mode) {
     switch (mode) {
         case Mode::Automatic: return "USB (automatic)";
-        case Mode::Adb: return "USB (ADB)";
-        case Mode::Aoa: return "USB (AOA)";
+        case Mode::Adb: return "USB debugging (ADB)";
         case Mode::Tethered: return "USB tethering";
-        case Mode::WifiRtp: return "Wi-Fi (low latency)";
-        case Mode::WifiTcp: return "Wi-Fi (TCP)";
         default: return "Disconnected";
     }
 }
@@ -102,18 +94,11 @@ void ConnectionManager::StopSession() {
 
 std::unique_ptr<phonecam::transport::VideoTransport> ConnectionManager::MakeTransport(const Target& target) {
     using namespace phonecam::transport;
-    if (target.mode == Mode::WifiRtp) {
-        auto rtp = std::make_unique<RtpVideoTransport>(target.rtpPort);
-        rtp->SetKeyframeRequester([this]() { if (ready_.load()) control_.SendRequestKeyframe(); });
-        return rtp;
-    }
-    if (target.mode == Mode::WifiTcp || target.mode == Mode::Tethered) {
+    if (target.mode == Mode::Tethered) {
         auto net = std::make_unique<NetVideoTransport>(target.address);
         net->SetPort(target.videoPort);
-        net->SetAuthenticator([this](const std::string& challenge) { return control_.VideoAuthProof(challenge); });
         return net;
     }
-    if (target.mode == Mode::Aoa) return std::make_unique<AoaVideoTransport>();
     return std::make_unique<AdbVideoTransport>();
 }
 
@@ -125,7 +110,7 @@ void ConnectionManager::ControlLoop(Target target) {
             if (control_.Connect(target.controlPort, address)) {
                 if (!sessionRunning_.load()) { control_.Disconnect(); break; }
                 connected_.store(true);
-                Publish(State::Pairing, "Pairing with phone...");
+                Publish(State::Connecting, "Connected to phone; reading camera capabilities...");
                 control_.RunReceiveLoop([&](const phonecam::control::ControlMessage& message) {
                     lastControlMessageMs_.store(NowMs());
                     if (message.kind == phonecam::control::ControlMsgKind::StreamIntent) {
@@ -146,13 +131,8 @@ void ConnectionManager::ControlLoop(Target target) {
                                 notifyOnStreaming_ = true;
                             }
                         }
-                    } else if (message.kind == phonecam::control::ControlMsgKind::Error &&
-                        message.error.message.find("not authorized") != std::string::npos) {
-                        failed_.store(true);
-                        Publish(State::Error, target.clientId.empty() ? "Pairing code rejected. Check the code shown on the phone."
-                            : "Phone no longer trusts this PC. Scan a new QR to pair again.");
                     } else if (message.kind == phonecam::control::ControlMsgKind::Capabilities &&
-                               message.capabilities.protocolVersion != 6) {
+                                message.capabilities.protocolVersion != 8) {
                         failed_.store(true);
                         Publish(State::Error, "App versions differ. Update PhoneCam on the phone and laptop.");
                     }
@@ -189,23 +169,6 @@ void ConnectionManager::Run() {
         StopSession();
         if (target.mode == Mode::Automatic) target = resolveAutomatic_();
         if (!running_.load()) break;
-        if (Wireless(target.mode) && target.address.empty()) {
-            auto cancelled = [this]() {
-                std::lock_guard<std::mutex> lock(mutex_);
-                return !running_.load() || pending_.has_value();
-            };
-            std::vector<phonecam::transport::DiscoveredPhone> phones;
-            if (!target.phoneId.empty()) {
-                phonecam::transport::DiscoveredPhone found;
-                if (phonecam::transport::DiscoverPairedPhone(target.clientId, target.phoneId, target.pairingCode, 2000, found, cancelled))
-                    phones.push_back(found);
-            } else phones = phonecam::transport::DiscoverPhones(2000, cancelled);
-            if (!phones.empty()) {
-                target.address = phones.front().address;
-                target.controlPort = phones.front().controlPort;
-                target.videoPort = phones.front().videoPort;
-            }
-        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (pending_) continue;
@@ -216,26 +179,8 @@ void ConnectionManager::Run() {
             Publish(State::Disconnected, "Disconnected");
             continue;
         }
-        if (Wireless(target.mode) && target.address.empty()) {
-            Publish(State::Error, target.phoneId.empty() ? "No phone found. Open PhoneCam, join the same Wi-Fi, then scan again."
-                : "Remembered phone not found. Open PhoneCam on the same Wi-Fi, or scan a new QR if unpaired.");
-            std::unique_lock<std::mutex> lock(mutex_);
-            changed_.wait_for(lock, std::chrono::seconds(2), [&]() { return pending_ || !running_.load(); });
-            if (!pending_ && running_.load()) pending_ = target;
-            continue;
-        }
-        if ((Wireless(target.mode) || target.mode == Mode::Tethered) && target.pairingCode.empty()) {
-            target.pairingCode = LoadPairingCode(target.address, target.controlPort);
-            if (target.pairingCode.empty()) {
-                Publish(State::Error, "Pairing code needed. Choose Connect over Wi-Fi from the tray.");
-                continue;
-            }
-        }
-        control_.SetPairingCode(target.pairingCode);
-        control_.SetClientId(target.clientId);
         ready_.store(false);
         failed_.store(false);
-        rememberFailed_.store(false);
         userAction_.store(-1);
         startNeeded_.store(false);
         sessionRunning_.store(true);
@@ -243,16 +188,11 @@ void ConnectionManager::Run() {
             if (!sessionRunning_.load()) return;
             ready_.store(true);
             lastControlMessageMs_.store(NowMs());
-            if (target.remember && !SavePairingCode(target.address, target.controlPort, target.pairingCode)) {
-                rememberFailed_.store(true);
-                phonecam::log::Error("PairingStore: Windows could not save the pairing code");
-            }
             // The phone publishes its stop intent before capabilities, so by now the host
             // knows whether the user stopped it there: never auto-start a stopped stream.
             const bool stopped = paused_.load() || phoneStopped_.load();
-            if (!stopped && target.mode != Mode::Aoa)
-                control_.SendStartVideo(media.width, media.height, media.fps, media.bitrate, target.rtpPort,
-                                        target.mode == Mode::WifiRtp ? 1 : 0);
+            if (!stopped)
+                control_.SendStartVideo(media.width, media.height, media.fps, media.bitrate);
             if (!stopped) control_.SendRequestKeyframe();
             Publish(stopped ? State::Stopped : State::WaitingForVideo,
                     stopped ? "Stopped - press Start to resume" : "Connecting - waiting for video", true);
@@ -297,8 +237,7 @@ void ConnectionManager::Run() {
             } else if (action == 1 || resumeRequested_.exchange(false)) {
                 paused_.store(false);
                 bridge_.SetOutputEnabled(!phoneStopped_.load());
-                control_.SendStartVideo(media.width, media.height, media.fps, media.bitrate, target.rtpPort,
-                                        target.mode == Mode::WifiRtp ? 1 : 0, true);
+                control_.SendStartVideo(media.width, media.height, media.fps, media.bitrate, true);
                 control_.SendRequestKeyframe();
                 lastRequest = now;
                 lastChange = now - std::chrono::seconds(3);
@@ -312,19 +251,17 @@ void ConnectionManager::Run() {
             if (startNeeded_.exchange(false)) lastRequest = now - std::chrono::seconds(3);
             const auto frames = bridge_.FramesDecoded();
             if (frames != lastFrames) { lastFrames = frames; lastChange = now; }
-            if (frames > 0 && now - lastChange < std::chrono::seconds(3) && (ready_.load() || target.mode == Mode::Aoa)) {
-                Publish(State::Streaming, "Streaming via " + ModeName(target.mode) +
-                            (rememberFailed_.load() ? " (code could not be saved)" : ""), ready_.load());
+            if (frames > 0 && now - lastChange < std::chrono::seconds(3) && ready_.load()) {
+                Publish(State::Streaming, "Streaming via " + ModeName(target.mode), ready_.load());
             } else if (ready_.load()) {
-                Publish(State::WaitingForVideo, "Paired; waiting for video. Unlock and open PhoneCam if needed.", true);
-                if (target.mode != Mode::Aoa && now - lastRequest >= std::chrono::seconds(3)) {
-                    control_.SendStartVideo(media.width, media.height, media.fps, media.bitrate, target.rtpPort,
-                                            target.mode == Mode::WifiRtp ? 1 : 0);
+                Publish(State::WaitingForVideo, "Connected; waiting for video. Unlock and open PhoneCam if needed.", true);
+                if (now - lastRequest >= std::chrono::seconds(3)) {
+                    control_.SendStartVideo(media.width, media.height, media.fps, media.bitrate);
                     control_.SendRequestKeyframe();
                     lastRequest = now;
                 }
             } else if (connected_.load() && now - began > std::chrono::seconds(12)) {
-                Publish(State::Pairing, "Waiting for pairing. Check the phone/code or retry Connect.");
+                Publish(State::Connecting, "Connected; waiting for camera capabilities...");
             } else if (!connected_.load()) {
                 Publish(State::Connecting, "Waiting for phone via " + ModeName(target.mode) + "...");
             }

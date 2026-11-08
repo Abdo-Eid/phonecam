@@ -9,7 +9,6 @@ import io.github.abdoeid.phonecam.control.ControlChannel
 import io.github.abdoeid.phonecam.control.ControlCommandListener
 import io.github.abdoeid.phonecam.encode.H264Encoder
 import io.github.abdoeid.phonecam.transport.OutputStreamVideoSink
-import io.github.abdoeid.phonecam.transport.VideoPacketSink
 import io.github.abdoeid.phonecam.transport.VideoSocketServer
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -27,10 +26,8 @@ private const val MIN_ADAPTIVE_BITRATE_BPS = 1_000_000
 
 /**
  * Wires CameraCapture's output straight into H264Encoder's input Surface, which emits
- * wire-framed packets (docs/wire-protocol.md) to [videoPacketSink] -- the connected PC's video
- * channel (USB socket, AOA, RTP). Camera and encoder don't start until a
- * consumer is actually there -- stream transports block in [accept], and the RTP path is started
- * by an explicit StartVideo command -- so nothing captures or encodes into the void.
+ * wire-framed packets (docs/wire-protocol.md) to the connected PC over ADB
+ * forwarding or USB-tethered TCP. Capture starts only after a PC connects.
  */
 class CaptureController(private val context: Context) {
   private var encoder: H264Encoder? = null
@@ -45,11 +42,6 @@ class CaptureController(private val context: Context) {
   // would be nothing listening to receive it).
   @Volatile
   private var controlChannel: ControlChannel? = null
-
-  // This session's packet sink, closed by [stop] -- RtpVideoSink owns a UDP socket that must be
-  // released; stream-backed sinks are no-ops (their owners close the sockets).
-  @Volatile
-  private var videoPacketSink: VideoPacketSink? = null
 
   private val stopRequested = AtomicBoolean(false)
 
@@ -158,14 +150,6 @@ class CaptureController(private val context: Context) {
     videoServer?.closeNetworkClient()
   }
 
-  /**
-   * [videoPacketSink], when non-null, replaces [VideoSocketServer] entirely as the video packet
-   * destination -- used by transports whose session is already established by the time [start] is
-   * called, so there is no accept-and-wait-for-a-PC-to-connect step to do (AOA: the
-   * accessory pipe is already open; wireless: RTP sends to the PC's address, learned
-   * from the control channel, and there is nothing to accept). When null (the default,
-   * USB path), behavior is unchanged.
-   */
   fun start(
     width: Int,
     height: Int,
@@ -173,10 +157,8 @@ class CaptureController(private val context: Context) {
     bitrateBps: Int,
     onError: (Throwable) -> Unit,
     lensFacing: Int = CameraCharacteristics.LENS_FACING_BACK,
-    videoPacketSink: VideoPacketSink? = null,
   ) {
     stopRequested.set(false)
-    this.videoPacketSink = videoPacketSink
     val myCancelToken = AtomicBoolean(false)
     cancelToken = myCancelToken
     state = CaptureState.WAITING_FOR_CONNECTION
@@ -202,18 +184,25 @@ class CaptureController(private val context: Context) {
           // Every bail-out check below reads myCancelToken (this cycle's own token), never the
           // shared `state` field -- state gets overwritten by the very next start() call, so it
           // can't reliably tell this thread "you were cancelled" if a new cycle already began.
-          val out: VideoPacketSink
-          if (videoPacketSink != null) {
-            // Stream-external transports: the destination already exists, nothing to bind/accept
-            // (AOA's open accessory pipe, or RTP where the PC's address came from the control
-            // channel and there is no accept step at all).
-            out = videoPacketSink
-          } else {
-            val server = VideoSocketServer(authenticateTcp = { socket ->
-              controlChannel?.authenticateVideoConnection(socket, myCancelToken::get) == true
-            })
+          val server = VideoSocketServer()
+          try {
+            server.open(isCancelled = myCancelToken::get)
+          } catch (e: IOException) {
+            if (!myCancelToken.get()) {
+              state = CaptureState.IDLE
+              onError(e)
+            }
+            return@Thread
+          }
+          videoServer = server
+          if (myCancelToken.get()) {
+            server.close()
+            return@Thread
+          }
+
+          val out =
             try {
-              server.open(isCancelled = myCancelToken::get)
+              OutputStreamVideoSink(server.accept(isCancelled = myCancelToken::get))
             } catch (e: IOException) {
               if (!myCancelToken.get()) {
                 state = CaptureState.IDLE
@@ -221,33 +210,13 @@ class CaptureController(private val context: Context) {
               }
               return@Thread
             }
-            videoServer = server
-            if (myCancelToken.get()) {
-              // stop() raced us during open() -- bail before accept().
-              server.close()
-              return@Thread
+          if (myCancelToken.get()) {
+            try {
+              out.close()
+            } catch (_: IOException) {
+              // already torn down
             }
-
-            out =
-              try {
-                OutputStreamVideoSink(server.accept(isCancelled = myCancelToken::get))
-              } catch (e: IOException) {
-                // cancelled means stop() closed the socket deliberately -- not a real error.
-                if (!myCancelToken.get()) {
-                  state = CaptureState.IDLE
-                  onError(e)
-                }
-                return@Thread
-              }
-            if (myCancelToken.get()) {
-              // stop() raced us right as the PC connected -- bail without starting anything.
-              try {
-                out.close()
-              } catch (_: IOException) {
-                // already torn down
-              }
-              return@Thread
-            }
+            return@Thread
           }
 
           val enc = H264Encoder(width, height, fps, bitrateBps)
@@ -320,11 +289,6 @@ class CaptureController(private val context: Context) {
     camera = null
     encoder?.stop()
     encoder = null
-    // Release the session's packet sink: for the wireless transport that means closing the UDP
-    // socket (the stream-backed sinks are no-ops -- their owners close the sockets). Done last,
-    // after the encoder has stopped writing to it, so no packet is sent on a half-closed socket.
-    videoPacketSink?.close()
-    videoPacketSink = null
     startTimeMs = 0
     // Not joined -- unlike acceptThread/controlThread it holds no OS resource that must be
     // released before stop() returns, only a sleep loop that checks cancelToken every ~1s.

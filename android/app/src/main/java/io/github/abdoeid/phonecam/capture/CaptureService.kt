@@ -8,32 +8,21 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.hardware.camera2.CameraCharacteristics
-import android.hardware.usb.UsbAccessory
-import android.hardware.usb.UsbManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
-import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.abdoeid.phonecam.MainActivity
 import io.github.abdoeid.phonecam.R
 import io.github.abdoeid.phonecam.control.ControlChannel
 import io.github.abdoeid.phonecam.control.ControlCommandListener
-import io.github.abdoeid.phonecam.control.PairingCode
-import io.github.abdoeid.phonecam.control.TrustedPcs
-import io.github.abdoeid.phonecam.rtp.RtpVideoSink
-import io.github.abdoeid.phonecam.transport.AoaTransport
-import io.github.abdoeid.phonecam.transport.DiscoveryResponder
-import io.github.abdoeid.phonecam.transport.OutputStreamVideoSink
 import java.io.IOException
-import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import phonecam.control.AckResult
-import phonecam.control.VideoTransportMode
 
 // A camera-type foreground service (android:foregroundServiceType="camera" in the manifest) is
 // what lets Android keep this process -- and its camera access -- alive while the app is
@@ -49,36 +38,18 @@ class CaptureService : Service() {
   private val userCommands = Executors.newSingleThreadExecutor { task -> Thread(task, "Capture-user-actions") }
 
   // The control channel is durable: it outlives any single capture session, so a PC can
-  // command a phone that is sitting idle (start a wireless session, ask for a keyframe) and
+  // command a phone that is sitting idle (start a session, ask for a keyframe) and
   // can come back later without the phone having to rebind anything. Owned here, not by
   // CaptureController, whose lifetime is one capture.
   private var controlChannel: ControlChannel? = null
   private var controlThread: Thread? = null
   private val controlRunning = AtomicBoolean(false)
 
-  // Answers the PC's "is there a PhoneCam here?" probe, so a wireless session doesn't
-  // need the phone's address typed on the PC. Runs for as long as this service does --
-  // the same lifetime the control channel has, so anything that can control the phone can
-  // also find it.
-  private var discoveryResponder: DiscoveryResponder? = null
-
   // True while the current capture session exists because the PC asked for it (StartVideo), as
   // opposed to the user tapping Start on the phone. It decides two things: whether the PC may
   // replace the session, and whether the session should end when the PC's control channel drops.
   @Volatile
   private var sessionStartedByPc = false
-
-  // The transport the current session is running on (VideoTransportMode), so a repeated
-  // request for the same mode doesn't restart it.
-  @Volatile
-  private var sessionMode = -1
-
-  // Owned here, not by MainActivity (see its class doc's AOA note): ACTION_START_AOA gives
-  // this the same foreground-service/wake-lock/error-handling treatment ACTION_START already gets,
-  // instead of a separate ad-hoc lifecycle tied to the Activity. Non-null only while an
-  // AOA-triggered session is live; closed in stopCaptureInternal()/onDestroy() alongside the
-  // controller.
-  private var aoaTransport: AoaTransport? = null
 
   // Durable user intent, independent of camera errors, transport retries and process recreation.
   private val sessionPrefs by lazy { getSharedPreferences("phonecam_session", MODE_PRIVATE) }
@@ -87,7 +58,7 @@ class CaptureService : Service() {
   val connectedPc: String get() {
     val channel = controlChannel ?: return ""
     if (!channel.isConnected) return ""
-    return TrustedPcs(this).list().find { it.id == channel.clientId }?.name ?: "PC"
+    return "USB host"
   }
   private fun persistStopIntent(value: Boolean) {
     userStopped = value
@@ -139,22 +110,13 @@ class CaptureService : Service() {
   override fun onCreate() {
     super.onCreate()
     controller = CaptureController(this)
-    TrustedPcs.init(this)
     userStopped = sessionPrefs.getBoolean("stopped", false)
     createNotificationChannel()
     startControlChannel()
-    startDiscovery()
     // Promote before serving any Start. Explicit Stop later removes foreground
     // status; only the visible UI's binding then keeps control/discovery alive.
     // Already-running capture remains foreground and survives screen lock.
     startForegroundInternal()
-  }
-
-  /** Brings up the discovery responder (see [DiscoveryResponder] for why it exists). */
-  private fun startDiscovery() {
-    val responder = DiscoveryResponder(CONTROL_PORT, VIDEO_PORT, TrustedPcs(this))
-    discoveryResponder = responder
-    responder.start()
   }
 
   /**
@@ -167,30 +129,20 @@ class CaptureService : Service() {
   private fun startControlChannel() {
     val channel = ControlChannel(this, controlListener)
     controlChannel = channel
-    // The pairing code the PC has to prove it knows. A session over the local USB link is
-    // trusted without one; a network session has to answer the challenge.
-    val pairing = PairingCode(this)
-    channel.pairingCodeProvider = { pairing.code }
-    channel.trustedPcKeyProvider = { TrustedPcs(this).key(it) }
     channel.stoppedProvider = { userStopped }
-    // While the phone scans a PC's QR it must not accept a network login (the camera
-    // is being used for the scan). The block is time-limited: an abandoned scan must
-    // not leave the phone refusing every PC afterwards.
-    channel.networkLoginBlocked = { isScanningPcQr() }
     // The controller pushes state changes (CurrentSettings/Stats/LensChanged) back to the PC
     // through this channel, so it needs the reference.
     controller.bindControlChannel(channel)
     // When the PC's control connection ends, a session that only existed because the PC asked
-    // for it ends with it. Without this, a wireless session would outlive the PC: a UDP sink
-    // never fails on its own, so the phone would keep the camera open, streaming into the void,
-    // and refuse to start a new session ("already streaming").
+    // for it ends with it. Otherwise the phone could keep the camera open after the host
+    // disappeared and refuse a later session as "already streaming".
     channel.onSessionEnded = {
       if (sessionStartedByPc) {
         Log.i(TAG, "the PC disconnected -- stopping the session it asked for")
         stopCaptureInternal()
       } else {
-        // A phone-started capture can also have an authenticated network viewer.
-        // Its video socket must not outlive the control session that authorized it.
+          // A phone-started capture can also have a tethered TCP viewer. Its video socket
+          // must not outlive the control session associated with that viewer.
         controller.disconnectNetworkVideo()
       }
     }
@@ -247,34 +199,25 @@ class CaptureService : Service() {
 
       override fun onSetLens(cameraId: String): Byte = controller.cameraCommandListener.onSetLens(cameraId)
 
-      override fun onStartVideo(mode: Int, width: Int, height: Int, fps: Int, bitrateBps: Int, rtpPort: Int, explicitStart: Boolean): Byte =
-        startSession(mode, width, height, fps, bitrateBps, rtpPort, explicitStart)
+      override fun onStartVideo(width: Int, height: Int, fps: Int, bitrateBps: Int, explicitStart: Boolean): Byte =
+        startSession(width, height, fps, bitrateBps, explicitStart)
 
       override fun onStopVideo(userRequested: Boolean): Byte {
         if (userRequested) persistStopIntent(true)
-        return stopWirelessSession()
+        return stopPcSession()
       }
     }
 
   /**
-   * Starts a session the PC asked for, over the transport it named.
+   * Starts a session the PC asked for.
    *
-   * Framed TCP: the phone binds its video socket and waits for the PC to connect -- the same
-   * flow the phone used to start on its own, now triggered by the PC. That matters because a
-   * phone-side start can't be automated (and shouldn't have to be).
-   *
-   * RTP: capture and H.264 go straight to the PC as UDP. The PC's address comes from the
-   * control connection itself (the phone learns it from the socket the PC connected on) --
-   * there is no address to type on the phone and no discovery protocol to speak of.
+   * The phone binds its video socket and waits for the PC to connect.
    */
-  @Volatile private var scanningPcQr = false
-  @Volatile private var scanDeadlineMs = 0L
-  @Synchronized private fun startSession(mode: Int, width: Int, height: Int, fps: Int, bitrateBps: Int, rtpPort: Int, explicitStart: Boolean = false): Byte {
-    if (isScanningPcQr()) return AckResult.Busy
+  @Synchronized private fun startSession(width: Int, height: Int, fps: Int, bitrateBps: Int, explicitStart: Boolean = false): Byte {
     if (explicitStart) persistStopIntent(false)
     if (userStopped) { controlChannel?.sendStreamIntent(); return AckResult.Busy }
     if (controller.state != CaptureState.IDLE) {
-      if (sessionStartedByPc && sessionMode == mode) {
+      if (sessionStartedByPc) {
         // Already running exactly what was asked for. The PC re-asks periodically (it can't
         // always see that frames are arriving), and that must not restart the session.
         Log.i(TAG, "the session is already running in this mode")
@@ -290,29 +233,12 @@ class CaptureService : Service() {
     stopRequested.set(false)
     lastError = null
     sessionStartedByPc = true
-    sessionMode = mode
     return try {
       startService(Intent(this, CaptureService::class.java).setAction(ACTION_KEEP_ALIVE))
-      if (mode == VideoTransportMode.Rtp.toInt()) {
-        val peer = controlChannel?.peerAddress
-        if (peer.isNullOrEmpty()) {
-          // The PC is on the adb-forwarded abstract socket, so there's no address to stream to.
-          // An RTP session needs a direct TCP control connection.
-          Log.w(TAG, "RTP session ignored: the PC connected over adb, so there is no address to stream to")
-          return AckResult.Error
-        }
-        val sink = RtpVideoSink(InetAddress.getByName(peer), rtpPort)
-        startForegroundInternal()
-        acquireWakeLock()
-        controller.start(width, height, fps, bitrateBps, ::onCaptureError, videoPacketSink = sink)
-        Log.i(TAG, "RTP session started: streaming to $peer:$rtpPort")
-      } else {
-        // Framed TCP: no sink, so the controller binds the video socket and waits for the PC.
-        startForegroundInternal()
-        acquireWakeLock()
-        controller.start(width, height, fps, bitrateBps, ::onCaptureError)
-        Log.i(TAG, "framed-TCP session started, waiting for the PC to connect")
-      }
+      startForegroundInternal()
+      acquireWakeLock()
+      controller.start(width, height, fps, bitrateBps, ::onCaptureError)
+      Log.i(TAG, "capture session started, waiting for the PC to connect")
       updateNotification(streaming = true)
       AckResult.Ok
     } catch (e: Exception) {
@@ -322,33 +248,10 @@ class CaptureService : Service() {
     }
   }
 
-  @Synchronized private fun stopWirelessSession(): Byte {
+  @Synchronized private fun stopPcSession(): Byte {
     stopRequested.set(true)
     stopCaptureInternal()
     return AckResult.Ok
-  }
-
-  fun beginQrScan() {
-    scanningPcQr = true
-    scanDeadlineMs = SystemClock.elapsedRealtime() + SCAN_LOCK_TIMEOUT_MS
-    stopRequested.set(true)
-    lastError = null
-    controller.stop()
-    sessionStartedByPc = false
-    sessionMode = -1
-    releaseWakeLock()
-    controlChannel?.disconnectClient()
-  }
-
-  fun endQrScan() {
-    scanningPcQr = false
-  }
-
-  private fun isScanningPcQr() = scanningPcQr && SystemClock.elapsedRealtime() < scanDeadlineMs
-
-  fun forgetPc(id: String) {
-    TrustedPcs(this).forget(id)
-    controlChannel?.revokeForgottenPc()
   }
 
   @Synchronized fun pauseByUser() {
@@ -361,8 +264,8 @@ class CaptureService : Service() {
   @Synchronized fun resumeByUser(): Boolean {
     persistStopIntent(false)
     lastError = null
-    // A network PC drives the session itself (it knows the transport and answers with
-    // video); a local USB link has no such driver, so the phone starts the camera itself.
+    // A tethered PC drives the session through its control connection; the ADB path
+    // starts capture from the phone UI and forwards the video socket.
     return controlChannel?.isConnected == true && controlChannel?.peerAddress != null
   }
 
@@ -383,7 +286,6 @@ class CaptureService : Service() {
   }
 
   @Synchronized private fun handleCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    if (isScanningPcQr() && (intent?.action == ACTION_START || intent?.action == ACTION_START_AOA)) return START_NOT_STICKY
     when (intent?.action) {
       ACTION_KEEP_ALIVE -> {
         if (userStopped) stopSelf() else startForegroundInternal()
@@ -393,10 +295,6 @@ class CaptureService : Service() {
         // A network PC drives the session itself (it knows the transport and answers with
         // video), so the phone only clears its stop intent and lets the PC resume.
         if (resumeByUser()) return START_NOT_STICKY
-        val accessory = getSystemService(UsbManager::class.java).accessoryList?.firstOrNull()
-        if (accessory != null) {
-          return onStartCommand(intent.setAction(ACTION_START_AOA).putExtra(EXTRA_ACCESSORY, accessory), flags, startId)
-        }
         // Ignore a redundant Start while another capture is already live.
         if (controller.state != CaptureState.IDLE) return START_NOT_STICKY
         val width = intent.getIntExtra(EXTRA_WIDTH, 1280)
@@ -409,45 +307,6 @@ class CaptureService : Service() {
         startForegroundInternal()
         acquireWakeLock()
         controller.start(width, height, fps, bitrateBps, ::onCaptureError, lensFacing)
-      }
-      ACTION_START_AOA -> {
-        if (userStopped) return START_NOT_STICKY
-        // Ignore a redundant accessory-attach dispatch (e.g. MainActivity re-firing from its
-        // accessoryList fallback on a plain re-launch) while a session is already live -- matches
-        // the old TEMPORARY wiring's `if (aoaTransport.isOpen) return` guard, moved here now that
-        // this owns the transport.
-        if (controller.state != CaptureState.IDLE) return START_NOT_STICKY
-        val accessory =
-          if (Build.VERSION.SDK_INT >= 33) {
-            intent.getParcelableExtra(EXTRA_ACCESSORY, UsbAccessory::class.java)
-          } else {
-            @Suppress("DEPRECATION") intent.getParcelableExtra(EXTRA_ACCESSORY)
-          }
-        if (accessory == null) return START_NOT_STICKY
-        stopRequested.set(false)
-        lastError = null
-        startForegroundInternal()
-        acquireWakeLock()
-        val transport = AoaTransport()
-        val usbManager = getSystemService(UsbManager::class.java)
-        if (!transport.open(usbManager, accessory)) {
-          lastError = IOException("Failed to open USB accessory")
-          stopCaptureInternal()
-          return START_NOT_STICKY
-        }
-        aoaTransport = transport
-        // 1920x1080 to match the vcam's declared stream size (windows/vcam/MediaStream.cpp,
-        // matching the vcam's declared stream size) -- same reasoning as MainScreenViewModel's
-        // Start-button defaults: a mismatch
-        // here silently stretches the image on the PC side.
-        controller.start(
-          width = 1920,
-          height = 1080,
-          fps = 30,
-          bitrateBps = 6_000_000,
-          onError = ::onCaptureError,
-          videoPacketSink = OutputStreamVideoSink(transport.videoOutput),
-        )
       }
       ACTION_STOP -> {
         pauseByUser()
@@ -465,10 +324,7 @@ class CaptureService : Service() {
 
   private fun stopCaptureInternal() {
     controller.stop()
-    aoaTransport?.close()
-    aoaTransport = null
     sessionStartedByPc = false
-    sessionMode = -1
     releaseWakeLock()
     if (userStopped) {
       // While the UI is bound, control stays available for one-tap Start. Once
@@ -554,11 +410,7 @@ class CaptureService : Service() {
     }
     controlThread = null
     controlChannel = null
-    discoveryResponder?.stop()
-    discoveryResponder = null
     controller.stop()
-    aoaTransport?.close()
-    aoaTransport = null
     releaseWakeLock()
     stopForeground(STOP_FOREGROUND_REMOVE)
     super.onDestroy()
@@ -568,17 +420,7 @@ class CaptureService : Service() {
     private const val TAG = "CaptureService"
     private const val CONTROL_RETRY_DELAY_MS = 2000L
 
-    // How long a QR scan may hold off network logins. An abandoned scan (the user
-    // backs out without scanning) must not leave the phone refusing every PC.
-    private const val SCAN_LOCK_TIMEOUT_MS = 120_000L
-
-    // The ports the phone listens on, reported to the PC by the discovery responder.
-    // Must match windows/host/control/ControlTransport.cpp (27184) and
-    // windows/host/transport/AdbTransport.cpp (27183).
-    private const val CONTROL_PORT = 27184
-    private const val VIDEO_PORT = 27183
     const val ACTION_START = "io.github.abdoeid.phonecam.action.START"
-    const val ACTION_START_AOA = "io.github.abdoeid.phonecam.action.START_AOA"
     const val ACTION_STOP = "io.github.abdoeid.phonecam.action.STOP"
     private const val ACTION_KEEP_ALIVE = "io.github.abdoeid.phonecam.action.KEEP_ALIVE"
     const val EXTRA_WIDTH = "width"
@@ -586,7 +428,6 @@ class CaptureService : Service() {
     const val EXTRA_FPS = "fps"
     const val EXTRA_BITRATE = "bitrateBps"
     const val EXTRA_LENS_FACING = "lensFacing"
-    const val EXTRA_ACCESSORY = "accessory"
     private const val CHANNEL_ID = "phonecam_capture"
     private const val NOTIFICATION_ID = 1
   }

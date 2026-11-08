@@ -12,7 +12,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include "RtpDecoderReplay.h"
 
 using Bytes = std::vector<uint8_t>;
 struct Nal { size_t begin, payload, end; unsigned type; };
@@ -83,8 +82,8 @@ Pictures Decode(const std::vector<Bytes>& units, bool repeatHeaders, bool reset,
 }
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc != 3 && argc != 4) {
-        std::cerr << "Usage: phonecam-decoder-recovery <AUD-H264-file> <new-output-directory> [--rtp]\n";
+    if (argc != 3) {
+        std::cerr << "Usage: phonecam-decoder-recovery <AUD-H264-file> <new-output-directory>\n";
         return 2;
     }
     const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -102,10 +101,6 @@ int wmain(int argc, wchar_t** argv) {
         const auto units = AccessUnits(bytes);
         const auto reference = Decode(units, true, false, false, false);
         if (reference.size() < units.size() - 3) throw std::runtime_error("Reference decode incomplete");
-        if (argc == 4) {
-            if (std::wstring(argv[3]) != L"--rtp") throw std::runtime_error("Unknown replay option");
-            VerifyRtpRecovery(units, reference, output);
-        } else {
         struct Scenario { const char* name; bool repeat, reset, cache; };
         const Scenario scenarios[] = {
             {"drop-one-AU-initial-headers-only", false, false, false},
@@ -135,7 +130,6 @@ int wmain(int argc, wchar_t** argv) {
             summary << '\n';
         }
         std::cout << "Synthetic MF decoder recovery replay completed; results in summary.csv\n";
-        }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; status = 1; }
     MFShutdown();
     CoUninitialize();

@@ -21,7 +21,6 @@ import org.junit.runner.RunWith
 class CaptureServiceLifecycleTest {
   @Test fun stopThenUnbindExitsAndRemovesNotification() {
     val context = InstrumentationRegistry.getInstrumentation().targetContext
-    val pairedBefore = context.getSharedPreferences("phonecam_trusted_pcs", 0).all
     val stoppedBefore = context.getSharedPreferences("phonecam_session", 0).getBoolean("stopped", false)
     val connected = CountDownLatch(1)
     var service: CaptureService? = null
@@ -48,7 +47,6 @@ class CaptureServiceLifecycleTest {
     while (running() && System.currentTimeMillis() < deadline) Thread.sleep(100)
     assertFalse("Stopped service exits after UI unbind", running())
     assertTrue("No notification after exit", context.getSystemService(NotificationManager::class.java).activeNotifications.isEmpty())
-    assertEquals("Pairing is untouched", pairedBefore, context.getSharedPreferences("phonecam_trusted_pcs", 0).all)
     // This test deliberately leaves Stop latched, never resumes the camera.
     assertTrue("Stop survives exit (was $stoppedBefore)", context.getSharedPreferences("phonecam_session", 0).getBoolean("stopped", false))
   }

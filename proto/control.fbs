@@ -33,31 +33,15 @@ table SetTorch { on: bool; }
 table SetStabilization { on: bool; }
 table RequestKeyframe {}
 
-// Wireless (RTP over UDP) session bootstrap: PC tells the phone to
-// start live capture and stream RTP/H.264 to it. The phone learns the
-// PC's address from the *control TCP connection itself* (its remote peer) --
-// the user already had to make that connection for the PC to send this
-// command, so it doubles as destination discovery (no mDNS, no typed IP on
-// the phone side). The phone replies Ack{Ok} then starts capture + RTP
-// immediately; errors surface as a follow-up Error push, matching how every
-// async camera/encoder failure behaves (docs/control-protocol.md).
-// How the phone should deliver video for a session.
-enum VideoTransportMode : ubyte {
-  FramedTcp = 0,  // the phone's framed stream socket (USB/adb, tethering, Wi-Fi TCP)
-  Rtp = 1,        // RTP/H.264 over UDP straight to the PC (wireless)
-}
-
 table StartVideo {
-  mode: VideoTransportMode;
   width: uint16;
   height: uint16;
   fps: uint16;
   bitrate_bps: uint32;
-  rtp_port: uint16;      // PC-side UDP listen port (RTP mode only)
   explicit_start: bool; // only a user's Start may clear a deliberate Stop
 }
 table StopVideo { user_requested: bool; } // false for transport teardown
-table StreamIntent { stopped: bool; } // authenticated snapshot before capabilities, and on change
+table StreamIntent { stopped: bool; } // snapshot before capabilities, and on change
 table GetStreamIntent {} // lightweight heartbeat; never opens the camera
 
 // ---- phone -> PC status / telemetry ----
@@ -101,22 +85,6 @@ table LensChanged { camera_id: string; }
 table OrientationChanged { degrees: uint16; }        // 0/90/180/270, sensor-relative
 table Error { code: uint16; message: string; }
 
-// ---- session authentication ----
-
-// The phone challenges, the PC proves it knows the shared pairing code. A
-// challenge/response (rather than sending the code) keeps the code off the
-// wire, so someone watching the traffic can't harvest it.
-//
-// Only network sessions are challenged: a session over the adb-forwarded
-// abstract socket is a local USB link, which the phone already trusts, and
-// requiring a code there would be friction for no gain.
-table AuthChallenge { nonce: string; }
-table AuthResponse {
-  nonce: string;         // the PC's own nonce, so both sides contribute entropy
-  hmac: string;          // hex HMAC-SHA256(code, phone_nonce + "|" + pc_nonce)
-  client_id: string;     // paired PC identity (QR); absent means manual pairing-code login
-}
-
 // ---- envelope ----
 
 union ControlPayload {
@@ -131,12 +99,9 @@ union ControlPayload {
 
   // phone -> PC
   phonecam.wire.CapabilityDescriptor,
-  AuthChallenge,
   Ack, CurrentSettings, Stats,
   AfStateChanged, AeStateChanged, LensChanged, OrientationChanged, Error,
 
-  // PC -> phone
-  AuthResponse,
   StreamIntent,
   GetStreamIntent,
 }

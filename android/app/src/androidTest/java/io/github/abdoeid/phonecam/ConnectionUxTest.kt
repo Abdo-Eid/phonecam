@@ -15,8 +15,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Live-device tests for the connection UX. A paired tray host must be running on
- * the same network. These never clear pairing keys or app data.
+ * Live-device tests for the connection UX. A USB-connected tray host must be
+ * running. These never clear app data.
  */
 @RunWith(AndroidJUnit4::class)
 class ConnectionUxTest {
@@ -30,7 +30,7 @@ class ConnectionUxTest {
   private fun present(label: String) =
     compose.onAllNodesWithText(label).fetchSemanticsNodes().isNotEmpty()
 
-  @Test fun stopStaysStoppedAndHidesPairing() {
+  @Test fun stopStaysStoppedWithoutPairingUi() {
     // A previous deliberate Stop is allowed; only an explicit button press resumes it.
     compose.waitUntil(45_000) { present("START") || present("STOP") }
     if (present("START")) compose.onNodeWithText("START").performClick()
@@ -41,7 +41,7 @@ class ConnectionUxTest {
     compose.onNodeWithText("PAIRING CODE").assertDoesNotExist()
     compose.onNodeWithText("CONNECTION SETTINGS").performClick()
     compose.onNodeWithText("Connection settings").assertIsDisplayed()
-    compose.onNodeWithText("PAIRING CODE").assertIsDisplayed()
+    compose.onNodeWithText("USB tethering is preferred and is detected automatically. USB debugging (ADB) is used when tethering is unavailable.").assertIsDisplayed()
     compose.onNodeWithText("Done").performClick()
     // Four watchdog intervals, not merely a transient UI assertion.
     Thread.sleep(12_000)
@@ -78,7 +78,6 @@ class ConnectionUxTest {
     val context = InstrumentationRegistry.getInstrumentation().targetContext
     val notifications = context.getSystemService(NotificationManager::class.java)
     val activityManager = context.getSystemService(ActivityManager::class.java)
-    val pcs = context.getSharedPreferences("phonecam_trusted_pcs", 0).all
     compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
     val deadline = System.currentTimeMillis() + 10_000
     @Suppress("DEPRECATION")
@@ -88,7 +87,6 @@ class ConnectionUxTest {
     while (serviceRunning() && System.currentTimeMillis() < deadline) Thread.sleep(100)
     org.junit.Assert.assertFalse("Stopped service must exit when UI closes", serviceRunning())
     org.junit.Assert.assertTrue("No ongoing PhoneCam notification", notifications.activeNotifications.isEmpty())
-    org.junit.Assert.assertEquals("Pairing is preserved", pcs, context.getSharedPreferences("phonecam_trusted_pcs", 0).all)
     compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
     await("STOPPED")
   }

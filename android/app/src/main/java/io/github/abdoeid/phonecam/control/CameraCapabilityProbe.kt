@@ -45,7 +45,7 @@ object CameraCapabilityProbe {
     // whenever proto/control.fbs's ControlPayload union changes shape: FlatBuffers
     // assigns union payload types by declaration order, so a new command renumbers
     // the existing ones and mismatched builds misread each other silently.
-    CapabilityDescriptor.addProtocolVersion(builder, 6u)
+    CapabilityDescriptor.addProtocolVersion(builder, 8u)
     return CapabilityDescriptor.endCapabilityDescriptor(builder)
   }
 

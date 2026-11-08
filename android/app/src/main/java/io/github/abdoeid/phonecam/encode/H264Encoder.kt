@@ -18,9 +18,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * Hardware H.264 encoder using a MediaCodec input Surface (Camera2 renders directly into it --
  * zero-copy, no CPU frame ever exists). Output is Annex-B (start-code-prefixed NALUs, including
  * CSD/SPS/PPS), emitted as wire-framed CONFIG/FRAME packets per docs/wire-protocol.md (see
- * [WireFraming]) to [sink] -- the connected transport's packet sink (USB socket, AOA, RTP).
- * [out] used to be a raw OutputStream; the [VideoPacketSink] indirection is what
- * lets non-stream transports (RTP/UDP) join without the encoder knowing they exist.
+ * [WireFraming]) to [sink] -- the connected transport's packet sink (ADB or USB-tethered TCP).
+ * [VideoPacketSink] keeps the encoder independent of socket setup and lifecycle.
  *
  * Constrained-baseline / CBR / no B-frames / low-latency, per docs/architecture.md's capture-pipeline section.
  */

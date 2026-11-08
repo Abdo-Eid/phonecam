@@ -90,7 +90,7 @@ ControlTransport::~ControlTransport() {
 
 bool ControlTransport::Connect(uint16_t port, const std::string& host) {
     impl_->cancelled.store(false);
-    // Direct-host mode (tethering/Wi-Fi) needs no adb at all -- that call is purely how the
+    // Direct-host mode (USB tethering) needs no adb at all -- that call is purely how the
     // localhost path gets a route to the phone's abstract socket in the first place.
     if (host.empty() && !RunAdbForward(port)) {
         return false;

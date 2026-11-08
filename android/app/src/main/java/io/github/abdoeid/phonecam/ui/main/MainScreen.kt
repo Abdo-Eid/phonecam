@@ -39,16 +39,15 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.SignalWifiOff
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -75,7 +74,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
-import io.github.abdoeid.phonecam.control.PairingCode
 import io.github.abdoeid.phonecam.theme.Dim
 import io.github.abdoeid.phonecam.theme.Ink
 import io.github.abdoeid.phonecam.theme.NoSignalBlue
@@ -85,8 +83,6 @@ import io.github.abdoeid.phonecam.theme.PanelLine
 import io.github.abdoeid.phonecam.theme.StandbyAmber
 import io.github.abdoeid.phonecam.theme.StandbyDim
 import io.github.abdoeid.phonecam.theme.TallyRed
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 
 @Composable
 fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, viewModel: MainScreenViewModel = viewModel()) {
@@ -112,12 +108,9 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
       ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     )
   }
-  var startUsbAfterPermission by remember { mutableStateOf(false) }
   val permissionLauncher =
     rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
       hasCameraPermission = granted
-      if (granted && startUsbAfterPermission) viewModel.startCapture()
-      startUsbAfterPermission = false
     }
 
   val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -127,38 +120,16 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
     }
   }
 
-  // The pairing code: what a PC has to be given before it may drive this camera over a
-  // network link. Shown here because the PC asks for it, and there is no other way to get
-  // it onto the other machine.
-  val pairing = remember { PairingCode(context) }
-  var pairingCode by remember { mutableStateOf(pairing.code) }
-  val pairedPcs by viewModel.pairedPcs.collectAsStateWithLifecycle()
-  val pairingMessage by viewModel.pairingMessage.collectAsStateWithLifecycle()
   val connectedPc by viewModel.connectedPc.collectAsStateWithLifecycle()
   var showSettings by remember { mutableStateOf(false) }
-  var showManualCode by remember { mutableStateOf(false) }
-  var forgetId by remember { mutableStateOf<String?>(null) }
-  val qrScanner = rememberLauncherForActivityResult(ScanContract()) {
-    hasCameraPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-    viewModel.qrScanned(it.contents)
-  }
 
   LaunchedEffect(viewModel) {
     viewModel.notifications.collect { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
   }
   val streaming = state is CaptureUiState.Streaming
   LaunchedEffect(streaming) {
-    if (streaming) { showSettings = false; showManualCode = false }
+    if (streaming) showSettings = false
   }
-  val scanQr = {
-    if (viewModel.beginQrScan()) {
-      showSettings = false
-      qrScanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-        .setPrompt("Scan the QR in PhoneCam on your PC").setBeepEnabled(false)
-        .setOrientationLocked(false).setCaptureActivity(QrScanActivity::class.java))
-    }
-  }
-
   Column(
     modifier = modifier.fillMaxSize().background(Ink).padding(horizontal = 28.dp, vertical = 36.dp),
     horizontalAlignment = Alignment.CenterHorizontally,
@@ -166,8 +137,6 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
     Nameplate(state = state)
     if (connectedPc.isNotEmpty()) {
       Text(connectedPc, color = Paper, modifier = Modifier.padding(top = 12.dp))
-    } else if (pairedPcs.isNotEmpty()) {
-      Text("Remembered: ${pairedPcs.joinToString { it.name }}", color = Dim, modifier = Modifier.padding(top = 12.dp))
     }
 
     Spacer(Modifier.weight(1f))
@@ -182,43 +151,18 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
 
     if (showConnectionChoices(state, connectedPc)) {
       Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("CONNECT TO YOUR PC", color = Paper, style = MaterialTheme.typography.labelMedium)
-        TextButton(onClick = scanQr) { Text("SCAN PC QR", color = NoSignalBlue) }
-        TextButton(onClick = { showManualCode = true }) { Text("USE PAIRING CODE", color = Paper) }
-        TextButton(onClick = {
-          if (hasCameraPermission) viewModel.startCapture() else {
-            startUsbAfterPermission = true
-            permissionLauncher.launch(Manifest.permission.CAMERA)
-          }
-        }) { Text("CONNECT WITH USB", color = Paper) }
-        Text("Cable connected? Open the PC tray → Use USB.", color = Dim,
+        Text("CONNECT YOUR PC OVER USB", color = Paper, style = MaterialTheme.typography.labelMedium)
+        Text("Enable USB tethering or USB debugging (ADB), then open PhoneCam on both devices.", color = Dim,
           style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
       }
-    }
-    if (pairingMessage.isNotEmpty() && !streaming && state != CaptureUiState.Stopped) {
-      Text(pairingMessage, color = Dim, style = MaterialTheme.typography.bodySmall)
     }
     TextButton(onClick = { showSettings = true }) { Text("CONNECTION SETTINGS", color = Dim) }
 
     Text(
-      "Wi-Fi / USB → Windows virtual camera",
+      "USB → Windows virtual camera",
       style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
       color = Dim,
       textAlign = TextAlign.Center,
-    )
-  }
-  if (showManualCode) {
-    AlertDialog(
-      onDismissRequest = { showManualCode = false },
-      title = { Text("Connect with a code") },
-      text = {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-          Text("On the PC tray: Connect over Wi-Fi → Use code instead. Enter this phone's code there.")
-          PairingCodeRow(pairingCode) { pairingCode = pairing.regenerate() }
-          Text("Both devices must be on the same Wi-Fi or hotspot.", style = MaterialTheme.typography.bodySmall)
-        }
-      },
-      confirmButton = { TextButton(onClick = { showManualCode = false }) { Text("Done") } },
     )
   }
   if (showSettings) {
@@ -227,62 +171,14 @@ fun MainScreen(onItemClick: (NavKey) -> Unit, modifier: Modifier = Modifier, vie
       title = { Text("Connection settings") },
       text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-          TextButton(onClick = scanQr) { Text("Scan QR / change PC") }
-          Text("Manual pairing code", style = MaterialTheme.typography.labelMedium)
-          PairingCodeRow(pairingCode) { pairingCode = pairing.regenerate() }
-          for (pc in pairedPcs) {
-            Text(pc.name)
-            TextButton(onClick = { forgetId = pc.id }) { Text("Forget PC") }
-          }
-          Text("Video is not encrypted. Use a trusted Wi-Fi or hotspot.", style = MaterialTheme.typography.bodySmall)
+          Text("USB tethering is preferred and is detected automatically. USB debugging (ADB) is used when tethering is unavailable.")
+          Text("Tethered control and video are available only through the phone's USB-tethering interface; the data is not encrypted.", style = MaterialTheme.typography.bodySmall)
         }
       },
       confirmButton = { TextButton(onClick = { showSettings = false }) { Text("Done") } },
     )
   }
-  forgetId?.let { id ->
-    AlertDialog(
-      onDismissRequest = { forgetId = null },
-      title = { Text("Forget this PC?") },
-      text = { Text("It will need a new QR scan to connect again.") },
-      confirmButton = { TextButton(onClick = { viewModel.forgetPc(id); forgetId = null }) { Text("Forget") } },
-      dismissButton = { TextButton(onClick = { forgetId = null }) { Text("Cancel") } },
-    )
-  }
 }
-
-// The pairing code, grouped for reading. A PC needs it to be allowed to drive this camera
-// over a network link; over USB the connection is trusted without one.
-@Composable
-private fun PairingCodeRow(code: String, onRegenerate: () -> Unit) {
-  Row(
-    verticalAlignment = Alignment.CenterVertically,
-    horizontalArrangement = Arrangement.spacedBy(10.dp),
-    modifier = Modifier.padding(bottom = 14.dp),
-  ) {
-    Text(
-      "PAIRING CODE",
-      style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 10.sp),
-      color = Dim,
-    )
-    Text(
-      formatPairingCode(code),
-      style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
-      color = Paper,
-    )
-    Text(
-      "NEW",
-      style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 10.sp),
-      color = NoSignalBlue,
-      modifier = Modifier.clickable(onClick = onRegenerate),
-    )
-  }
-}
-
-// "ABCD-EFGH-IJKL" -- the code is 12 characters, split into three groups so it can be read
-// out loud over a phone call without confusion.
-private fun formatPairingCode(code: String): String =
-  code.chunked(4).joinToString("-")
 
 // Wordmark + a live status dot -- a device nameplate, not an app-icon badge. The dot is the
 // same accent StatusVisual would give the current state, so the header itself hints at state
@@ -302,7 +198,7 @@ private fun Nameplate(state: CaptureUiState) {
       )
     }
     Text(
-      "wi-fi / usb → windows",
+      "usb → windows",
       style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
       color = Dim,
       modifier = Modifier.padding(start = 19.dp, top = 2.dp),
@@ -383,7 +279,7 @@ private fun ViewfinderPanel(state: CaptureUiState, onStart: () -> Unit, onStop: 
       ViewfinderBrackets(accent = accent, size = 92.dp) {
         when (state) {
           CaptureUiState.WaitingForConnection -> ScanningGlyph(accent)
-          is CaptureUiState.Error -> Icon(Icons.Filled.SignalWifiOff, contentDescription = null, tint = accent, modifier = Modifier.size(30.dp))
+          is CaptureUiState.Error -> Icon(Icons.Filled.VideocamOff, contentDescription = null, tint = accent, modifier = Modifier.size(30.dp))
           else -> PulsingDot(color = accent, active = state is CaptureUiState.Streaming, size = 16.dp)
         }
       }
