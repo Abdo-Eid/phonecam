@@ -70,7 +70,7 @@ Each is sent inside a `ControlEnvelope` with a fresh, monotonically increasing
 | `Stats` | 0 | pushed ~1/sec: encode fps, bitrate, dropped frames, `thermal_status` |
 | `AfStateChanged` / `AeStateChanged` | 0 | mirrors Camera2 `CaptureResult` AF/AE state, for a focus/exposure indicator in the host UI |
 | `LensChanged` | 0 | confirms a `SetLens` took effect (or reflects the phone's default lens right after `Start`) |
-| `OrientationChanged` | 0 | sensor-relative rotation; host uses this to rotate the frame it feeds the virtual camera if needed |
+| `OrientationChanged` | 0 | clockwise degrees (0/90/180/270) that make the open lens's picture upright, given how the phone is held. Sent when a camera opens, when the phone is turned, and after capabilities if a camera is already open; the host has the virtual camera turn the picture by it |
 | `Error` | 0 or triggering `cmd_id` | unrecoverable-for-this-operation condition, e.g. camera taken by another app |
 
 ## Synchronization discipline

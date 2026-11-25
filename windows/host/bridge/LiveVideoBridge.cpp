@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "log/Log.h"
+#include "picture/Nv12.h"
 
 namespace phonecam::bridge {
 
@@ -37,6 +38,8 @@ std::uint64_t NowNs() {
 // up (the decoder negotiates its output format, the first keyframe is the expensive one),
 // and the reference frame itself measures as exactly zero.
 constexpr uint64_t kLatencyWarmupFrames = 10;
+
+constexpr uint64_t kPreviewIntervalNs = 50'000'000;
 }  // namespace
 
 LiveVideoBridge::LiveVideoBridge(std::unique_ptr<phonecam::transport::VideoTransport> transport)
@@ -51,7 +54,136 @@ bool LiveVideoBridge::Prepare() {
         return false;
     }
     ringOpen_ = true;
+    {
+        std::lock_guard<std::mutex> lock(pictureMutex_);
+        UpdateRingLocked();
+    }
+    ring_.SetNegotiatedSize(0, 0);  // left over from an app that may be long gone
     return true;
+}
+
+void LiveVideoBridge::PollConsumer() {
+    uint32_t width = 0, height = 0;
+    ring_.GetNegotiatedSize(width, height);
+    // Two separate atomics, so a half-written pair is possible; it counts as "not now" and the
+    // next frame the app draws repairs it.
+    if (width == 0 || height == 0) return;
+    consumerSize_.store((uint64_t{width} << 32) | height);
+    consumerSeenMs_.store(static_cast<int64_t>(NowNs() / 1'000'000));
+    ring_.SetNegotiatedSize(0, 0);
+}
+
+LiveVideoBridge::Consumer LiveVideoBridge::GetConsumer() const {
+    const uint64_t size = consumerSize_.load();
+    const int64_t seen = consumerSeenMs_.load();
+    Consumer consumer;
+    consumer.size = {static_cast<uint32_t>(size >> 32), static_cast<uint32_t>(size)};
+    // An app draws 30 times a second and this is polled 4 times a second.
+    consumer.active = seen != 0 && static_cast<int64_t>(NowNs() / 1'000'000) - seen < 800;
+    return consumer;
+}
+
+phonecam::picture::Size LiveVideoBridge::GetOfferedSize() const {
+    phonecam::picture::Size size;
+    ring_.GetOutputSize(size.width, size.height);
+    return size;
+}
+
+void LiveVideoBridge::ReleaseOfferedSize() {
+    std::lock_guard<std::mutex> lock(pictureMutex_);
+    released_ = true;  // a late frame or a turned phone must not put it back
+    const auto view = ViewLocked();
+    ring_.SetTransform(view.rotation, view.mirror);
+}
+
+phonecam::picture::View LiveVideoBridge::ViewLocked() const {
+    return {source_, phonecam::picture::Combine(phoneRotation_, picture_.turn), picture_.mirror};
+}
+
+void LiveVideoBridge::UpdateRingLocked() {
+    if (released_) return;
+    const auto view = ViewLocked();
+    const auto output = phonecam::picture::OutputSize(picture_, view);
+    ring_.SetTransform(view.rotation, view.mirror, output.width, output.height);
+}
+
+void LiveVideoBridge::SetPicture(const phonecam::picture::Picture& picture) {
+    std::lock_guard<std::mutex> lock(pictureMutex_);
+    picture_ = picture;
+    UpdateRingLocked();
+}
+
+phonecam::picture::Picture LiveVideoBridge::GetPicture() const {
+    std::lock_guard<std::mutex> lock(pictureMutex_);
+    return picture_;
+}
+
+void LiveVideoBridge::SetPhoneRotation(phonecam::shm::Rotation rotation) {
+    std::lock_guard<std::mutex> lock(pictureMutex_);
+    if (rotation == phoneRotation_) return;
+    phoneRotation_ = rotation;
+    UpdateRingLocked();
+}
+
+phonecam::picture::View LiveVideoBridge::GetView() const {
+    std::lock_guard<std::mutex> lock(pictureMutex_);
+    return ViewLocked();
+}
+
+void LiveVideoBridge::SetPreview(std::function<void()> onFrame) {
+    std::lock_guard<std::mutex> lock(previewMutex_);
+    onPreview_ = std::move(onFrame);
+    previewReady_ = false;
+    preview_ = {};  // also frees the buffer when the window closes
+    previewOn_.store(onPreview_ != nullptr);
+}
+
+bool LiveVideoBridge::TakePreview(PreviewImage& image) {
+    std::lock_guard<std::mutex> lock(previewMutex_);
+    if (!previewReady_) return false;
+    std::swap(image, preview_);  // hands the old buffer back for reuse
+    previewReady_ = false;
+    return true;
+}
+
+// Decode thread. The frame is cropped to the size the virtual camera offers; "fit the whole
+// frame", which is all the virtual camera knows, then fills the picture. See picture/Framing.h.
+void LiveVideoBridge::PublishFrame(const phonecam::decode::DecodedFrame& frame) {
+    phonecam::picture::Crop crop;
+    {
+        std::lock_guard<std::mutex> lock(pictureMutex_);
+        const phonecam::picture::Size source{frame.width, frame.height};
+        if (source != source_) {
+            source_ = source;
+            UpdateRingLocked();
+        }
+        const auto view = ViewLocked();
+        crop = phonecam::picture::ComputeCrop(view, picture_, phonecam::picture::OutputSize(picture_, view));
+    }
+    const uint8_t* pixels = frame.nv12;
+    if (crop.width != frame.width || crop.height != frame.height) {
+        cropBuffer_.resize(phonecam::picture::Nv12Size(crop.width, crop.height));
+        phonecam::picture::CropNv12(frame.nv12, frame.width, frame.height, crop, cropBuffer_.data());
+        pixels = cropBuffer_.data();
+    }
+    ring_.WriteFrame(crop.width, crop.height, frame.timestampUs, pixels);
+    if (previewOn_.load(std::memory_order_relaxed)) PublishPreview(frame);
+}
+
+void LiveVideoBridge::PublishPreview(const phonecam::decode::DecodedFrame& frame) {
+    std::lock_guard<std::mutex> lock(previewMutex_);
+    if (!onPreview_ || previewReady_) return;
+    // Every second frame of a 30 fps stream: smooth enough to frame a shot, half the work.
+    const uint64_t now = NowNs();
+    if (now - previewAtNs_ < kPreviewIntervalNs) return;
+    previewAtNs_ = now;
+    // Half of 1080p is still about what the window shows.
+    const uint32_t step = (std::max)(frame.width, frame.height) > 1280 ? 2 : 1;
+    phonecam::picture::Nv12ToBgra(frame.nv12, frame.width, frame.height, step, preview_.width, preview_.height,
+                                  preview_.bgra);
+    preview_.source = {frame.width, frame.height};
+    previewReady_ = true;
+    onPreview_();
 }
 
 bool LiveVideoBridge::Start() {
@@ -177,7 +309,7 @@ void LiveVideoBridge::Run() {
                                            std::chrono::steady_clock::now().time_since_epoch())
                                            .count());
                                    RecordLatency(frame.timestampUs, nowUs);
-                                   ring_.WriteFrame(frame.width, frame.height, frame.timestampUs, frame.nv12);
+                                   PublishFrame(frame);
                                    ++frames;
                                     framesDecoded_.fetch_add(1, std::memory_order_relaxed);
 #ifdef _DEBUG

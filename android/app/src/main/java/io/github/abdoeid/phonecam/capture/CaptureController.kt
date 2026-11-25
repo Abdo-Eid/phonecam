@@ -82,6 +82,20 @@ class CaptureController(private val context: Context) {
 
   private var statsThread: Thread? = null
 
+  // Only watched while the camera is open; the PC turns the picture to match. The sensor reports on
+  // the main thread, where writing to a socket is not allowed (it throws for a tethered PC).
+  private val orientation = PhoneOrientation(context) { Thread(::sendOrientation, "Orientation-send").start() }
+  private val orientationLock = Any()
+
+  /** Clockwise turn that makes the current picture upright, or null while no camera is open. */
+  fun uprightRotation(): Int? = camera?.uprightRotation(orientation.quarterTurn)
+
+  // Reads the value under the lock it is sent under, so the last message is always the newest.
+  private fun sendOrientation() = synchronized(orientationLock) {
+    uprightRotation()?.let { controlChannel?.sendOrientation(it) }
+    Unit
+  }
+
   // Public because the durable control channel in CaptureService (which owns the receive thread
   // this listener runs on) delegates camera commands here. Dispatches PC -> phone commands
   // (docs/control-protocol.md) onto whichever camera/encoder instance is live right now;
@@ -159,6 +173,7 @@ class CaptureController(private val context: Context) {
     lensFacing: Int = CameraCharacteristics.LENS_FACING_BACK,
   ) {
     stopRequested.set(false)
+    orientation.start()
     val myCancelToken = AtomicBoolean(false)
     cancelToken = myCancelToken
     state = CaptureState.WAITING_FOR_CONNECTION
@@ -232,6 +247,7 @@ class CaptureController(private val context: Context) {
           cam.onCameraReady = { cameraId ->
             controlChannel?.sendLensChanged(cameraId)
             pushCurrentSettings()
+            sendOrientation() // each lens sits at its own angle
           }
           camera = cam
           startTimeMs = SystemClock.elapsedRealtime()
@@ -253,6 +269,7 @@ class CaptureController(private val context: Context) {
     // main thread is still in progress on the same encoder/camera -- only
     // the first caller should actually tear anything down.
     if (!stopRequested.compareAndSet(false, true)) return
+    orientation.stop()
     cancelToken.set(true) // this cycle's own token -- see its declaration for why not `state`
     state = CaptureState.IDLE // set first: signals both accept threads this is a deliberate stop
 

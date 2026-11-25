@@ -435,7 +435,7 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
       <article class="stage">
         <span class="stage-n">03</span>
         <h3><span class="t-en">Transport</span><span class="t-ar">النقل</span></h3>
-        <p><span class="t-en">USB tethering first, then USB debugging (ADB). Either path can also be selected from the Windows tray.</span><span class="t-ar">‏USB tethering أولًا، ثم تصحيح USB عبر ADB. ويمكن اختيار أي مسار من قائمة شريط المهام في ويندوز.</span></p>
+        <p><span class="t-en">USB tethering first, then USB debugging (ADB). Either path can also be selected in PhoneCam's window.</span><span class="t-ar">‏USB tethering أولًا، ثم تصحيح USB عبر ADB. ويمكن اختيار أي مسار من نافذة PhoneCam.</span></p>
       </article>
       <article class="stage">
         <span class="stage-n">04</span>
@@ -618,12 +618,6 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
     </div>
 
     <div class="issues">
-      <article class="issue">
-        <h3><span class="t-en">Portrait breaks in DirectShow apps</span><span class="t-ar">الوضع الرأسي يتعطّل في تطبيقات DirectShow</span></h3>
-        <p><span class="t-en">The vertical resolutions look correct in Media Foundation apps but come out corrupted in DirectShow apps, which includes Zoom's classic client and older OBS. The cause is a byte-alignment bug in a Windows component, not in this code. Needs a workaround.</span><span class="t-ar">تبدو الدقّات الرأسية صحيحة في تطبيقات Media Foundation لكنها تخرج تالفة في تطبيقات DirectShow، ومنها نسخة Zoom التقليدية وإصدارات OBS القديمة. السبب خلل في محاذاة البايتات داخل مكوّن من ويندوز، لا في هذه الشيفرة. تحتاج إلى حلّ التفافي.</span></p>
-        <div class="tags"><span class="tag" data-t="hard"><span class="t-en">Hard</span><span class="t-ar">صعب</span></span><span class="tag">Windows</span><span class="tag">C++</span></div>
-      </article>
-
       <article class="issue">
         <h3><span class="t-en">USB reconnection coverage</span><span class="t-ar">اختبارات إعادة الاتصال عبر USB</span></h3>
         <p><span class="t-en">The current USB-only build still needs physical unplug/replug and changed-tether-address tests. Keep the phone app visible for reconnect testing; a disconnected hidden app is supposed to exit, not retry forever.</span><span class="t-ar">تحتاج النسخة الحالية إلى اختبار فصل الكابل وإعادة توصيله وتغيّر عنوان مشاركة الاتصال. أبقِ تطبيق الهاتف ظاهرًا لهذه الاختبارات؛ فمن المقصود أن يُغلق التطبيق المخفي عند انقطاع الاتصال، لا أن يعيد المحاولة إلى الأبد.</span></p>

@@ -53,7 +53,18 @@ add_executable(phonecam-host WIN32
     tray/TrayIcon.cpp
     connection/ConnectionManager.h
     connection/ConnectionManager.cpp
+    picture/Framing.h
+    picture/Nv12.h
+    camera/CameraSync.h
+    camera/CameraSync.cpp
+    settings/Settings.h
+    settings/Settings.cpp
+    app/AppController.h
+    app/AppController.cpp
+    ui/MainWindow.h
+    ui/MainWindow.cpp
     resources/phonecam.rc
+    resources/phonecam-host.manifest
 )
 
 add_dependencies(phonecam-host phonecam_proto_gen)
@@ -72,3 +83,13 @@ add_executable(phonecam-video-tests transport/VideoTimingTests.cpp)
 
 add_executable(phonecam-media-settings-tests bench/MediaSettingsTests.cpp)
 target_include_directories(phonecam-media-settings-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Framing math, saved settings and camera replay. Needs no phone; writes only to its own
+# throwaway registry key.
+add_executable(phonecam-picture-tests
+    picture/PictureTests.cpp
+    camera/CameraSync.cpp
+    settings/Settings.cpp
+)
+target_include_directories(phonecam-picture-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(phonecam-picture-tests PRIVATE phonecam_common)

@@ -7,23 +7,37 @@
 #include "MediaStream.h"
 #include "MediaSource.h"
 #include <chrono>
+#include <iterator>
 #include <thread>
+#include <vector>
 
 namespace
 {
 	constexpr GUID kRequestGeneration = {0x374ef01f, 0x8cac, 0x42e2, {0x9a, 0xf8, 0xbb, 0x85, 0xab, 0x3d, 0x84, 0x49}};
-	// Real, app-negotiated resolution: the vcam advertises multiple sizes and lets the
-	// consuming app (Zoom/OBS/Chrome/...) pick one via normal MF/DirectShow negotiation, exactly
-	// like a real UVC webcam -- there's no other mechanism, and forcing a live format change on a
-	// running consumer would make the device disappear out from under it rather than gracefully
-	// re-negotiate. Index 0 (1920x1080 RGB32) is kept first and unchanged from before this
-	// existed, since some consumers pick index 0 blindly.
+	// What apps (Zoom/OBS/Chrome/...) can pick from, via normal MF/DirectShow negotiation like with
+	// a real UVC webcam. Normally that is exactly one size, the one the user chose in PhoneCam (see
+	// OfferedSizes), so every app receives the chosen shape without having to be configured. An app
+	// that is already running keeps its size until it reopens the camera: forcing a live format
+	// change would make the device disappear out from under it.
 	//
-	// 720p and 1080p only (not the vcam's job to invent sizes nobody asked for), landscape and
-	// portrait for both (portrait is what lets a vertically-mounted phone + a tray rotation
-	// setting fill the frame exactly -- see FrameGenerator's rotation math).
-	constexpr UINT32 kSizes[][2] = { {1920, 1080}, {1280, 720}, {1080, 1920}, {720, 1280} };
-	constexpr size_t kNumSizes = _countof(kSizes);
+	// This list is the fallback for a host that chose nothing (an older version, or none running).
+	// Index 0 (1920x1080 RGB32) stays first, since some consumers pick index 0 blindly.
+	struct Size { UINT32 width, height; };
+	constexpr Size kFallbackSizes[] = { {1920, 1080}, {1280, 720}, {1080, 1920}, {720, 1280} };
+
+	// Read once per activation, i.e. whenever an app opens the camera. Bounds guard against a
+	// corrupted ring: a nonsense size here would make the camera fail to open at all.
+	std::vector<Size> OfferedSizes()
+	{
+		phonecam::shm::SharedFrameRing ring;
+		UINT32 width = 0, height = 0;
+		if (ring.Open() && ring.GetOutputSize(width, height) &&
+			width >= 128 && height >= 128 && width <= 2560 && height <= 2560)
+		{
+			return { { width, height } };
+		}
+		return { std::begin(kFallbackSizes), std::end(kFallbackSizes) };
+	}
 
 	HRESULT AddVideoType(IMFMediaType** out, REFGUID subtype, UINT32 width, UINT32 height)
 	{
@@ -75,19 +89,20 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 	RETURN_IF_FAILED(MFCreateEventQueue(&_queue));
 	RETURN_IF_FAILED(MFAllocateSerialWorkQueue(MFASYNC_CALLBACK_QUEUE_MULTITHREADED, &_workQueue));
 
-	// RGB32 then NV12, for each size in kSizes -- 8 types total. Must match what the phone can
-	// actually produce (720p/1080p, from CaptureController.kt's own supported set) -- FrameGenerator
-	// resamples to whatever a consumer picked, so there's no need for the ring's real content to
-	// match exactly, just for these declared sizes to be ones FrameGenerator can actually fill.
-	auto types = wil::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFMediaType>>(kNumSizes * 2);
-	for (size_t i = 0; i < kNumSizes; ++i)
+	// RGB32 then NV12, for each offered size. FrameGenerator resamples to whatever a consumer
+	// picked, so there's no need for the ring's real content to match these sizes exactly.
+	const auto sizes = OfferedSizes();
+	_negotiatedWidth = sizes[0].width;
+	_negotiatedHeight = sizes[0].height;
+	auto types = wil::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFMediaType>>(sizes.size() * 2);
+	for (size_t i = 0; i < sizes.size(); ++i)
 	{
 		wil::com_ptr_nothrow<IMFMediaType> rgbType;
-		RETURN_IF_FAILED(AddVideoType(&rgbType, MFVideoFormat_RGB32, kSizes[i][0], kSizes[i][1]));
+		RETURN_IF_FAILED(AddVideoType(&rgbType, MFVideoFormat_RGB32, sizes[i].width, sizes[i].height));
 		types[i * 2] = rgbType.detach();
 
 		wil::com_ptr_nothrow<IMFMediaType> nv12Type;
-		RETURN_IF_FAILED(AddVideoType(&nv12Type, MFVideoFormat_NV12, kSizes[i][0], kSizes[i][1]));
+		RETURN_IF_FAILED(AddVideoType(&nv12Type, MFVideoFormat_NV12, sizes[i].width, sizes[i].height));
 		types[i * 2 + 1] = nv12Type.detach();
 	}
 

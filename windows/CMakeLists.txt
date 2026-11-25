@@ -18,7 +18,9 @@ if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 if (MSVC)
-  add_compile_options(/W4 /permissive- /EHsc)
+  # /utf-8: sources are UTF-8 without a BOM; without it MSVC reads "°" in a window label as two
+  # characters of the machine's ANSI code page.
+  add_compile_options(/W4 /permissive- /EHsc /utf-8)
   add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 endif()
 

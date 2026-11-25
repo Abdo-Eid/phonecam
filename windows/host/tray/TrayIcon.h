@@ -23,10 +23,11 @@ namespace phonecam::tray {
 // rotation each need a small picker) -- onClick and checked are ignored for a submenu parent,
 // its own children carry those instead.
 struct MenuItem {
-    std::string label;
+    std::string label;  // UTF-8
     std::function<void()> onClick;
     bool checked = false;
     std::vector<MenuItem> submenu;
+    bool isDefault = false;  // shown bold: what a left click on the icon does
 };
 
 class TrayIcon {
@@ -50,6 +51,18 @@ public:
     void SetMenuItems(std::function<std::vector<MenuItem>()> itemsProvider);
     void SetNotificationProvider(std::function<std::string()> provider);
     void Notify(const std::string& message);
+
+    // Left click on the icon, or another launch of PhoneCam handing over to this one (see
+    // SignalRunningInstance). Without it, a left click opens the menu like a right click.
+    void SetOpenHandler(std::function<void()> handler);
+    // Called several times a second on the message-pump thread. Keep it cheap.
+    void SetTick(std::function<void()> tick);
+    // Sees every message first, so a window on this thread can handle Tab/Enter itself. msg is a
+    // Win32 MSG*; returning true means it was handled.
+    void SetMessageFilter(std::function<bool(void* msg)> filter);
+
+    // Asks an already running PhoneCam to show its window. False if none is running.
+    static bool SignalRunningInstance();
 
     // Blocks running the Win32 message loop on the calling thread until the user picks Exit from
     // the tray menu, or Close() is called (from any thread). Meant to replace a plain

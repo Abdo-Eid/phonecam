@@ -77,11 +77,16 @@ struct RingHeader {
     uint32_t magic;
     uint32_t version;
     std::atomic<uint32_t> writeIndex;  // index into slots[] last published
-    // Packed: bits 0-1 = Rotation, bit 2 = mirror. A standing setting (not
-    // per-frame) -- set from the host's tray, read by the vcam DLL on every
-    // draw -- so it must live here, not HKCU (invisible to the vcam's
-    // service-account session) and not stamped per-frame (couldn't change
-    // while the phone is disconnected and no frames are being written).
+    // Packed: bits 0-1 = Rotation, bit 2 = mirror, bits 8-19 = output width / 8,
+    // bits 20-31 = output height / 8 (0 = offer the built-in list of sizes).
+    // A standing setting (not per-frame) -- set by the host, read by the vcam
+    // DLL on every draw (rotation, mirror) and whenever an app opens the
+    // camera (output size) -- so it must live here, not HKCU (invisible to the
+    // vcam's service-account session) and not stamped per-frame (couldn't
+    // change while the phone is disconnected and no frames are being written).
+    // The output size uses bits that older binaries always wrote as 0 and
+    // masked off when reading, so any mix of old and new host/DLL stays correct
+    // without renaming the mapping.
     std::atomic<uint32_t> transform;
     // What the consuming app actually negotiated (MediaStream::Start's MF_MT_FRAME_SIZE),
     // published by the vcam DLL on every draw -- read by the host's tray as a read-only display
@@ -284,14 +289,32 @@ public:
     // Either side may call these -- the host's tray writes the setting, the
     // vcam DLL reads it on every draw. No-op (false / rotation=Deg0,mirror=false)
     // if the ring isn't open yet, matching this class's existing lazy-open pattern.
-    bool SetTransform(Rotation rotation, bool mirror) {
+    //
+    // outputWidth/Height: the one size the virtual camera should offer video apps, multiples of 8;
+    // 0 offers the DLL's built-in list. Written together with the rest so a reader never sees half
+    // of a change.
+    bool SetTransform(Rotation rotation, bool mirror, uint32_t outputWidth = 0, uint32_t outputHeight = 0) {
         if (!view_) {
             return false;
         }
         RingHeader* header = static_cast<RingHeader*>(view_);
-        const uint32_t packed = (static_cast<uint32_t>(rotation) & 0x3u) | (mirror ? 0x4u : 0u);
+        const uint32_t packed = (static_cast<uint32_t>(rotation) & 0x3u) | (mirror ? 0x4u : 0u) |
+                                (((outputWidth / 8) & 0xFFFu) << 8) | (((outputHeight / 8) & 0xFFFu) << 20);
         header->transform.store(packed, std::memory_order_release);
         return true;
+    }
+
+    // False (and 0,0) when no single size was chosen: an older host, or the ring isn't open.
+    bool GetOutputSize(uint32_t& width, uint32_t& height) const {
+        width = height = 0;
+        if (!view_) {
+            return false;
+        }
+        const RingHeader* header = static_cast<const RingHeader*>(view_);
+        const uint32_t packed = header->transform.load(std::memory_order_acquire);
+        width = ((packed >> 8) & 0xFFFu) * 8;
+        height = ((packed >> 20) & 0xFFFu) * 8;
+        return width != 0 && height != 0;
     }
 
     void GetTransform(Rotation& rotation, bool& mirror) const {

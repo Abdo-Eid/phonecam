@@ -5,11 +5,15 @@
 
 #include "log/Log.h"
 #include "resources/resource.h"
+#include "text/Utf8.h"
 
 namespace phonecam::tray {
 
+using phonecam::text::Widen;
+
 namespace {
 constexpr UINT kCallbackMessage = WM_APP + 1;
+constexpr UINT kOpenMessage = WM_APP + 2;  // posted by SignalRunningInstance
 constexpr UINT kTimerId = 1;
 constexpr UINT kTimerIntervalMs = 250;
 constexpr UINT kIconId = 1;
@@ -25,6 +29,9 @@ struct TrayIcon::Impl {
     std::function<std::string()> statusProvider;
     std::function<std::vector<MenuItem>()> itemsProvider;
     std::function<std::string()> notificationProvider;
+    std::function<void()> openHandler;
+    std::function<void()> tick;
+    std::function<bool(void*)> messageFilter;
     // Rebuilt at the top of every ShowContextMenu() call, indexed by (menu ID - kMenuIdDynamicBase)
     // -- WM_COMMAND looks a clicked dynamic item's callback up here rather than needing a
     // permanent, ever-growing table, since the menu itself is already rebuilt fresh each time.
@@ -38,7 +45,7 @@ struct TrayIcon::Impl {
     // ever need to DestroyMenu() the top-level popup, never these children individually.
     void AppendItems(HMENU menu, const std::vector<MenuItem>& items) {
         for (const MenuItem& item : items) {
-            const std::wstring label(item.label.begin(), item.label.end());
+            const std::wstring label = Widen(item.label);
             if (!item.submenu.empty()) {
                 HMENU sub = CreatePopupMenu();
                 AppendItems(sub, item.submenu);
@@ -56,6 +63,7 @@ struct TrayIcon::Impl {
                 flags |= MF_GRAYED;
             }
             AppendMenuW(menu, flags, id, label.c_str());
+            if (item.isDefault) SetMenuDefaultItem(menu, id, FALSE);
         }
     }
 
@@ -67,7 +75,7 @@ struct TrayIcon::Impl {
         nid.uID = kIconId;
         nid.uFlags = NIF_TIP;
         const std::string status = statusProvider ? statusProvider() : std::string();
-        const std::wstring tip = L"PhoneCam - " + std::wstring(status.begin(), status.end());
+        const std::wstring tip = L"PhoneCam - " + Widen(status);
         wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
         Shell_NotifyIconW(NIM_MODIFY, &nid);
         if (notificationProvider) {
@@ -84,7 +92,7 @@ struct TrayIcon::Impl {
         nid.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
         nid.uTimeout = 3000;
         wcsncpy_s(nid.szInfoTitle, L"PhoneCam", _TRUNCATE);
-        wcsncpy_s(nid.szInfo, std::wstring(message.begin(), message.end()).c_str(), _TRUNCATE);
+        wcsncpy_s(nid.szInfo, Widen(message).c_str(), _TRUNCATE);
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
@@ -94,7 +102,7 @@ struct TrayIcon::Impl {
 
         HMENU menu = CreatePopupMenu();
         const std::string status = statusProvider ? statusProvider() : std::string();
-        AppendMenuW(menu, MF_STRING | MF_GRAYED, kMenuIdStatus, std::wstring(status.begin(), status.end()).c_str());
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, kMenuIdStatus, Widen(status).c_str());
 
         dynamicCallbacks.clear();
         if (itemsProvider) {
@@ -129,12 +137,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
         case kCallbackMessage:
-            if (impl && (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP)) {
+            if (impl && lParam == WM_LBUTTONUP && impl->openHandler) {
+                impl->openHandler();
+            } else if (impl && (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP)) {
                 impl->ShowContextMenu();
             }
             return 0;
+        case kOpenMessage:
+            if (impl && impl->openHandler) impl->openHandler();
+            return 0;
         case WM_TIMER:
-            if (impl && wParam == kTimerId) impl->RefreshTooltip();
+            if (impl && wParam == kTimerId) {
+                if (impl->tick) impl->tick();
+                impl->RefreshTooltip();
+            }
             return 0;
         case WM_COMMAND: {
             const UINT id = LOWORD(wParam);
@@ -187,6 +203,19 @@ void TrayIcon::SetNotificationProvider(std::function<std::string()> provider) {
     impl_->notificationProvider = std::move(provider);
 }
 void TrayIcon::Notify(const std::string& message) { impl_->Notify(message); }
+void TrayIcon::SetOpenHandler(std::function<void()> handler) { impl_->openHandler = std::move(handler); }
+void TrayIcon::SetTick(std::function<void()> tick) { impl_->tick = std::move(tick); }
+void TrayIcon::SetMessageFilter(std::function<bool(void*)> filter) { impl_->messageFilter = std::move(filter); }
+
+bool TrayIcon::SignalRunningInstance() {
+    const HWND running = FindWindowExW(HWND_MESSAGE, nullptr, kWindowClassName, nullptr);
+    if (!running) return false;
+    // Only the process the user just started may pass on the right to come to the foreground.
+    DWORD processId = 0;
+    GetWindowThreadProcessId(running, &processId);
+    AllowSetForegroundWindow(processId);
+    return PostMessageW(running, kOpenMessage, 0, 0) != FALSE;
+}
 
 bool TrayIcon::Create(std::function<std::string()> statusProvider) {
     impl_->statusProvider = std::move(statusProvider);
@@ -241,10 +270,7 @@ bool TrayIcon::Create(std::function<std::string()> statusProvider) {
 void TrayIcon::RunMessageLoop() {
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        const HWND active = GetActiveWindow();
-        wchar_t className[32] = {};
-        if (active && GetClassNameW(active, className, 32) && wcscmp(className, L"#32770") == 0 &&
-            IsDialogMessageW(active, &msg)) continue;
+        if (impl_->messageFilter && impl_->messageFilter(&msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

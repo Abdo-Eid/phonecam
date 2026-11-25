@@ -160,7 +160,7 @@ try {
                     if ($transport -eq 'Wifi' -and $reset -eq 'Data') { Manual-Wifi }
                     Wait-Until { (Log-Text) -match 'Connection: (Stopped|Streaming via)' } 'No authenticated ready/streaming state'
                     $lastConnection = Get-Content $script:log | Where-Object { $_ -match 'Connection: ' } | Select-Object -Last 1
-                    if ($lastConnection -match 'Stopped') { Tray-Command 203 }
+                    if ($lastConnection -match 'Stopped') { Tray-Command 201 }
                     $expected = if ($transport -eq 'Wifi') { 'Wi-Fi \(low latency\)' } else { 'USB \(ADB\)' }
                     Wait-Until { (Log-Text) -match "Connection: Streaming via $expected" } "No decoded $transport video"
                     # Streaming is only published after decoded frames. A brief sample also

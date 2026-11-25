@@ -336,8 +336,7 @@ static inline BYTE ClampToByte(int value)
 	return (BYTE)(value < 0 ? 0 : (value > 255 ? 255 : value));
 }
 
-// Inverse of RGB32ToNV12 above -- same BT.601/BT.709 selection (the BT.709 fix, see that
-// function's comment). Per-pixel rather than the 2x2-block-optimized style of the forward
+// Inverse of RGB32ToNV12 above. Per-pixel rather than the 2x2-block-optimized style of the forward
 // conversion: this is proof-of-concept code, not the perf-tuned path -- see
 // docs/architecture.md's quality/perf section.
 static inline void NV12ToRGB32(BYTE y, BYTE u, BYTE v, BYTE* bgra, bool useBt709)
@@ -367,7 +366,10 @@ HRESULT NV12ToRGB32(BYTE* input, ULONG inputSize, LONG inputStride, UINT width, 
 	RETURN_HR_IF(E_UNEXPECTED, (ULONG)(width * 1.5 * height) > inputSize);
 	RETURN_HR_IF(E_UNEXPECTED, (ULONG)(width * 4 * height) > outputSize);
 
-	const bool useBt709 = height >= 720;
+	// Always BT.709: this only ever converts ring frames, which come from the phone's HD stream.
+	// Not decided by height like the forward conversion -- the host crops frames, and a small crop
+	// of an HD picture must not change color.
+	const bool useBt709 = true;
 	const BYTE* yPlane = input;
 	const BYTE* uvPlane = input + (size_t)height * inputStride;
 

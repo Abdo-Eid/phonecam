@@ -21,7 +21,7 @@ Windows Frame Server: phonecam-vcam.dll → Media Foundation / DirectShow apps
 | Component | Responsibility | Build |
 |---|---|---|
 | `android/` | Camera capture, encoder, USB listeners, control, UI and foreground service | Gradle/Kotlin |
-| `windows/host/` | Transport selection, control, decoding, tray, virtual-camera registration | CMake/C++20 |
+| `windows/host/` | Transport selection, control, decoding, framing, window/tray, saved settings, virtual-camera registration | CMake/C++20 |
 | `windows/common/` | Wire helpers, logging and shared frame-ring contract | CMake |
 | `windows/svc/` | Creates and holds the cross-session frame ring | CMake |
 | `windows/vcam/` | COM media source loaded by Windows Frame Server | MSBuild/NuGet |
@@ -42,8 +42,9 @@ handle elevation; camera capture and decoding do not run in that service.
   `phonecam_control`. The host forwards local ports to those sockets. Android's
   debugging authorization remains required.
 
-Automatic startup prefers tethering and otherwise chooses ADB. The tray can
-explicitly switch paths without rebuilding the shared ring or re-registering
+Automatic startup prefers tethering and otherwise chooses ADB. The window's
+Connection list can return to Automatic or explicitly switch paths, and the choice
+is remembered (`--net`/`--adb` override it for one run). Switching happens without rebuilding the shared ring or re-registering
 the virtual camera. Do not assume automatic mode continuously changes transport
 or follows changed tether addresses: those recovery cases still need validation.
 
@@ -137,11 +138,72 @@ changes require version/name changes and coordinated binaries.
 
 ## Vcam resolution
 
-The consuming app negotiates 1920×1080, 1280×720, 1080×1920 or 720×1280 in the
-advertised media types. This is not a command to change the phone encoder.
-Tray resolution is read-only. Rotation/mirror are shared-ring settings applied
-PC-side; mirroring follows rotation. The reference mounting defaults to 90°
-clockwise rotation.
+The user chooses a shape and size in PhoneCam, and the virtual camera offers apps
+**only that size**. Every app therefore receives exactly that shape without being
+configured; there is no app setting to get wrong and nothing to crop again in OBS.
+This is not a command to change the phone encoder.
+
+The chosen size travels in spare bits of the ring header's `transform` field (width/8
+and height/8), next to rotation and mirror. Older binaries wrote those bits as zero and
+masked them off, so the mapping keeps its name and the ring service stays as it is; zero
+means "offer the built-in list" (1920×1080, 1280×720, 1080×1920, 720×1280). The ring
+outlives the host, so the host clears the size when it exits: an older host started next
+creates its camera before writing anything and would otherwise get the leftover size with
+uncropped frames. After a crash that can still happen until a new host runs or the service
+restarts. A new host with an **old** DLL is also wrong (it crops for a size the DLL doesn't
+offer), so install the two together.
+
+Windows reads the size list **once, when the camera is created**, and keeps answering
+apps from that: rewriting the chosen size changed nothing, even for apps that opened the
+camera later. So the host removes and re-creates the camera when the size changes
+(`OfferedSizeWatch`), but only while no app is using it. An app that is using it keeps
+its frame, with the new shape fitted inside, until it turns the camera off and on. The
+host knows because the DLL writes the negotiated size into the ring with every frame it
+draws, and the host clears it several times a second: a value that comes back means an
+app is using the camera now.
+
+### Shape and crop
+
+The DLL always scales the **whole** ring frame to fit the app's frame. The host crops
+each decoded frame to the offered size's exact proportions before publishing it
+(`windows/host/picture/Framing.h`), so "fit" leaves no black bars. Shapes are *Follow
+the phone* (tall while upright, wide while sideways; nothing cut off), 16:9, 4:3, 1:1,
+3:4 and 9:16, each in two sizes. The crop can be moved and resized; its position is
+stored as seen by the viewer, never in sensor axes. Crops are even-aligned and exactly
+proportioned, so no hairline bars remain.
+
+A small crop, or a wide crop from an upright phone, is enlarged by the DLL and so is
+softer. Capturing more pixels on the phone would fix that; changing the phone's capture
+size needs a reconfigure path that does not stop its service (see [plan.md](../plan.md)).
+
+### Rotation follows the phone
+
+The phone reports how far its picture must be turned to be upright
+(`OrientationChanged`, already in protocol v8 but unused until now): sensor orientation
+combined with how the phone is held, per Android's documented JPEG orientation formula,
+from the motion sensor so screen-rotation lock doesn't matter (turning the phone with its
+screen off has not been checked; some phones hold back sensor events then). The host adds
+the user's optional extra turn. An older phone app never sends it; the picture then stays
+turned for an upright phone's back lens. Rotation/mirror remain shared-ring settings
+applied by the DLL; mirroring follows rotation.
+
+## Window, saved settings and presets
+
+`windows/host/ui/MainWindow` is plain Win32 controls plus Direct2D (software
+rendering): it adds nothing to ship, and is created when opened and destroyed when
+closed. Its preview shows everything the phone sees at about 15 fps, with the part
+outside the crop darkened: what is bright is what apps receive. The decode thread only
+produces preview images while the window is open, and drops them when the window is busy.
+
+`AppController` is the single owner of what the user wants; the window and the tray
+both act through it. Settings and presets are per user in `HKCU\Software\PhoneCam`
+(`Current`, `Presets\<name>`). Built-in presets set only the picture. The torch is
+never saved. `CameraSync` replays lens, zoom, exposure and focus whenever the phone
+reports a fresh camera, because the phone starts every session on its back lens with
+defaults, and paces sliders to one outstanding command per control.
+
+Only one host runs per user session; starting it again brings up the running one's
+window. `--background` starts without opening the window.
 
 Virtual-camera requests are asynchronous, paced by a rational 30 fps clock,
 with increasing sample times and no catch-up burst. Restart invalidates queued
@@ -155,9 +217,19 @@ checks isolated the issue: an aligned 1024-wide portrait test was clean;
 forcing the CPU render path did not repair 1080-wide output; a native MF probe
 read both actual portrait sizes cleanly. Landscape output remained usable.
 
-No workaround is implemented. Do not infer native-MF correctness proves
-DirectShow correctness, or report actual Zoom/OBS versions as tested merely
-because an FFmpeg DirectShow probe passed.
+The journal concluded that the cause was row alignment, not orientation, and stopped
+because no standard 9:16 size was aligned. **The workaround is a non-standard size with
+the same proportions:** tall video is 1152×2048 (and 576×1024), exactly 9:16. Every size
+PhoneCam offers has a width that is a multiple of 64, 128 for all but the smallest tall
+one. Checked on 2026-11-25 with the synthetic pattern through FFmpeg's DirectShow input:
+all ten offered sizes were clean in NV12 (eight of them also checked in YUYV), while an
+unaligned 1080×1080 hung. RGB32 is listed but FFmpeg could not open it, with one offered
+size or with the built-in list, so it was not checked. The fallback list used with an old host still contains the two
+unaligned portrait sizes.
+
+Do not infer native-MF correctness proves DirectShow correctness, or that an FFmpeg
+DirectShow probe proves a particular Zoom/OBS version. (The user confirmed 1152×1152 in
+OBS and in Cap on 2026-11-25; tall was not tried in an app.)
 
 ## Quality/perf
 

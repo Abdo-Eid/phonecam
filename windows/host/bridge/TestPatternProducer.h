@@ -17,8 +17,11 @@ class TestPatternProducer {
 public:
     ~TestPatternProducer();
 
-    bool Start(uint32_t width, uint32_t height, uint32_t fps);
+    // outputWidth/Height: what the virtual camera should offer (0 = its built-in list).
+    bool Start(uint32_t width, uint32_t height, uint32_t fps, uint32_t outputWidth = 0, uint32_t outputHeight = 0);
     void Stop();
+    // See LiveVideoBridge::ReleaseOfferedSize.
+    void ReleaseOutputSize() { ring_.SetTransform(phonecam::shm::Rotation::Deg0, false); }
 
 private:
     void Run(uint32_t width, uint32_t height, uint32_t fps);

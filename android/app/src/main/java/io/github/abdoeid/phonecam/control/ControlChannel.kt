@@ -81,6 +81,9 @@ class ControlChannel(private val context: Context, private val listener: Control
   private val sendLock = Any()
 
   var stoppedProvider: () -> Boolean = { false }
+
+  /** The current picture rotation for a PC that connects mid-stream; null while no camera is open. */
+  var orientationProvider: () -> Int? = { null }
   val isConnected: Boolean get() = output != null
 
   /**
@@ -223,6 +226,17 @@ class ControlChannel(private val context: Context, private val listener: Control
       ControlEnvelope.createControlEnvelope(
         builder, 0u, ControlPayload.phonecam_wire_CapabilityDescriptor, capsOffset,
       )
+    ControlEnvelope.finishControlEnvelopeBuffer(builder, envelope)
+    sendBytes(builder)
+    orientationProvider()?.let { sendOrientation(it) }
+  }
+
+  /** [degrees]: clockwise turn that makes the current lens's picture upright (0/90/180/270). */
+  fun sendOrientation(degrees: Int) {
+    if (output == null) return
+    val builder = FlatBufferBuilder(64)
+    val payload = phonecam.control.OrientationChanged.createOrientationChanged(builder, degrees.toUShort())
+    val envelope = ControlEnvelope.createControlEnvelope(builder, 0u, ControlPayload.OrientationChanged, payload)
     ControlEnvelope.finishControlEnvelopeBuffer(builder, envelope)
     sendBytes(builder)
   }

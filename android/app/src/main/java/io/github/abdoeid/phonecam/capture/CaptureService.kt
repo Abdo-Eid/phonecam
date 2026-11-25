@@ -160,6 +160,7 @@ class CaptureService : Service() {
     val channel = ControlChannel(this, controlListener)
     controlChannel = channel
     channel.stoppedProvider = { userStopped }
+    channel.orientationProvider = { controller.uprightRotation() }
     // The controller pushes state changes (CurrentSettings/Stats/LensChanged) back to the PC
     // through this channel, so it needs the reference.
     controller.bindControlChannel(channel)

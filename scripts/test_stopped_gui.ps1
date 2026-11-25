@@ -41,8 +41,8 @@ if ($Action -eq 'Resume' -and $before -notmatch 'name="stopped" value="true"') {
 if ($Action -eq 'Stop' -and $before -match 'name="stopped" value="true"') { throw 'Stop test requires a streaming phone' }
 # The tray's Start/Stop entry is only offered once the control session is ready.
 Wait-Until { (@(Get-Content $log) | Where-Object { $_ -match 'Connection: ' } | Select-Object -Last 1) -match 'Connection: (Streaming via|Stopped|Paired; waiting|Connecting - waiting)' } 'No live session to drive'
-# The first three dynamic actions are Wi-Fi, USB, Disconnect; the next is Start/Stop.
-Tray-Command 203
+# The first dynamic action is Open PhoneCam; the next is Start/Stop.
+Tray-Command 201
 if ($Action -eq 'Resume') {
     Wait-Until { @(Get-Content $log | Select-Object -Skip $start) -match 'Connection: Streaming via' } 'Explicit tray Start did not resume'
     'PASS explicit tray Start resumes remembered connection'

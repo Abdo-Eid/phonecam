@@ -11,8 +11,8 @@ This guide covers what you need to know before your first change.
 ## Start with the current architecture
 
 [`docs/architecture.md`](docs/architecture.md) summarizes the USB-only pipeline,
-background-service rule, shared-memory/elevation boundary and known portrait
-limitation. It links to the original development journal in Git history instead
+background-service rule, shared-memory/elevation boundary and how the virtual
+camera's size is chosen. It links to the original development journal in Git history instead
 of mixing obsolete implementations into current instructions.
 
 Use [`docs/build.md`](docs/build.md) for build/deployment and tests,

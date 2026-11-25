@@ -10,7 +10,8 @@ namespace phonecam::bridge {
 
 TestPatternProducer::~TestPatternProducer() { Stop(); }
 
-bool TestPatternProducer::Start(uint32_t width, uint32_t height, uint32_t fps) {
+bool TestPatternProducer::Start(uint32_t width, uint32_t height, uint32_t fps, uint32_t outputWidth,
+                                uint32_t outputHeight) {
     // phonecam-svc (a LocalSystem service) owns ring *creation* -- it needs
     // SeCreateGlobalPrivilege, which this normal interactive process doesn't
     // have (see docs/architecture.md). Attaching to an already-existing
@@ -19,6 +20,7 @@ bool TestPatternProducer::Start(uint32_t width, uint32_t height, uint32_t fps) {
         phonecam::log::Error("TestPatternProducer: failed to open SharedFrameRing (is phonecam-svc running?)");
         return false;
     }
+    ring_.SetTransform(phonecam::shm::Rotation::Deg0, false, outputWidth, outputHeight);
     running_ = true;
     thread_ = std::thread(&TestPatternProducer::Run, this, width, height, fps);
     return true;

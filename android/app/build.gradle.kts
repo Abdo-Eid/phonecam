@@ -18,8 +18,9 @@ android {
         // (unconditionally, no fallback for older devices -- verified while lowering this).
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        // The same number as the release and the Windows installer (PhoneCam.iss).
+        versionCode = 2
+        versionName = "0.9.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

@@ -287,6 +287,21 @@ class CameraCapture(private val context: Context) {
     return Rect(left, top, right, bottom)
   }
 
+  /** Clockwise degrees that make the open lens's frame upright; null while no camera is open. */
+  fun uprightRotation(quarterTurn: Int): Int? {
+    val id = currentCameraId ?: return null
+    return try {
+      val characteristics = cameraManager.getCameraCharacteristics(id)
+      uprightRotation(
+        characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: return null,
+        characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT,
+        quarterTurn,
+      )
+    } catch (_: CameraAccessException) {
+      null
+    }
+  }
+
   private fun pickCameraId(lensFacing: Int): String? =
     cameraManager.cameraIdList.firstOrNull { id ->
       cameraManager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == lensFacing

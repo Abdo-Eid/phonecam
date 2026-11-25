@@ -26,7 +26,7 @@
 ; cycle on this machine (not just re-blessing already-installed state). See docs/build.md.
 
 #define MyAppName "PhoneCam"
-#define MyAppVersion "0.8.0"
+#define MyAppVersion "0.9.0"
 #define MyAppPublisher "PhoneCam (open source)"
 #define MyAppURL "https://github.com/abdoeid/phonecam"
 
@@ -52,8 +52,23 @@ WizardStyle=modern
 ; Needs admin: writing to ProgramData for the vcam DLL, registering it via regsvr32 (HKLM), and
 ; installing/uninstalling the LocalSystem service (windows/svc) all require elevation.
 PrivilegesRequired=admin
+; MFCreateVirtualCamera, the whole point of PhoneCam, exists from Windows 11 (build 22000) on.
+; Without this the app installs on Windows 10 and then can't start.
+MinVersion=10.0.22000
+; An update has to replace files that PhoneCam, the adb server it started, the ring service and
+; Windows' camera service keep open. Restart Manager closes them once the user agrees ("yes" isn't
+; enough: PhoneCam's tray window is message-only, so it never gets the polite close request, and
+; setup gave up after 30 seconds). Settings are saved as they change, so nothing is lost.
+CloseApplications=force
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+
+[InstallDelete]
+; Left behind by versions that had the AOA transport (removed in 0.9.0).
+Type: files; Name: "{app}\libusb-1.0.dll"
+; The only tool that can undo the USB driver those versions could install (--revert-all), so it
+; stays where one is still recorded.
+Type: files; Name: "{app}\phonecam-usbdriver.exe"; Check: NoRecordedUsbDriver
 
 [Files]
 Source: "..\build\host\Release\phonecam-host.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -73,6 +88,9 @@ Name: "{group}\Uninstall PhoneCam"; Filename: "{uninstallexe}"
 
 [Run]
 Filename: "{app}\phonecam-svc.exe"; Parameters: "--install"; Flags: runhidden waituntilterminated; StatusMsg: "Installing PhoneCam background service..."
+; --install only registers it (to start with Windows); without this PhoneCam would not work until
+; the next restart. Already running is not an error worth reporting.
+Filename: "{sys}\sc.exe"; Parameters: "start PhoneCamRingService"; Flags: runhidden waituntilterminated; StatusMsg: "Starting PhoneCam background service..."
 Filename: "regsvr32.exe"; Parameters: "/s ""{commonappdata}\PhoneCam\phonecam-vcam.dll"""; Flags: runhidden waituntilterminated; StatusMsg: "Registering the PhoneCam virtual camera..."
 
 [UninstallRun]
@@ -83,3 +101,9 @@ Filename: "{app}\phonecam-svc.exe"; Parameters: "--uninstall"; Flags: runhidden 
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{commonappdata}\PhoneCam"
+
+[Code]
+function NoRecordedUsbDriver: Boolean;
+begin
+  Result := not FileExists(ExpandConstant('{commonappdata}\PhoneCam\usbdriver_packages.txt'));
+end;

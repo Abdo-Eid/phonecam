@@ -71,9 +71,17 @@ standalone once installed, no PATH setup needed. Installing/uninstalling both re
 installer requests elevation itself) since they touch `HKLM`, `ProgramData`, and the Windows
 service.
 
-The older installer was verified on the development machine, not a fresh Windows
-account. The new USB-only installer has not been rebuilt/deployed in the current
-validation run; see [deployment status](usb-validation-2026-11-08.md#deployment-status-checked-after-validation).
+The 0.9.0 installer starts the ring service, requires Windows 11 (build 22000), and on an
+update closes PhoneCam, the adb server it started, the service and Windows' camera service
+(`CloseApplications=force`; plain `yes` can't close a message-only tray window and aborts).
+It removes the unused `libusb-1.0.dll`, and `phonecam-usbdriver.exe` only where no driver
+of the retired AOA transport is recorded in `usbdriver_packages.txt` -- that tool's
+`--revert-all` is the only way to undo one. Checked as an update on the development
+machine, not on a fresh Windows account; see [plan.md](../plan.md).
+
+If Gradle fails with "Unable to establish loopback connection", Java can't create its local
+sockets in the Temp folder; set
+`JAVA_TOOL_OPTIONS=-Djdk.net.unixdomain.tmpdir=<some other folder>` for that build.
 
 ### Updating an installed Windows host
 
@@ -97,7 +105,8 @@ camera installed:
    v8 control and video against the updated phone app.
 
 This host-only update does not require reinstalling the ring service or
-re-registering the unchanged virtual-camera DLL. For a complete installation,
+re-registering the virtual-camera DLL, but the installed DLL must be at least as new as
+the host (see below). For a complete installation,
 build all Release components and rebuild/run the Inno Setup package instead.
 Building an installer alone still does not install it.
 
@@ -120,8 +129,8 @@ task in `android/app/build.gradle.kts` invoking `flatc --kotlin`) -- no manual s
 ## USB connections and tests
 
 The host starts in automatic mode: it prefers a detected USB-tethered network
-adapter and otherwise uses USB debugging (ADB). The Windows tray menu can select
-either mode explicitly. On the phone, open PhoneCam and connect by either path:
+adapter and otherwise uses USB debugging (ADB). The PhoneCam window can select
+either mode explicitly and remembers it. On the phone, open PhoneCam and connect by either path:
 
 - **USB tethering:** connect the cable and enable USB tethering. Windows uses its
   built-in RNDIS/NCM driver. The host finds the phone at the adapter gateway; no
@@ -144,9 +153,23 @@ Available local checks:
 cd android
 .\gradlew.bat testDebugUnitTest assembleDebug
 cd ..
-cmake --build windows/build --target phonecam-host phonecam-video-tests --config Debug
+cmake --build windows/build --target phonecam-host phonecam-video-tests phonecam-picture-tests --config Debug
 windows/build/host/Debug/phonecam-video-tests.exe
+windows/build/host/Debug/phonecam-picture-tests.exe
 ```
+
+`phonecam-picture-tests` covers framing, NV12 cropping, saved settings/presets and
+camera replay. It writes only to a throwaway `HKCU\Software\PhoneCamTests-<pid>` key.
+
+`phonecam-host.exe --test-pattern 1152x1152` offers one size and fills it with a synthetic
+pattern, to check a size through an app without a phone; without a size it offers the
+built-in list.
+
+Since 2026-11-25 the host and `phonecam-vcam.dll` must be updated together: a new host with
+an older DLL crops for a size the DLL doesn't offer, which shows as black bars.
+
+Only one host can run at a time: exit the installed one before starting a build-folder
+one (older installed hosts predate that check and will not refuse).
 
 `TetheredTcpListenerTest` checks the interface-name allowlist. Device tests are
 needed to validate tether interface detection and end-to-end USB behavior; an
