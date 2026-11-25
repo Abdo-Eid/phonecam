@@ -28,7 +28,7 @@
 #define MyAppName "PhoneCam"
 #define MyAppVersion "0.9.0"
 #define MyAppPublisher "PhoneCam (open source)"
-#define MyAppURL "https://github.com/abdoeid/phonecam"
+#define MyAppURL "https://github.com/Abdo-Eid/phonecam"
 
 [Setup]
 AppId={{04890596-CE0C-4212-9FD1-B5D6CACF020D}

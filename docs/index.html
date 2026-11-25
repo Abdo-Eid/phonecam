@@ -231,6 +231,9 @@ html[data-lang="ar"] .stage-n { direction: ltr; text-align: right; }
 
 /* ---- transports ---------------------------------------------------------- */
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); gap: 1.1rem; }
+/* Two per row: four features read as a pair of pairs instead of three and an orphan. */
+.cards-pair { grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr)); }
+.cards-pair .card p:last-child { margin-bottom: 0; }
 .card {
   border: var(--rule); border-radius: var(--radius); background: var(--card);
   padding: 1.5rem 1.4rem 1.6rem;
@@ -363,6 +366,7 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
     </a>
     <div class="topbar-spacer"></div>
     <nav class="navlinks" aria-label="Sections">
+      <a href="#features"><span class="t-en">Features</span><span class="t-ar">المزايا</span></a>
       <a href="#how"><span class="t-en">How it works</span><span class="t-ar">كيف يعمل</span></a>
       <a href="#transports"><span class="t-en">Transports</span><span class="t-ar">قنوات النقل</span></a>
       <a href="#compare"><span class="t-en">Compare</span><span class="t-ar">مقارنة</span></a>
@@ -403,9 +407,103 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
           </div>
 
       <p class="hero-note">
-        <span class="t-en"><strong>Status:</strong> USB video and controls work on real hardware. An Inno Setup installer is available in source, but fresh-PC installation still needs validation. Building or running a development host does not update an installed copy.</span>
-        <span class="t-ar"><strong>الحالة:</strong> يعمل الفيديو والتحكم عبر USB على عتاد حقيقي. تتوفر شيفرة مُثبِّت Inno Setup، لكن التثبيت على حاسوب نظيف ما زال يحتاج إلى اختبار. بناء نسخة التطوير أو تشغيلها لا يحدّث النسخة المثبّتة.</span>
+        <span class="t-en"><strong>Status:</strong> version 0.9.0 is out, with a Windows 11 installer and the phone app: <a href="https://github.com/Abdo-Eid/phonecam/releases/latest">download it on GitHub</a>. Video, controls, crop and rotation work on real hardware; a first install on a fresh PC has not been checked. Building or running a development host does not update an installed copy.</span>
+        <span class="t-ar"><strong>الحالة:</strong> صدر الإصدار <span class="ltr">0.9.0</span> مع مُثبِّت لويندوز 11 وتطبيق الهاتف: <a href="https://github.com/Abdo-Eid/phonecam/releases/latest">حمّله من GitHub</a>. يعمل الفيديو والتحكم والقصّ والتدوير على عتاد حقيقي، ولم يُختبر بعد التثبيت لأول مرة على حاسوب نظيف. بناء نسخة التطوير أو تشغيلها لا يحدّث النسخة المثبّتة.</span>
       </p>
+  </div>
+</section>
+
+<!-- ===================== FEATURES ===================== -->
+<section id="features">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow"><span class="t-en">Version 0.9.0</span><span class="t-ar">الإصدار <span class="ltr">0.9.0</span></span></p>
+      <h2><span class="t-en">What it does</span><span class="t-ar">ماذا يقدّم</span></h2>
+      <p class="lede" style="margin-top:1rem">
+        <span class="t-en">You choose the picture once, in one small window on the PC. Every video app then receives exactly that.</span>
+        <span class="t-ar">تختار الصورة مرة واحدة، من نافذة صغيرة على الحاسوب، فتستقبلها كل تطبيقات الفيديو كما هي.</span>
+      </p>
+    </div>
+
+    <div class="cards cards-pair">
+      <article class="card" data-rank="primary">
+        <h3><span class="t-en">Built-in crop</span><span class="t-ar">قصّ مدمج</span></h3>
+        <p>
+          <span class="t-en">Pick a shape, then drag the box on the preview or one of its corners. Apps are offered only that size, so OBS and others get your picture with no black bars and nothing left to crop.</span>
+          <span class="t-ar">اختر الشكل، ثم اسحب الإطار فوق المعاينة أو إحدى زواياه. لا يُعرض على التطبيقات إلا هذا المقاس، فيستقبل OBS وغيره صورتك دون أشرطة سوداء ودون حاجة إلى قصّ آخر.</span>
+        </p>
+      </article>
+      <article class="card" data-rank="primary">
+        <h3><span class="t-en">Live preview</span><span class="t-ar">معاينة حيّة</span></h3>
+        <p>
+          <span class="t-en">The window shows everything the phone sees and keeps the part that apps receive bright. It is plain Windows UI: nothing extra to install, and it uses no resources while closed.</span>
+          <span class="t-ar">تعرض النافذة كل ما يراه الهاتف، وتُبقي الجزء الذي تستقبله التطبيقات مضيئًا. هي واجهة ويندوز عادية: لا شيء إضافي يُثبَّت، ولا تستهلك موارد وهي مغلقة.</span>
+        </p>
+      </article>
+      <article class="card" data-rank="primary">
+        <h3><span class="t-en">Follows the phone</span><span class="t-ar">تتبع وضع الهاتف</span></h3>
+        <p>
+          <span class="t-en">Hold the phone upright or sideways and the picture turns to match. An extra turn and mirror are there when you need them.</span>
+          <span class="t-ar">أمسك الهاتف رأسيًا أو أفقيًا فتدور الصورة معه. ويتوفّر تدوير إضافي وعكس للصورة عند الحاجة.</span>
+        </p>
+      </article>
+      <article class="card" data-rank="primary">
+        <h3><span class="t-en">Remembers your setup</span><span class="t-ar">تتذكّر إعداداتك</span></h3>
+        <p>
+          <span class="t-en">Shape, crop, zoom, exposure and focus come back next time, including what the phone itself forgets. Save them as named presets and switch from the tray.</span>
+          <span class="t-ar">يعود الشكل والقصّ والتقريب والتعريض والتركيز في المرة التالية، بما في ذلك ما ينساه الهاتف نفسه. احفظها كإعدادات مسمّاة وبدّل بينها من شريط المهام.</span>
+        </p>
+      </article>
+    </div>
+
+    <div class="table-scroll" style="margin-top:1.6rem">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col"><span class="t-en">Shape</span><span class="t-ar">الشكل</span></th>
+            <th scope="col"><span class="t-en">Full size</span><span class="t-ar">المقاس الكامل</span></th>
+            <th scope="col"><span class="t-en">Lighter size</span><span class="t-ar">المقاس الأخف</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row"><span class="t-en">Follow the phone</span><span class="t-ar">حسب وضع الهاتف</span></th>
+            <td><span class="t-en">Tall while upright, wide while sideways</span><span class="t-ar">رأسي والهاتف قائم، وعريض والهاتف أفقي</span></td>
+            <td><span class="t-en">The same</span><span class="t-ar">كذلك</span></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="t-en">Square</span><span class="t-ar">مربّع</span> <span class="ltr mono">1:1</span></th>
+            <td><span class="ltr mono">1152 × 1152</span></td>
+            <td><span class="ltr mono">768 × 768</span></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="t-en">Wide</span><span class="t-ar">عريض</span> <span class="ltr mono">16:9</span></th>
+            <td><span class="ltr mono">1920 × 1080</span></td>
+            <td><span class="ltr mono">1280 × 720</span></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="t-en">Tall</span><span class="t-ar">رأسي</span> <span class="ltr mono">9:16</span></th>
+            <td><span class="ltr mono">1152 × 2048</span></td>
+            <td><span class="ltr mono">576 × 1024</span></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="t-en">Classic</span><span class="t-ar">تقليدي</span> <span class="ltr mono">4:3</span></th>
+            <td><span class="ltr mono">1408 × 1056</span></td>
+            <td><span class="ltr mono">1024 × 768</span></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="t-en">Portrait</span><span class="t-ar">بورتريه</span> <span class="ltr mono">3:4</span></th>
+            <td><span class="ltr mono">1152 × 1536</span></td>
+            <td><span class="ltr mono">768 × 1024</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="hero-note" style="border-top:none;padding-top:1.2rem;margin-top:0">
+      <span class="t-en"><strong>Limits:</strong> an app already using the camera gets a new shape once you turn the camera off and on in it. A crop is enlarged to the chosen size, so a small one looks softer. Square video was checked in OBS and Cap, on one phone and one PC; tall video inside an app, Zoom and Teams have not been tried.</span>
+      <span class="t-ar"><strong>القيود:</strong> التطبيق الذي يستخدم الكاميرا بالفعل يحصل على الشكل الجديد بعد إيقاف الكاميرا وتشغيلها فيه. تُكبَّر الصورة المقصوصة إلى المقاس المختار، فيبدو القصّ الصغير أقل حدّة. جُرّب الفيديو المربّع في OBS و Cap على هاتف واحد وحاسوب واحد؛ ولم يُجرَّب بعد الفيديو الرأسي داخل تطبيق، ولا Zoom ولا Teams.</span>
+    </p>
   </div>
 </section>
 
@@ -445,12 +543,12 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
       <article class="stage">
         <span class="stage-n">05</span>
         <h3><span class="t-en">Handoff</span><span class="t-ar">التسليم</span></h3>
-        <p><span class="t-en">A shared-memory ring crosses the process and session boundary into Windows' Frame Server, which runs as a service.</span><span class="t-ar">‏ring buffer في ذاكرة مشتركة يصل بين العمليتين إلى Frame Server في ويندوز، وهو يعمل كخدمة.</span></p>
+        <p><span class="t-en">Each frame is cropped to the chosen shape. A shared-memory ring then carries it across the process and session boundary into Windows' Frame Server, which runs as a service.</span><span class="t-ar">يُقصّ كل إطار إلى الشكل المختار، ثم ينقله ring buffer في ذاكرة مشتركة إلى Frame Server في ويندوز، وهو يعمل كخدمة في جلسة أخرى.</span></p>
       </article>
       <article class="stage">
         <span class="stage-n">06</span>
         <h3><span class="t-en">Camera</span><span class="t-ar">الكاميرا</span></h3>
-        <p><span class="t-en">MFCreateVirtualCamera registers a source Windows serves to Media Foundation and DirectShow apps alike.</span><span class="t-ar">يسجّل MFCreateVirtualCamera مصدرًا يقدّمه ويندوز لتطبيقات Media Foundation و DirectShow على حدّ سواء.</span></p>
+        <p><span class="t-en">MFCreateVirtualCamera registers a source Windows serves to Media Foundation and DirectShow apps alike. It offers them only the size you chose.</span><span class="t-ar">يسجّل MFCreateVirtualCamera مصدرًا يقدّمه ويندوز لتطبيقات Media Foundation و DirectShow على حدّ سواء، ولا يعرض عليها إلا المقاس الذي اخترته.</span></p>
       </article>
     </div>
   </div>
@@ -595,7 +693,7 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
 
     <div class="map">
       <div class="map-row"><div class="map-path">android/</div><div class="map-what"><span class="t-en">Kotlin. Camera2 capture, MediaCodec encode, the transports, and the on-phone UI.</span><span class="t-ar">بلغة Kotlin. التقاط عبر Camera2، وترميز عبر MediaCodec، وقنوات النقل، وواجهة الهاتف.</span></div></div>
-      <div class="map-row"><div class="map-path">windows/host/</div><div class="map-what"><span class="t-en">C++. <code>phonecam-host.exe</code> — transports, H.264 decode, the tray UI and its controls.</span><span class="t-ar">بلغة <span class="ltr">C++</span>. ملف <code>phonecam-host.exe</code> — قنوات النقل، وفكّ ترميز H.264، وواجهة شريط المهام وأدواتها.</span></div></div>
+      <div class="map-row"><div class="map-path">windows/host/</div><div class="map-what"><span class="t-en">C++. <code>phonecam-host.exe</code> — transports, H.264 decode, crop, the preview window, saved settings and the tray.</span><span class="t-ar">بلغة <span class="ltr">C++</span>. ملف <code>phonecam-host.exe</code> — قنوات النقل، وفكّ ترميز H.264، والقصّ، ونافذة المعاينة، والإعدادات المحفوظة، وأيقونة شريط المهام.</span></div></div>
       <div class="map-row"><div class="map-path">windows/vcam/</div><div class="map-what"><span class="t-en">C++/COM. The <code>MFCreateVirtualCamera</code> media source Windows loads into its own Frame Server.</span><span class="t-ar">بلغة <span class="ltr">C++/COM</span>. مصدر الوسائط <code>MFCreateVirtualCamera</code> الذي يُحمّله ويندوز داخل Frame Server.</span></div></div>
       <div class="map-row"><div class="map-path">windows/common/</div><div class="map-what"><span class="t-en">Shared C++: the cross-process frame ring, wire framing, logging.</span><span class="t-ar">شيفرة <span class="ltr">C++</span> مشتركة: ring buffer الإطارات بين العمليات، وتأطير البيانات، والتسجيل.</span></div></div>
       <div class="map-row"><div class="map-path">windows/installer/</div><div class="map-what"><span class="t-en">Inno Setup packaging for the host, ring service, virtual camera, and bundled ADB.</span><span class="t-ar">حزمة Inno Setup لتثبيت برنامج الحاسوب وخدمة الذاكرة المشتركة والكاميرا الافتراضية وADB المرفق.</span></div></div>
@@ -626,8 +724,14 @@ footer a:hover, footer a:focus-visible { border-bottom-color: var(--tally); }
 
       <article class="issue">
         <h3><span class="t-en">Validate clean installs and upgrades</span><span class="t-ar">اختبار التثبيت النظيف والترقيات</span></h3>
-        <p><span class="t-en">The installer packages Release output, not the Debug host used during development. Rebuild every packaged component, then test installation and upgrades on a clean Windows account. Running a new binary from the checkout does not update the installed shortcut.</span><span class="t-ar">يستخدم المُثبِّت مخرجات Release، لا برنامج Debug المستخدم أثناء التطوير. أعد بناء كل المكوّنات المرفقة، ثم اختبر التثبيت والترقية على حساب ويندوز نظيف. تشغيل نسخة جديدة من المستودع لا يحدّث اختصار النسخة المثبّتة.</span></p>
+        <p><span class="t-en">The 0.9.0 installer has only been run as an update, on the development PC. A first install, uninstalling, a clean Windows account and other PCs still need testing. It packages Release output, so rebuild every component first; running a new binary from the checkout does not update the installed shortcut.</span><span class="t-ar">لم يُشغَّل مُثبِّت الإصدار <span class="ltr">0.9.0</span> إلا كترقية على حاسوب التطوير. ما زال التثبيت لأول مرة، وإزالة التثبيت، وحساب ويندوز نظيف، وأجهزة أخرى بحاجة إلى اختبار. يستخدم المُثبِّت مخرجات Release، فأعد بناء كل المكوّنات أولًا؛ تشغيل نسخة جديدة من المستودع لا يحدّث اختصار النسخة المثبّتة.</span></p>
         <div class="tags"><span class="tag" data-t="start"><span class="t-en">Good first task</span><span class="t-ar">مناسبة للبداية</span></span><span class="tag">Inno Setup</span></div>
+      </article>
+
+      <article class="issue">
+        <h3><span class="t-en">Sharper crops</span><span class="t-ar">قصّ أكثر حدّة</span></h3>
+        <p><span class="t-en">The phone always sends 1080p in 16:9, so a crop is enlarged. Its camera offers more, including 4:3 sizes that also see wider while upright. Changing the capture size needs a restart path on the phone that does not stop its service.</span><span class="t-ar">يرسل الهاتف دائمًا دقة 1080p بنسبة <span class="ltr">16:9</span>، فتُكبَّر الصورة المقصوصة. تقدّم كاميرته أكثر من ذلك، ومنها مقاسات <span class="ltr">4:3</span> ترى مساحة أعرض والهاتف قائم. يحتاج تغيير مقاس الالتقاط إلى إعادة تشغيل على الهاتف لا توقف خدمته.</span></p>
+        <div class="tags"><span class="tag" data-t="med"><span class="t-en">Medium</span><span class="t-ar">متوسط</span></span><span class="tag">Kotlin</span><span class="tag">C++</span></div>
       </article>
 
       <article class="issue">
